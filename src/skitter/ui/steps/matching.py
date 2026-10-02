@@ -1,12 +1,17 @@
 """Step 4: choose a tile for every region and preview the mosaic.
 
 Matching runs in the background (see core/matching). The preview draws each
-region's chosen tile crop, tinted as the settings ask, from thumbnails packed
-into texture atlases. A heat map shows where the mosaic differs most from
-the image as seen from a distance.
+region's chosen tile crop, tinted as the settings ask: first from the
+library's thumbnails, then, once a background job has read them from the
+original files, from crops at the region's size in mosaic pixels (reduced
+uniformly if they would exceed DETAIL_TEXELS). A heat map shows where the
+mosaic differs most from the image as seen from a distance.
 """
 
+from dataclasses import dataclass
+
 import numpy as np
+from PIL import Image
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -19,7 +24,9 @@ from PySide6.QtWidgets import (
 )
 
 from skitter.core.matching.matcher import MatchResult
-from skitter.ui.render.atlas import build_atlas
+from skitter.core.tiles.render import cut, render_crops
+from skitter.ui.jobs import Job, JobCancelled
+from skitter.ui.render.atlas import PackedAtlas, build_atlas, pack_images
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.widgets.image_viewer import ImageViewer
@@ -30,6 +37,54 @@ TILES, HEAT, SOURCE = "tiles", "heat", "source"
 DISPLAY_MODES = ((TILES, "Tiles"), (HEAT, "Error heat map"), (SOURCE, "Source image"))
 HEAT_MAX_DE = 25.0  # ΔE shown fully red
 HEAT_ALPHA = 0.75
+DETAIL_TEXELS = 96 * 2**20  # full-detail budget: about 400 MB of GPU memory (RGBA) + mipmaps
+DETAIL_PAGE = 4096  # atlas page size, texels
+
+
+@dataclass(frozen=True)
+class TileDetail:
+    """Full-detail crops, packed for the GPU."""
+
+    atlas: PackedAtlas
+    scale: float  # texels per mosaic pixel (1.0 = full size)
+    failed: int  # files that could not be read (their thumbnails are shown)
+
+
+def detail_sizes(sizes, budget: int = DETAIL_TEXELS, page: int = DETAIL_PAGE):
+    """Pixel sizes (w, h) for crops of the given mosaic sizes, and the uniform scale used.
+
+    Full size unless the total would exceed budget texels; no crop exceeds page.
+    """
+    sizes = np.asarray(sizes, dtype=np.float64).reshape(-1, 2)
+    area = float(np.prod(np.ceil(sizes), axis=1).sum())
+    scale = min(1.0, (budget / area) ** 0.5) if area else 1.0
+    scaled = sizes * scale
+    scaled *= np.minimum(1.0, page / scaled.max(axis=1, initial=1))[:, None]
+    return np.clip(np.ceil(scaled - 1e-6), 1, page).astype(np.int64), scale
+
+
+def build_detail(paths, rects, sizes, thumbs, thumb_size, progress, cancelled) -> TileDetail:
+    """Read and pack full-detail crops (runs in a background job).
+
+    paths, rects, sizes describe each distinct crop; thumbs / thumb_size are
+    each crop's library thumbnail, shown instead when its file can't be read.
+    """
+    pixels, scale = detail_sizes(sizes)
+
+    def report(done, total):
+        progress(f"Loading full-size tiles: {done:,} of {total:,} files", done / max(total, 1))
+
+    images = render_crops(paths, rects, pixels, progress=report, cancelled=cancelled)
+    if images is None:
+        raise JobCancelled
+    failed = set()
+    for i, image in enumerate(images):
+        if isinstance(image, str):
+            failed.add(paths[i])
+            tw, th = thumb_size[i]
+            images[i] = cut(Image.fromarray(thumbs[i, :th, :tw]), rects[i], pixels[i])
+    progress("Packing tiles…", None)
+    return TileDetail(pack_images(images, DETAIL_PAGE), scale, len(failed))
 
 
 def heat_colors(error: np.ndarray) -> np.ndarray:
@@ -55,6 +110,7 @@ class MatchingStep(StepPage):
         self._tile_layer: SpriteLayer | None = None
         self._heat_layer: SpriteLayer | None = None
         self._shown: MatchResult | None = None
+        self._detail_job: Job | None = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -146,8 +202,14 @@ class MatchingStep(StepPage):
         for value, label in DISPLAY_MODES:
             self.display_mode.addItem(label, value)
         self.display_mode.currentIndexChanged.connect(self._apply_display)
+        self._detail = _muted(QLabel("—"))
+        self._detail.setToolTip(
+            "Tiles first show as small thumbnails, then at full size once read from their files."
+        )
         group = QGroupBox("Display")
-        QFormLayout(group).addRow("Show:", self.display_mode)
+        form = QFormLayout(group)
+        form.addRow("Show:", self.display_mode)
+        form.addRow("Tile detail:", self._detail)
         return group
 
     # Actions
@@ -164,6 +226,11 @@ class MatchingStep(StepPage):
     def on_enter(self) -> None:
         self._sync_image()
         self._refresh()
+
+    def shutdown(self) -> None:
+        if self._detail_job is not None:
+            self._detail_job.cancel()
+            self._detail_job.wait(timeout=10)
 
     # Display
 
@@ -222,6 +289,10 @@ class MatchingStep(StepPage):
         self._tile_layer = self._heat_layer = None
         self._shown = result
         self._show_stats(result)
+        if self._detail_job is not None:
+            self._detail_job.cancel()
+            self._detail_job = None
+        self._detail.setText("—")
         library = self.session.library
         if result is None or library is None:
             return
@@ -254,6 +325,50 @@ class MatchingStep(StepPage):
         x0, y0 = bounds[:, :2].min(axis=0)
         x1, y1 = bounds[:, 2:].max(axis=0)
         self.viewer.set_content_bounds((x0, y0, x1 - x0, y1 - y0))
+        self._apply_display()
+        self._load_detail(result, order)
+
+    def _load_detail(self, result: MatchResult, order: np.ndarray) -> None:
+        """Replace the thumbnail tiles with full-size crops read in the background."""
+        library = self.session.library
+        slot = result.tile[order]
+        rect = result.rect[order].astype(np.float64)
+        size = np.ceil(result.regions.size[order] - 1e-6)
+        # Regions showing the same crop at the same size share one image.
+        keys, image = np.unique(np.column_stack([slot, rect, size]), axis=0, return_inverse=True)
+        image = image.reshape(-1)
+        crop_slot = keys[:, 0].astype(np.int64)
+        paths = library.paths(crop_slot)
+        thumbs = np.asarray(library.thumbs[crop_slot])  # read here: the library isn't threadsafe
+        thumb_size = library.thumb_size[crop_slot]
+
+        def work(progress, cancelled):
+            return build_detail(paths, keys[:, 1:5], keys[:, 5:7], thumbs, thumb_size,
+                                progress, cancelled)  # fmt: skip
+
+        job = Job(work, parent=self)
+        job.progress.connect(lambda message, _: self._detail.setText(message))
+        job.finished.connect(lambda detail: self._show_detail(job, detail, image, order))
+        job.failed.connect(lambda message: self._detail.setText(f"Thumbnails ({message})"))
+        self._detail_job = job
+        self._detail.setText("Loading full-size tiles…")
+        job.start()
+
+    def _show_detail(self, job: Job, detail: TileDetail, image, order) -> None:
+        if job is not self._detail_job or self._tile_layer is None:
+            return  # a newer result replaced the one this job loaded
+        self._detail_job = None
+        result = self._shown
+        tiles = self._tile_layer.instances.copy()
+        tiles["layer"], tiles["uv"] = detail.atlas.locate(image, result.mirrored[order])
+        canvas = self.viewer.canvas
+        index = canvas.layers.index(self._tile_layer)
+        canvas.remove_layer(self._tile_layer)
+        self._tile_layer = canvas.add_layer(SpriteLayer(detail.atlas.pages, tiles), index)
+        text = "Full size" if detail.scale >= 1 else f"Reduced to {detail.scale:.0%} (memory)"
+        if detail.failed:
+            text += f"; {detail.failed:,} unreadable files show thumbnails"
+        self._detail.setText(text)
         self._apply_display()
 
     def _apply_display(self) -> None:

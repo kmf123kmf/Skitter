@@ -5,6 +5,8 @@ the tiles of a large mosaic, so tile thumbnails are packed into square pages
 (cells in a grid), and each sprite shows its own cell through its `uv` rect.
 Cells shrink when many tiles are used, to keep GPU memory bounded (each page
 is about 16 MB on the GPU).
+
+`pack_images` packs images of any sizes instead (full-detail tile crops).
 """
 
 from dataclasses import dataclass
@@ -32,18 +34,71 @@ class Atlas:
         i = np.searchsorted(self.slots, np.asarray(slots, dtype=np.int64))
         rects = np.asarray(rects, dtype=np.float64)
         size = self.size[i].astype(np.float64)
-        x0 = self.origin[i, 0] + rects[:, 0] * size[:, 0]
-        x1 = self.origin[i, 0] + rects[:, 2] * size[:, 0]
-        y0 = self.origin[i, 1] + rects[:, 1] * size[:, 1]
-        y1 = self.origin[i, 1] + rects[:, 3] * size[:, 1]
-        # Keep half a texel inside, so filtering never reads the neighboring cell.
-        inset_x = np.minimum(0.5, (x1 - x0) / 2)
-        inset_y = np.minimum(0.5, (y1 - y0) / 2)
-        uv = np.stack([x0 + inset_x, y0 + inset_y, x1 - inset_x, y1 - inset_y], axis=1) / PAGE
-        if mirrored is not None:
-            m = np.asarray(mirrored, bool)
-            uv[m] = uv[m][:, [2, 1, 0, 3]]
-        return self.page[i].astype(np.float32), uv.astype(np.float32)
+        origin = self.origin[i] + rects[:, :2] * size
+        span = (rects[:, 2:] - rects[:, :2]) * size
+        return self.page[i].astype(np.float32), _uv(origin, span, PAGE, mirrored)
+
+
+def _uv(origin, size, page_size, mirrored=None) -> np.ndarray:
+    """(u0, v0, u1, v1) of texel rects, half a texel inside so filtering stays in."""
+    x0, y0 = origin[:, 0], origin[:, 1]
+    x1, y1 = x0 + size[:, 0], y0 + size[:, 1]
+    inset_x = np.minimum(0.5, (x1 - x0) / 2)
+    inset_y = np.minimum(0.5, (y1 - y0) / 2)
+    uv = np.stack([x0 + inset_x, y0 + inset_y, x1 - inset_x, y1 - inset_y], axis=1) / page_size
+    if mirrored is not None:
+        m = np.asarray(mirrored, bool)
+        uv[m] = uv[m][:, [2, 1, 0, 3]]
+    return uv.astype(np.float32)
+
+
+@dataclass(frozen=True)
+class PackedAtlas:
+    """Images of any sizes packed into square RGBA pages (shelf packing)."""
+
+    pages: np.ndarray  # (P, S, S, 4) uint8
+    page: np.ndarray  # (N,) page of each image
+    origin: np.ndarray  # (N, 2) texel (x, y) of each image's corner
+    size: np.ndarray  # (N, 2) texels (w, h)
+
+    def locate(self, index, mirrored=None) -> tuple[np.ndarray, np.ndarray]:
+        """Texture layer and (u0, v0, u1, v1) of the given images; mirrored swaps u0 and u1."""
+        i = np.asarray(index, dtype=np.int64)
+        uv = _uv(self.origin[i].astype(np.float64), self.size[i], self.pages.shape[1], mirrored)
+        return self.page[i].astype(np.float32), uv
+
+
+def pack_images(images, max_page: int = 4096) -> PackedAtlas:
+    """Pack (h, w, 3) uint8 images, each at most max_page on a side.
+
+    Pages are the smallest power of two that holds everything (up to max_page),
+    so a few small images don't take a full-size page.
+    """
+    size = np.array([(im.shape[1], im.shape[0]) for im in images], np.int64).reshape(-1, 2)
+    if len(size) and size.max() > max_page:
+        raise ValueError(f"image larger than the {max_page} px atlas page")
+    need = max(np.sqrt(np.prod(size, axis=1).sum() * 1.15), size.max(initial=1), 64)
+    side = min(max_page, 1 << (int(np.ceil(need)) - 1).bit_length())
+
+    order = np.lexsort((-size[:, 0], -size[:, 1]))  # tallest first: shelves waste little
+    page = np.zeros(len(size), np.int64)
+    origin = np.zeros((len(size), 2), np.int64)
+    p = x = y = shelf = 0
+    for i in order:
+        w, h = size[i]
+        if x + w > side:  # next shelf
+            x, y, shelf = 0, y + shelf, 0
+        if y + h > side:  # next page
+            p, x, y, shelf = p + 1, 0, 0, 0
+        page[i], origin[i] = p, (x, y)
+        x += w
+        shelf = max(shelf, h)
+    pages = np.zeros((p + 1, side, side, 4), np.uint8)
+    pages[..., 3] = 255
+    for i, im in enumerate(images):
+        (x, y), (w, h) = origin[i], size[i]
+        pages[page[i], y : y + h, x : x + w, :3] = im
+    return PackedAtlas(pages, page, origin, size)
 
 
 def cell_size(count: int) -> int:

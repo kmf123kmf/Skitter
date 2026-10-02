@@ -111,3 +111,28 @@ def test_cancel_stops_reading(tmp_path):
     assert lib.update(workers=0).added == 10 - read  # the rest, on the next update
     assert len(lib) == 10
     lib.close()
+
+
+def test_render_crops_cuts_each_crop_at_its_size(tmp_path):
+    from skitter.core.tiles.render import render_crops
+
+    # Left half red, right half blue, 400 x 200, stored turned (EXIF 6: upright 200 x 400).
+    raw = np.zeros((200, 400, 3), np.uint8)
+    raw[:, :200] = (255, 0, 0)
+    raw[:, 200:] = (0, 0, 255)
+    turned = tmp_path / "turned.jpg"
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    Image.fromarray(raw).save(turned, exif=exif, quality=95)
+    plain = tmp_path / "plain.png"
+    Image.fromarray(raw).save(plain)
+
+    paths = [str(plain), str(plain), str(turned), str(tmp_path / "gone.png")]
+    rects = [[0, 0, 0.5, 1], [0.5, 0, 1, 1], [0, 0, 1, 0.5], [0, 0, 1, 1]]
+    sizes = [[50, 50], [30, 60], [40, 40], [8, 8]]
+    left, right, top, missing = render_crops(paths, rects, sizes, workers=0)
+    assert left.shape == (50, 50, 3) and right.shape == (60, 30, 3)
+    assert left[:, :-3, 0].min() > 250 and right[:, 3:, 2].min() > 250  # edges blend a little
+    # Upright, the turned image's top half is its stored left half (red).
+    assert top.shape == (40, 40, 3) and top[5:-5, 5:-5, 0].min() > 200
+    assert isinstance(missing, str)

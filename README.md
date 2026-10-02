@@ -159,6 +159,7 @@ Matching (`core/matching`, Qt-free) gives every visible region a tile crop:
 
 - Tinting moves only a tile's average color toward its region's (presets None, Subtle and Custom); tiles are never blended with the source.
 - The Matching tab previews the result with thumbnails packed into texture atlases (`ui/render/atlas.py`; each sprite's `uv` selects its cell and its `offset` applies the tint). It also has an error heat map and the statistics above.
+  - A background job then reads each used tile from its original file and cuts its crop at the region's size in mosaic pixels (`core/tiles/render.py`, process pool, JPEGs decoded at reduced scale). The crops are shelf-packed into atlas pages (`pack_images`) and replace the thumbnails. Regions showing the same crop at the same size share one image. If the total would exceed `DETAIL_TEXELS` (about 400 MB of GPU memory), every crop is scaled down by the same factor. Unreadable files fall back to their thumbnails.
 - `scripts/bench_matching.py` benchmarks index build, search accuracy and speed, and assignment at library scale.
 
 ## Layout
@@ -177,6 +178,7 @@ src/skitter/
       library.py    on-disk cache: sqlite metadata + memory-mapped thumbnails
       ingest.py     parallel, reduced-scale thumbnail decoding
       crops.py      aspect classes and aspect-guided crop windows
+      render.py     full-detail crops read from the original tile files
       descriptors.py  OKLab grid-pyramid descriptors of tile crops
     matching/       region-to-tile matching
       targets.py    region descriptors with visibility masks
@@ -216,7 +218,7 @@ src/skitter/
     render/
       camera.py     2D pan/zoom math
       sprites.py    SpriteLayer data and instanced renderer
-      atlas.py      thumbnail texture atlases
+      atlas.py      texture atlases: thumbnail cells, packed full-detail crops
   resources/
     shaders/        GLSL sources
 tests/              pytest suite (headless; Qt widgets run offscreen)

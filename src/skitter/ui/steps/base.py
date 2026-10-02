@@ -48,6 +48,9 @@ class StepPage(QWidget):
     def on_leave(self) -> None:
         """Called when another tab becomes current."""
 
+    def shutdown(self) -> None:
+        """Called when the window closes: stop any background work of the step's own."""
+
 
 def side_panel(*widgets: QWidget, stretch_last: bool = False) -> QWidget:
     """Fixed-width settings panel shown to the right of a step's main view.

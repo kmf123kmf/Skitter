@@ -154,6 +154,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event) -> None:
         self.session.cancel_job()  # stop background work before the window goes
+        for step in self.steps:
+            step.shutdown()
         self.session.wait_for_job(timeout=10)
         super().closeEvent(event)
 
