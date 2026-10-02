@@ -65,3 +65,35 @@ def test_new_source_resets_edits(session):
     session.set_source("other.png", np.zeros((5, 5, 3), np.uint8))
     assert session.project.source_edits == []
     assert not session.can_undo and not session.can_redo
+
+
+def test_commit_snapshots_read_only_copy(session):
+    committed = record(session.source_committed)
+    assert not session.source_is_committed
+    assert session.commit_source()
+    final = session.project.source_final
+    assert np.array_equal(final, session.project.source_image)
+    assert final is not session.project.source_image
+    assert not final.flags.writeable
+    assert session.source_is_committed and len(committed) == 1
+
+
+def test_commit_unchanged_is_noop(session):
+    session.commit_source()
+    committed = record(session.source_committed)
+    assert not session.commit_source()
+    assert committed == []
+
+
+def test_edits_invalidate_commit_until_undone(session):
+    session.commit_source()
+    session.apply_edit(FlipHorizontal())
+    assert not session.source_is_committed
+    session.undo()
+    assert session.source_is_committed  # back to exactly what was committed
+
+
+def test_reloading_source_invalidates_commit(session):
+    session.commit_source()
+    session.set_source("photo.png", session.project.source_original)
+    assert not session.source_is_committed

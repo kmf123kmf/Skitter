@@ -7,6 +7,7 @@ from PySide6.QtCore import QObject, Signal
 
 from skitter.core.edits import Edit, apply_edits
 from skitter.core.project import Project
+from skitter.core.slicing import RegionSet, SliceContext, SlicingError, StageResult
 
 
 class Session(QObject):
@@ -18,11 +19,18 @@ class Session(QObject):
 
     source_changed = Signal()  # a new source image was loaded
     source_edited = Signal(object, bool)  # (edit, undone); edit is None after revert
+    source_committed = Signal()  # project.source_final changed; later steps must refresh
+    slicing_changed = Signal()  # project.regions recomputed (see slicing_error)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.project = Project()
         self._redo: list[Edit] = []
+        self._source_loads = 0  # identifies the loaded original
+        self._committed_key: tuple | None = None
+        self._slice_context: SliceContext | None = None
+        self._slicing_cache: list[StageResult] = []
+        self.slicing_error: str | None = None
 
     def set_source(self, path: Path, image: np.ndarray) -> None:
         project = self.project
@@ -31,7 +39,65 @@ class Session(QObject):
         project.source_edits = []
         project.source_image = image
         self._redo.clear()
+        self._source_loads += 1
         self.source_changed.emit()
+
+    # Committing the source
+
+    def _source_key(self) -> tuple:
+        return (self._source_loads, tuple(self.project.source_edits))
+
+    @property
+    def source_is_committed(self) -> bool:
+        """Whether source_final matches the current loaded image and edits."""
+        return self.project.has_source and self._committed_key == self._source_key()
+
+    def commit_source(self) -> bool:
+        """Snapshot the edited source as project.source_final.
+
+        Returns True if the final image changed (and source_committed was
+        emitted); committing an unchanged image leaves later steps' work intact.
+        """
+        if not self.project.has_source or self.source_is_committed:
+            return False
+        final = np.array(self.project.source_image, dtype=np.uint8, order="C", copy=True)
+        final.setflags(write=False)
+        self.project.source_final = final
+        self._committed_key = self._source_key()
+        self._slice_context = SliceContext(final)
+        self._slicing_cache = []
+        self._evaluate_slicing()
+        self.source_committed.emit()
+        return True
+
+    # Slicing
+
+    def slicing_edited(self) -> None:
+        """Re-run slicing after project.slicing_plan (stages or parameters) changed."""
+        self._evaluate_slicing()
+
+    def _evaluate_slicing(self) -> None:
+        project = self.project
+        if self._slice_context is None:
+            project.regions = None
+        else:
+            try:
+                self._slicing_cache = project.slicing_plan.evaluate(
+                    self._slice_context, self._slicing_cache
+                )
+            except SlicingError as exc:
+                self.slicing_error = str(exc)
+                self._slicing_cache = []
+                project.regions = None
+            else:
+                self.slicing_error = None
+                ctx = self._slice_context
+                project.regions = (
+                    self._slicing_cache[-1].regions
+                    if self._slicing_cache
+                    else RegionSet.covering(ctx.width, ctx.height)
+                )
+        self.slicing_changed.emit()
 
     # Source edits
 

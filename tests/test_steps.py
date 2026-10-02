@@ -2,21 +2,17 @@
 
 import numpy as np
 import pytest
+from PySide6.QtCore import Qt
 
 from skitter.core.edits import Crop
 from skitter.core.imaging import save_image
 
 
 @pytest.fixture
-def window(qapp, monkeypatch):
-    from skitter.ui import main_window
-    from skitter.ui.steps.base import StepPage
+def window(qapp):
+    from skitter.ui.main_window import MainWindow
 
-    class Second(StepPage):
-        title = "Second"
-
-    monkeypatch.setattr(main_window, "STEPS", [*main_window.STEPS, Second])
-    win = main_window.MainWindow()
+    win = MainWindow()
     yield win
     win.deleteLater()
 
@@ -39,21 +35,63 @@ def source(window, image_file):
     return step
 
 
-def test_source_is_first_tab(window):
-    assert window.tabs.tabText(0) == "Source"
+def test_tabs_in_workflow_order(window):
+    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Source", "Slicing"]
 
 
-def test_later_steps_locked_until_source_chosen(window, image_file):
+def test_next_unavailable_until_source_loaded(window, image_file):
     from skitter.ui.steps.source import SourceStep
 
-    assert window.tabs.isTabEnabled(0)
-    assert not window.tabs.isTabEnabled(1)
+    assert not window.next_button.isEnabled()
+    assert window.next_button.text() == "Next: Slicing"
+    assert window.back_button.isHidden()
 
-    assert window.step(SourceStep).load_file(image_file)
-
-    assert window.tabs.isTabEnabled(1)
-    assert window.session.project.source_image.shape == (30, 40, 3)
+    window.step(SourceStep).load_file(image_file)
+    assert window.next_button.isEnabled()
+    assert not window.tabs.isTabEnabled(1)  # loading alone doesn't finish the step
     assert window.windowTitle() == "Skitter — photo.png"
+
+
+def test_next_commits_source_and_opens_slicing(window, source):
+    from skitter.ui.steps.slicing import SlicingStep
+
+    source.flip_h_action.trigger()
+    window.next_button.click()
+
+    final = window.session.project.source_final
+    assert final[0, 0, 0] == 0  # the flip is baked in
+    assert window.tabs.currentWidget() is window.step(SlicingStep)
+    assert window.step(SlicingStep).viewer.image is final
+    assert window.step(SlicingStep)._size.text() == "40 × 30 px"
+    assert window.next_button.isHidden()  # last step
+    assert not window.back_button.isHidden()
+
+    window.back_button.click()
+    assert window.tabs.currentWidget() is source
+
+
+def test_editing_after_commit_locks_slicing_until_next(window, source):
+    window.next_button.click()
+    window.back_button.click()
+
+    source.rotate_right_action.trigger()
+    assert not window.tabs.isTabEnabled(1)
+    source.undo_action.trigger()
+    assert window.tabs.isTabEnabled(1)  # unchanged from the committed image
+
+    source.rotate_right_action.trigger()
+    window.next_button.click()
+    assert window.session.project.source_final.shape == (40, 30, 3)
+    assert window.tabs.currentIndex() == 1
+
+
+def test_next_disabled_while_cropping(window, source):
+    source.crop_action.trigger()
+    assert not window.next_button.isEnabled()
+    window.go_next()
+    assert window.tabs.currentIndex() == 0
+    source.cancel_crop()
+    assert window.next_button.isEnabled()
 
 
 def test_source_panel_shows_image_info(source):
@@ -66,9 +104,9 @@ def test_tab_change_calls_enter_and_leave(window, source):
     calls = []
     first, second = window.steps
     first.on_leave = lambda: calls.append("leave source")
-    second.on_enter = lambda: calls.append("enter second")
-    window.tabs.setCurrentIndex(1)
-    assert calls == ["leave source", "enter second"]
+    second.on_enter = lambda: calls.append("enter slicing")
+    window.next_button.click()
+    assert calls == ["leave source", "enter slicing"]
 
 
 def test_edit_actions_update_image_viewer_and_history(source):
@@ -133,3 +171,126 @@ def test_zoom_helpers():
     assert parse_percent("abc") is None
     assert format_percent(5.25) == "5.2%"
     assert format_percent(66.67) == "67%"
+
+
+@pytest.fixture
+def slicing(window, source, qapp):
+    from skitter.ui.steps.slicing import SlicingStep
+
+    window.next_button.click()
+    return window.step(SlicingStep)
+
+
+def flush(qapp):
+    qapp.processEvents()  # runs the coalesced recompute timer
+
+
+def test_slicing_shows_default_grid(slicing):
+    regions = slicing.session.project.regions
+    assert len(regions) == 24 * 18  # 40x30 image, square cells
+    assert slicing._count.text() == f"{len(regions):,}"
+    assert slicing.overlay.regions is regions
+    assert slicing._stages.count() == 1
+    assert slicing._stages.item(0).text() == "Grid — 24 columns, square cells"
+    assert slicing.is_complete()
+
+
+def test_param_form_edits_recompute_regions(slicing, qapp):
+    slicing.form.editor("columns").widget.setValue(4)
+    flush(qapp)
+    assert len(slicing.session.project.regions) == 4 * 3
+    assert slicing._stages.item(0).text() == "Grid — 4 columns, square cells"
+
+    rows = slicing.form.editor("rows").widget
+    assert not rows.isEnabled()  # inactive while square cells is on
+    slicing.form.editor("square_cells").widget.setChecked(False)
+    assert rows.isEnabled()
+    rows.setValue(2)
+    flush(qapp)
+    assert len(slicing.session.project.regions) == 8
+
+
+def test_add_reorder_disable_remove_stages(slicing, qapp):
+    from skitter.core.slicing.operations import GapAdjust, GridSlicer
+
+    gap_action = next(a for a in slicing.add_menu.actions() if a.text() == "Gap")
+    gap_action.trigger()
+    flush(qapp)
+    assert [type(s.operation) for s in slicing.plan.stages] == [GridSlicer, GapAdjust]
+    assert slicing.current_row() == 1
+    assert slicing._settings_group.title() == "Gap Settings"
+    assert slicing.session.project.regions.size[0, 0] < 40 / 24
+
+    slicing.move_stage(-1)
+    assert [type(s.operation) for s in slicing.plan.stages] == [GapAdjust, GridSlicer]
+
+    slicing._stages.item(1).setCheckState(Qt.CheckState.Unchecked)  # disable the grid
+    flush(qapp)
+    assert len(slicing.session.project.regions) == 1
+
+    slicing._stages.setCurrentRow(1)
+    slicing.remove_stage()
+    flush(qapp)
+    assert len(slicing.plan.stages) == 1 and len(slicing.session.project.regions) == 1
+
+
+def test_slicing_error_is_reported(slicing, qapp):
+    slicing.form.editor("square_cells").widget.setChecked(False)
+    slicing.form.editor("columns").widget.setValue(1000)
+    slicing.form.editor("rows").widget.setValue(1000)
+    flush(qapp)
+    assert slicing.session.project.regions is None
+    assert "limit" in slicing._error.text()
+    assert not slicing._error.isHidden()
+    assert not slicing.is_complete()
+
+
+def test_recommitted_source_keeps_plan_and_reslices(window, slicing, qapp):
+    from skitter.ui.steps.source import SourceStep
+
+    slicing.form.editor("columns").widget.setValue(4)
+    flush(qapp)
+    window.back_button.click()
+    window.step(SourceStep).rotate_right_action.trigger()
+    window.next_button.click()
+    assert slicing.plan.stages[0].operation.columns == 4
+    assert len(slicing.session.project.regions) == 4 * 5  # now 30x40, portrait
+
+
+def test_overlay_draws_in_stacking_order():
+    from skitter.core.slicing import RegionSet
+    from skitter.ui.widgets.region_overlay import regions_to_instances
+
+    regions = RegionSet.from_arrays([[1, 1], [2, 2], [3, 3]], (1, 1), z=[2, 0, 1])
+    instances = regions_to_instances(regions, (1, 1, 1))
+    assert instances["pos"][:, 0].tolist() == [2, 3, 1]  # bottom first
+
+
+def test_pile_hover_reports_topmost_region(slicing, qapp):
+    from skitter.core.slicing import Stage
+    from skitter.core.slicing.operations import PileSlicer
+
+    slicing.plan.stages[:] = [Stage(PileSlicer(photo_size=12, rotation=20))]
+    slicing._refresh_stages(select=0)
+    slicing.session.slicing_edited()
+    regions = slicing.session.project.regions
+    assert len(regions) > 4
+
+    slicing.viewer.canvas.cursor_moved.emit(20.0, 15.0)
+    expected = regions.hit_test(20.0, 15.0)
+    assert slicing.overlay.highlighted == expected
+    assert f"of {len(regions):,}" in slicing._hover.text()
+    slicing.viewer.canvas.cursor_left.emit()
+    assert slicing.overlay.highlighted is None
+
+
+def test_display_modes_control_overlay_and_dimming(slicing):
+    from skitter.ui.widgets.region_overlay import OUTLINES
+
+    assert slicing.overlay._layer.project_texture  # stacked by default
+    assert slicing.viewer.image_layer.instances["tint"][0, 3] > 0  # uncovered areas dimmed
+    slicing.display_mode.setCurrentIndex(1)  # outlines
+    assert slicing.overlay.mode == OUTLINES and not slicing.overlay._layer.project_texture
+    assert slicing.viewer.image_layer.instances["tint"][0, 3] == 0
+    slicing.display_mode.setCurrentIndex(2)  # hidden
+    assert not slicing.overlay.visible

@@ -1,21 +1,26 @@
 """Base class for workflow step pages."""
 
-from PySide6.QtCore import Signal
-from PySide6.QtWidgets import QWidget
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtWidgets import QFrame, QScrollArea, QVBoxLayout, QWidget
 
 from skitter.ui.session import Session
+
+SIDE_PANEL_WIDTH = 300
 
 
 class StepPage(QWidget):
     """One tab in the mosaic workflow.
 
-    Subclasses set `title`, build their UI, and emit `completion_changed`
-    whenever `is_complete()` may have changed.
+    Subclasses set `title` and build their UI. The main window's Next button
+    calls `advance()` to commit the step's work and then moves to the next
+    tab; tabs after a step unlock only while it `is_complete()`. Emit
+    `state_changed` whenever `is_complete()` or `can_advance()` may have
+    changed.
     """
 
     title = ""
 
-    completion_changed = Signal()
+    state_changed = Signal()
     status_message = Signal(str)
 
     def __init__(self, session: Session, parent=None):
@@ -23,11 +28,44 @@ class StepPage(QWidget):
         self.session = session
 
     def is_complete(self) -> bool:
-        """Whether this step's output is ready, unlocking the next step."""
+        """Whether this step's committed output is current, unlocking later steps."""
         return False
+
+    def can_advance(self) -> bool:
+        """Whether Next is enabled."""
+        return self.is_complete()
+
+    def advance(self) -> bool:
+        """Commit this step's work when the user presses Next.
+
+        Return True to move on to the next step.
+        """
+        return self.is_complete()
 
     def on_enter(self) -> None:
         """Called when this tab becomes the current tab."""
 
     def on_leave(self) -> None:
         """Called when another tab becomes current."""
+
+
+def side_panel(*widgets: QWidget, stretch_last: bool = False) -> QWidget:
+    """Fixed-width settings panel shown to the right of a step's main view.
+
+    Scrolls vertically when its contents are taller than the window.
+    """
+    content = QWidget()
+    layout = QVBoxLayout(content)
+    for i, widget in enumerate(widgets):
+        last = i == len(widgets) - 1
+        layout.addWidget(widget, stretch=1 if stretch_last and last else 0)
+    if not stretch_last:
+        layout.addStretch()
+
+    scroll = QScrollArea()
+    scroll.setWidget(content)
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    scroll.setFixedWidth(SIDE_PANEL_WIDTH)
+    scroll.setFrameShape(QFrame.Shape.StyledPanel)
+    return scroll

@@ -43,13 +43,55 @@ def to_rgba(textures: np.ndarray) -> np.ndarray:
 
 
 class SpriteLayer:
-    def __init__(self, textures: np.ndarray, instances: np.ndarray):
-        """textures: (H, W, C) for a single texture or (N, H, W, C) for a stack."""
+    """A batch of sprites drawn in one call, plus how to draw them.
+
+    textures: (H, W, C) for a single texture, (N, H, W, C) for a stack, or
+    None for plain white (color sprites using each instance's tint).
+
+    Region-marker style (outline_px > 0): each sprite is drawn as a line of
+    outline_px screen pixels in its tint color with a dark band of edge_px
+    inside it. The interior is the tint at fill_alpha, or, with
+    project_texture, the texture shown at the sprite's world position
+    (texture_size gives the world size it spans). Sprites draw in instance
+    order, so later ones cover earlier ones.
+
+    shadow_px > 0 adds a soft shadow of that many screen pixels around each
+    sprite, at most shadow_alpha opaque.
+
+    texture_from: use another layer's GPU texture instead of uploading this
+    layer's own (for example, an overlay sampling the image layer). That
+    layer must be drawn earlier in the same canvas.
+    """
+
+    def __init__(
+        self,
+        textures: np.ndarray | None,
+        instances: np.ndarray,
+        *,
+        outline_px: float = 0.0,
+        edge_px: float = 0.0,
+        fill_alpha: float = 0.0,
+        shadow_px: float = 0.0,
+        shadow_alpha: float = 0.0,
+        project_texture: bool = False,
+        texture_size: tuple[float, float] = (1.0, 1.0),
+        texture_from: "SpriteLayer | None" = None,
+    ):
+        if textures is None:
+            textures = np.full((1, 1, 1, 4), 255, dtype=np.uint8)
         textures = np.asarray(textures)
         if textures.ndim == 3:
             textures = textures[None]
         self.textures = to_rgba(textures)
         self.instances = instances
+        self.outline_px = outline_px
+        self.edge_px = edge_px
+        self.fill_alpha = fill_alpha
+        self.shadow_px = shadow_px
+        self.shadow_alpha = shadow_alpha
+        self.project_texture = project_texture
+        self.texture_size = texture_size
+        self.texture_from = texture_from
         self.visible = True
         self.dirty = True
 
@@ -102,10 +144,10 @@ class _GpuLayer:
             self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, mag)
             self.nearest_mag = nearest
 
-    def render(self, count: int) -> None:
+    def render(self, count: int, texture: moderngl.TextureArray) -> None:
         if self.vao is None or count == 0:
             return
-        self.texture.use(0)
+        texture.use(0)
         self.vao.render(moderngl.TRIANGLE_STRIP, vertices=4, instances=count)
 
     def _release_buffers(self) -> None:
@@ -148,8 +190,22 @@ class SpriteRenderer:
         if layer.dirty:
             gpu.write_instances(layer.instances)
             layer.dirty = False
-        gpu.set_nearest_mag(nearest_mag)
-        gpu.render(len(layer.instances))
+        texture_gpu = gpu
+        if layer.texture_from is not None:
+            texture_gpu = self._layers.get(layer.texture_from)
+            if texture_gpu is None:  # source not uploaded (not drawn on this canvas)
+                return
+        texture_gpu.set_nearest_mag(nearest_mag)
+
+        program = self.program
+        program["u_outline_px"] = float(layer.outline_px)
+        program["u_edge_px"] = float(layer.edge_px)
+        program["u_fill_alpha"] = float(layer.fill_alpha)
+        program["u_shadow_px"] = float(layer.shadow_px)
+        program["u_shadow_alpha"] = float(layer.shadow_alpha)
+        program["u_project"] = int(layer.project_texture)
+        program["u_texture_size"] = tuple(float(v) for v in layer.texture_size)
+        gpu.render(len(layer.instances), texture_gpu.texture)
 
     def release(self, layer: SpriteLayer) -> None:
         gpu = self._layers.pop(layer, None)

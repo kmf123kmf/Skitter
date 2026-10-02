@@ -99,6 +99,7 @@ class ImageViewer(QWidget):
         self._layer: SpriteLayer | None = None
         self._transition: object | None = None
         self._finalize: Callable[[], None] | None = None
+        self._dimming = 0.0
 
         self.canvas = MosaicCanvas()
         self.canvas.clamp_to_bounds = True
@@ -356,19 +357,35 @@ class ImageViewer(QWidget):
         self._set_bounds(image)
         self.canvas.zoom_to_fit(animate=True, duration=TRANSITION_S)
 
-    @staticmethod
-    def _make_layer(image: np.ndarray, alpha: float = 1.0) -> SpriteLayer:
+    @property
+    def image_layer(self) -> SpriteLayer | None:
+        """The canvas layer currently showing the image (replaced by some edits)."""
+        return self._layer
+
+    def set_dimming(self, amount: float) -> None:
+        """Darken the image by amount (0..1), e.g. under a partial overlay."""
+        self._dimming = amount
+        if self._layer is not None:
+            self._layer.instances["tint"][:, 3] = amount
+            self._layer.mark_dirty()
+            self.canvas.update()
+
+    def _make_layer(self, image: np.ndarray, alpha: float = 1.0) -> SpriteLayer:
         h, w = image.shape[:2]
         instances = make_instances(1)
         instances["pos"] = (w / 2, h / 2)
         instances["size"] = (w, h)
         instances["alpha"] = alpha
+        instances["tint"][:, 3] = self._dimming  # tint color is black
         return SpriteLayer(image, instances)
 
     def _set_layer(self, layer: SpriteLayer) -> None:
+        # Replace the image layer in place so overlay layers stay above it.
+        index = 0
         if self._layer is not None:
+            index = self.canvas.layers.index(self._layer)
             self.canvas.remove_layer(self._layer)
-        self._layer = self.canvas.add_layer(layer)
+        self._layer = self.canvas.add_layer(layer, index)
 
     def _set_bounds(self, image: np.ndarray) -> None:
         h, w = image.shape[:2]

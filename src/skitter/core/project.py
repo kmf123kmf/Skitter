@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from skitter.core.edits import Edit
+from skitter.core.slicing import RegionSet, SlicingPlan
 
 
 @dataclass
@@ -14,6 +15,12 @@ class Project:
     source_original: np.ndarray | None = None  # (H, W, 3) uint8 RGB, as loaded
     source_edits: list[Edit] = field(default_factory=list)
     source_image: np.ndarray | None = None  # original with edits applied
+    # Read-only snapshot of source_image taken when the user finishes the Source
+    # step. Every later step works from this, not from the editable image.
+    source_final: np.ndarray | None = None
+
+    slicing_plan: SlicingPlan = field(default_factory=SlicingPlan.default)
+    regions: RegionSet | None = None  # slicing_plan evaluated on source_final
 
     @property
     def has_source(self) -> bool:

@@ -81,8 +81,12 @@ class MosaicCanvas(QOpenGLWidget):
 
     # Layers and animations
 
-    def add_layer(self, layer: SpriteLayer) -> SpriteLayer:
-        self.layers.append(layer)
+    def add_layer(self, layer: SpriteLayer, index: int | None = None) -> SpriteLayer:
+        """Add a layer on top, or at index in the draw order (0 draws first)."""
+        if index is None:
+            self.layers.append(layer)
+        else:
+            self.layers.insert(index, layer)
         self.update()
         return layer
 

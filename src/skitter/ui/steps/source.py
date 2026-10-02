@@ -8,7 +8,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
-    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -25,12 +24,11 @@ from PySide6.QtWidgets import (
 from skitter.core.edits import Crop, Edit, FlipHorizontal, FlipVertical, Rotate90
 from skitter.core.imaging import IMAGE_EXTENSIONS, load_image
 from skitter.ui import icons
-from skitter.ui.steps.base import StepPage
+from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.widgets.crop_overlay import CropOverlay
 from skitter.ui.widgets.image_viewer import ImageViewer
 
 IMAGE_FILTER = "Images (" + " ".join(f"*{ext}" for ext in sorted(IMAGE_EXTENSIONS)) + ")"
-PANEL_WIDTH = 300
 ORIGINAL_ASPECT = "original"
 ASPECT_CHOICES = (
     ("Free", None),
@@ -172,14 +170,12 @@ class SourceStep(StepPage):
         return toolbar
 
     def _build_panel(self) -> QWidget:
-        panel = QFrame()
-        panel.setFixedWidth(PANEL_WIDTH)
-        panel.setFrameShape(QFrame.Shape.StyledPanel)
-        layout = QVBoxLayout(panel)
-        layout.addWidget(self._build_info_group())
-        layout.addWidget(self._build_crop_group())
-        layout.addWidget(self._build_history_group(), stretch=1)
-        return panel
+        return side_panel(
+            self._build_info_group(),
+            self._build_crop_group(),
+            self._build_history_group(),
+            stretch_last=True,
+        )
 
     def _build_info_group(self) -> QGroupBox:
         self._name = QLabel("—")
@@ -270,7 +266,19 @@ class SourceStep(StepPage):
         return True
 
     def is_complete(self) -> bool:
-        return self.session.project.has_source
+        return self.session.source_is_committed
+
+    def can_advance(self) -> bool:
+        return self.session.project.has_source and not self.is_cropping()
+
+    def advance(self) -> bool:
+        """Finish the Source step: freeze the edited image for later steps."""
+        if not self.can_advance():
+            return False
+        if self.session.commit_source():
+            h, w = self.session.project.source_final.shape[:2]
+            self.status_message.emit(f"Source image ready: {w:,} × {h:,} px")
+        return True
 
     def on_leave(self) -> None:
         self.cancel_crop()
@@ -300,6 +308,7 @@ class SourceStep(StepPage):
             self.crop_overlay.stop()
             self._crop_group.hide()
         self._update_actions()
+        self.state_changed.emit()  # Next is unavailable while cropping
 
     def apply_crop(self) -> None:
         if not self.is_cropping():
@@ -356,7 +365,7 @@ class SourceStep(StepPage):
         self._refresh_info()
         self._update_actions()
         self.status_message.emit(f"Source image: {project.source_path.name}")
-        self.completion_changed.emit()
+        self.state_changed.emit()
 
     def _on_source_edited(self, edit: Edit | None, undone: bool) -> None:
         image = self.session.project.source_image
@@ -380,7 +389,7 @@ class SourceStep(StepPage):
             self.status_message.emit("Reverted to the original image")
         else:
             self.status_message.emit(f"{'Undo: ' if undone else ''}{edit.describe()}")
-        self.completion_changed.emit()
+        self.state_changed.emit()
 
     def _refresh_info(self) -> None:
         project = self.session.project

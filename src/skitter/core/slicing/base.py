@@ -1,0 +1,219 @@
+"""Slicing operation framework: context, operation base classes, registry.
+
+A slicing operation transforms a set of regions:
+
+    apply(regions, ctx) -> regions
+
+A plan starts from one region covering the whole image and runs its
+operations in order. So one interface covers operations that split regions
+(grid, quadtree), adjust them (jitter, gap), filter or merge them, or add
+regions drawn by hand.
+
+To add an operation: subclass `Subdivider` (to split each region on its own)
+or `SlicingOperation` (anything else), set `id`, `name`, `category` and
+`description`, declare parameters (see params.py), implement `subdivide` or
+`apply`, and decorate the class with `@register_operation`. Operations must
+be deterministic for given parameters and image (take a seed parameter for
+randomness) and must not modify their inputs.
+
+Regions may overlap; their z values decide which lies on top (see
+regions.py). Operations that only move or resize regions should keep z as
+it is (RegionSet.replace does). Operations that create overlap or change it
+set z, for example with RegionSet.restacked.
+"""
+
+import math
+from abc import ABC, abstractmethod
+from functools import cached_property
+from typing import Any, ClassVar
+
+import numpy as np
+
+from skitter.core.slicing.params import Param
+from skitter.core.slicing.regions import Region, RegionSet
+
+# Menu order for categories; unknown categories sort after these.
+CATEGORIES = ("Subdivide", "Adjust", "Filter", "Other")
+
+
+class SlicingError(Exception):
+    """A plan could not be evaluated (for example, it produced too many regions)."""
+
+
+class SliceContext:
+    """Read-only inputs available to slicing operations.
+
+    One context is created per final source image and reused across
+    evaluations, so derived data (like luminance) is computed once.
+    """
+
+    def __init__(self, image: np.ndarray):
+        self.image = image  # (H, W, 3) uint8 RGB, read-only
+
+    @property
+    def width(self) -> int:
+        return self.image.shape[1]
+
+    @property
+    def height(self) -> int:
+        return self.image.shape[0]
+
+    @cached_property
+    def luminance(self) -> np.ndarray:
+        """(H, W) float32 luma in 0..255 (Rec. 601 weights)."""
+        weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
+        lum = self.image.astype(np.float32) @ weights
+        lum.setflags(write=False)
+        return lum
+
+    def patch(
+        self, region: Region, source: str = "luminance", max_samples: int = 4_000_000
+    ) -> tuple[np.ndarray, float]:
+        """Sample the image inside region on a grid aligned with the region's frame.
+
+        Returns (samples, scale): samples[j, i] is the nearest pixel to local
+        point ((i + 0.5) / scale, (j + 0.5) / scale). scale is 1 (one sample
+        per pixel) unless that would exceed max_samples. Points outside the
+        image take the nearest edge pixel. source is "luminance" or "rgb".
+        """
+        image = self.luminance if source == "luminance" else self.image
+        scale = min(1.0, math.sqrt(max_samples / max(region.area, 1.0)))
+        pw = max(1, math.ceil(region.width * scale))
+        ph = max(1, math.ceil(region.height * scale))
+        u = (np.arange(pw) + 0.5) / scale
+        v = (np.arange(ph) + 0.5) / scale
+        if region.is_axis_aligned:
+            xs = np.clip(np.floor(region.cx - region.width / 2 + u), 0, self.width - 1)
+            ys = np.clip(np.floor(region.cy - region.height / 2 + v), 0, self.height - 1)
+            return image[np.ix_(ys.astype(int), xs.astype(int))], scale
+        uu, vv = np.meshgrid(u, v)
+        world = region.local_to_world(np.stack([uu, vv], axis=-1))
+        xi = np.clip(np.floor(world[..., 0]), 0, self.width - 1).astype(int)
+        yi = np.clip(np.floor(world[..., 1]), 0, self.height - 1).astype(int)
+        return image[yi, xi], scale
+
+
+class SlicingOperation(ABC):
+    """Base class for all slicing operations."""
+
+    id: ClassVar[str] = ""  # stable identifier used in saved plans
+    name: ClassVar[str] = ""  # shown in the UI
+    category: ClassVar[str] = "Other"
+    description: ClassVar[str] = ""
+
+    def __init__(self, **values):
+        self._values: dict[str, Any] = {p.name: p.default for p in self.params()}
+        self.update(**values)
+
+    @classmethod
+    def params(cls) -> list[Param]:
+        """Declared parameters, base classes first, in declaration order."""
+        found: dict[str, Param] = {}
+        for klass in reversed(cls.__mro__):
+            for name, attr in vars(klass).items():
+                if isinstance(attr, Param):
+                    found[name] = attr
+        return list(found.values())
+
+    def update(self, **values) -> None:
+        for name, value in values.items():
+            if name not in self._values:
+                raise KeyError(f"{self.id} has no parameter {name!r}")
+            setattr(self, name, value)
+
+    def values(self) -> dict[str, Any]:
+        return dict(self._values)
+
+    def key(self) -> tuple:
+        """Identifies this operation's type and settings (for result caching)."""
+        return (self.id, tuple(sorted(self._values.items())))
+
+    def summary(self) -> str:
+        """Short description of the current settings for lists; may be empty."""
+        return ""
+
+    def copy(self) -> "SlicingOperation":
+        return type(self)(**self._values)
+
+    def to_dict(self) -> dict:
+        return {"type": self.id, "params": self.values()}
+
+    def __repr__(self) -> str:
+        args = ", ".join(f"{k}={v!r}" for k, v in self._values.items())
+        return f"{type(self).__name__}({args})"
+
+    @abstractmethod
+    def apply(self, regions: RegionSet, ctx: SliceContext) -> RegionSet:
+        """Return the transformed regions (in image coordinates)."""
+
+
+class Subdivider(SlicingOperation):
+    """An operation that splits each input region independently.
+
+    Implement `subdivide`, which works in the region's local frame: the region
+    is the axis-aligned rectangle [0, width] x [0, height], and the returned
+    regions use the same frame. The base class maps them back to image
+    coordinates, including the parent's position and rotation.
+
+    Stacking: the parts of a region take its place in the overall stack, so
+    they stay above the parts of every region below it and below the parts of
+    every region above it. Among themselves, parts stack by the z values
+    subdivide gives them (equal z: array order). The result's z values are
+    0..N-1.
+    """
+
+    category = "Subdivide"
+
+    def apply(self, regions: RegionSet, ctx: SliceContext) -> RegionSet:
+        parent_rank = regions.stacking_rank()
+        parts, parent_keys, part_keys = [], [], []
+        for index, region in enumerate(regions):
+            local = self.subdivide(region, ctx)
+            parts.append(local.to_world(region))
+            parent_keys.append(np.full(len(local), parent_rank[index]))
+            part_keys.append(local.stacking_rank())
+        result = RegionSet.concat(parts)
+        if not result:
+            return result
+        return result.restacked(np.concatenate(parent_keys), np.concatenate(part_keys))
+
+    @abstractmethod
+    def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
+        """Split region; return the parts in its local frame."""
+
+
+# Registry
+
+_registry: dict[str, type[SlicingOperation]] = {}
+
+
+def register_operation(cls: type[SlicingOperation]) -> type[SlicingOperation]:
+    """Class decorator making an operation available to plans and the UI."""
+    if not cls.id or not cls.name:
+        raise TypeError(f"{cls.__name__} must define id and name")
+    existing = _registry.get(cls.id)
+    if existing is not None and existing is not cls:
+        raise ValueError(f"operation id {cls.id!r} is already used by {existing.__name__}")
+    _registry[cls.id] = cls
+    return cls
+
+
+def operation_types() -> list[type[SlicingOperation]]:
+    """Registered operation classes in menu order (by category, then name)."""
+
+    def order(cls):
+        rank = CATEGORIES.index(cls.category) if cls.category in CATEGORIES else len(CATEGORIES)
+        return (rank, cls.category, cls.name)
+
+    return sorted(_registry.values(), key=order)
+
+
+def get_operation_type(type_id: str) -> type[SlicingOperation]:
+    try:
+        return _registry[type_id]
+    except KeyError:
+        raise KeyError(f"unknown slicing operation {type_id!r}") from None
+
+
+def operation_from_dict(data: dict) -> SlicingOperation:
+    return get_operation_type(data["type"])(**data.get("params", {}))

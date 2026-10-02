@@ -1,7 +1,17 @@
 """Top-level application window: one tab per workflow step."""
 
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QAction, QKeySequence
-from PySide6.QtWidgets import QMainWindow, QTabWidget
+from PySide6.QtWidgets import (
+    QFrame,
+    QHBoxLayout,
+    QMainWindow,
+    QPushButton,
+    QStyle,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 from skitter.ui.demo import DemoWindow
 from skitter.ui.session import Session
@@ -24,9 +34,16 @@ class MainWindow(QMainWindow):
         self.tabs.setDocumentMode(True)
         for step in self.steps:
             self.tabs.addTab(step, step.title)
-            step.completion_changed.connect(self._update_tab_access)
+            step.state_changed.connect(self._update_navigation)
             step.status_message.connect(self.statusBar().showMessage)
-        self.setCentralWidget(self.tabs)
+
+        central = QWidget()
+        layout = QVBoxLayout(central)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.addWidget(self.tabs, stretch=1)
+        layout.addWidget(self._build_footer())
+        self.setCentralWidget(central)
 
         self._current_step = self.steps[0]
         self.tabs.currentChanged.connect(self._on_tab_changed)
@@ -34,7 +51,7 @@ class MainWindow(QMainWindow):
 
         self._demo_windows: list[DemoWindow] = []
         self._build_menus()
-        self._update_tab_access()
+        self._update_navigation()
         self.statusBar().showMessage("Choose a source image to begin")
 
     def step(self, cls: type[StepPage]) -> StepPage:
@@ -73,17 +90,67 @@ class MainWindow(QMainWindow):
         window.show()
         return window
 
-    def _update_tab_access(self) -> None:
-        """Enable each tab only if every earlier step is complete."""
+    # Step navigation
+
+    def _build_footer(self) -> QWidget:
+        style = self.style()
+        self.back_button = QPushButton("Back")
+        self.back_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowBack))
+        self.back_button.clicked.connect(self.go_back)
+
+        self.next_button = QPushButton()
+        self.next_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
+        self.next_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)  # icon after text
+        self.next_button.setDefault(True)
+        self.next_button.setShortcut(QKeySequence("Ctrl+Return"))
+        self.next_button.clicked.connect(self.go_next)
+
+        footer = QFrame()
+        footer.setFrameShape(QFrame.Shape.StyledPanel)
+        layout = QHBoxLayout(footer)
+        layout.setContentsMargins(8, 6, 8, 6)
+        layout.addWidget(self.back_button)
+        layout.addStretch()
+        layout.addWidget(self.next_button)
+        return footer
+
+    def go_next(self) -> None:
+        """Commit the current step and move to the next one."""
+        index = self.tabs.currentIndex()
+        step = self.steps[index]
+        if index + 1 >= len(self.steps) or not step.can_advance() or not step.advance():
+            return
+        self._update_navigation()
+        if self.tabs.isTabEnabled(index + 1):
+            self.tabs.setCurrentIndex(index + 1)
+
+    def go_back(self) -> None:
+        index = self.tabs.currentIndex()
+        if index > 0:
+            self.tabs.setCurrentIndex(index - 1)
+
+    def _update_navigation(self) -> None:
+        """Unlock tabs whose earlier steps are all complete; refresh Back/Next."""
         unlocked = True
         for index, step in enumerate(self.steps):
             self.tabs.setTabEnabled(index, unlocked)
             unlocked = unlocked and step.is_complete()
 
+        index = self.tabs.currentIndex()
+        step = self.steps[index]
+        self.back_button.setVisible(index > 0)
+        has_next = index + 1 < len(self.steps)
+        self.next_button.setVisible(has_next)
+        if has_next:
+            self.next_button.setText(f"Next: {self.steps[index + 1].title}")
+            self.next_button.setToolTip("Finish this step and continue (Ctrl+Enter)")
+            self.next_button.setEnabled(step.can_advance())
+
     def _on_tab_changed(self, index: int) -> None:
         self._current_step.on_leave()
         self._current_step = self.steps[index]
         self._current_step.on_enter()
+        self._update_navigation()
 
     def _update_title(self) -> None:
         path = self.session.project.source_path
