@@ -80,6 +80,8 @@ Slicing divides the final image into regions for tile matching. The result is al
 - The Slicing tab lists the stages (add from a menu grouped by category, reorder, enable/disable, remove), generates a settings form from the selected operation's parameters, and draws the regions on the GPU.
 - Built-in operations:
   - **Grid**: base-tile cells with centered overhang, or a fixed count that fits exactly.
+  - **Brick Bond**: courses of base-tile bricks, each shifted along its length (running, third, quarter, custom or random). Courses run horizontally (rows shift) or vertically (columns shift).
+  - **Brick Pattern**: repeating patterns that mix brick directions: herringbone (any tile shape, any rotation; 45° gives diagonal herringbone) and basketweave. Bricks lying the other way are base tiles turned 90°, so regions keep the tile shape.
   - **Quadtree**: splits where the image has detail, down to a minimum in tiles. Use after a Grid.
   - **Photo Pile**: overlapping rotated photos in the tile shape. Spread 1.0 guarantees coverage.
   - **Jitter**, **Gap**, **Stacking Order**.
@@ -119,6 +121,7 @@ class Stripes(Subdivider):
 - Sizes: use `TileSizeParam` for lengths and convert with `ctx.tile_size` (base tile in mosaic px). `ctx.width/height` is the canvas.
 - `ctx.image` / `ctx.luminance` give the read-only final image in source pixels. `ctx.patch(region)` samples the source inside a (possibly rotated) canvas region on a grid aligned with it.
 - Operations must be deterministic (take a seed parameter for randomness) and must not modify inputs. Set `z` when the regions you create overlap (see above). RegionSets are immutable: build new ones with `replace`, `from_arrays`, `from_rects`, `grid`, `concat`.
+- **Brick patterns** (`slicing/patterns.py`): a pattern is a repeating unit, a few bricks plus two period vectors, built by a function registered with `@register_pattern(id, name)`; `tile_pattern` fills a region with copies. Describe bricks in landscape terms with `PatternBuilder.add(cx, cy, horizontal)`; it makes each one a region in the base tile's shape (turned for portrait tiles). Pass `length=`/`thickness=` for bricks of other shapes. A pattern that needs settings lists them in `options`, and they become `PatternSlicer` parameters of the same name. Built-in patterns live in `operations/pattern.py`.
 - Optionally override `summary()` for the stage list. Make sure the module is imported (built-ins are imported by `skitter/core/slicing/operations/__init__.py`).
 
 ## Layout
@@ -139,7 +142,8 @@ src/skitter/
       base.py       SliceContext, SlicingOperation, Subdivider, registry
       plan.py       SlicingPlan, stages, cached evaluation
       analysis.py   coverage, density and size summary
-      operations/   built-ins: grid, quadtree, pile, jitter, gap, stacking
+      patterns.py   brick pattern framework (repeating units, tiler)
+      operations/   built-ins: grid, bond, pattern, quadtree, pile, jitter, gap, stacking
   ui/
     main_window.py  tabbed window, Back/Next footer, step gating, menus
     session.py      observable Project wrapper shared by steps

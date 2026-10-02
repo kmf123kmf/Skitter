@@ -25,7 +25,14 @@ from skitter.core.slicing import (
     summarize,
 )
 from skitter.core.slicing.base import _registry
-from skitter.core.slicing.operations import GapAdjust, GridSlicer, JitterAdjust, QuadtreeSlicer
+from skitter.core.slicing.operations import (
+    BondSlicer,
+    GapAdjust,
+    GridSlicer,
+    JitterAdjust,
+    PatternSlicer,
+    QuadtreeSlicer,
+)
 
 
 def blank(width=100, height=60):
@@ -459,3 +466,115 @@ def test_tile_size_param_defaults():
 
     assert GridSlicer.cell_size.suffix == " × tile"
     assert isinstance(QuadtreeSlicer.min_size, TileSizeParam)
+
+
+# Brick bonds and patterns
+
+
+def cover_counts(regions, width, height, samples=3000):
+    """How many regions cover each of some random points on the canvas."""
+    points = np.random.default_rng(0).random((samples, 2)) * [width, height]
+    return np.array([regions.contains(x, y).sum() for x, y in points])
+
+
+def test_running_bond_shifts_alternate_rows_by_half_a_brick():
+    ctx = tiled(100, 40, tile=20, aspect=2.0)  # 20 x 10 bricks, 4 courses
+    regions = BondSlicer(anchor="top_left").apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(regions.size, [[20, 10]] * len(regions))
+    lefts = regions.bounds()[:, 0]
+    rows = np.round(regions.center[:, 1] / 10 - 0.5).astype(int)
+    np.testing.assert_allclose(lefts[rows % 2 == 0] % 20, 0, atol=1e-9)
+    np.testing.assert_allclose(lefts[rows % 2 == 1] % 20, 10, atol=1e-9)
+    assert lefts.min() == pytest.approx(-10)  # shifted rows overhang by half a brick
+    assert np.all(cover_counts(regions, 100, 40) == 1)
+
+
+def test_vertical_bond_shifts_columns():
+    ctx = tiled(60, 90, tile=20, aspect=2.0)
+    regions = BondSlicer(orientation="vertical", bond="third").apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(regions.size[0], [20, 10])  # bricks keep the tile shape
+    tops = {round(x, 6): set(np.round(regions.bounds()[regions.center[:, 0] == x, 1] % 10, 6))
+            for x in regions.center[:, 0]}  # fmt: skip
+    assert len(tops) == 3  # columns of 20 px
+    assert {len(t) for t in tops.values()} == {1}
+    assert len({next(iter(t)) for t in tops.values()}) == 3  # each column shifted differently
+    assert np.all(cover_counts(regions, 60, 90) == 1)
+
+
+def test_bond_with_zero_shift_is_the_grid_and_random_is_seeded():
+    ctx = tiled(100, 65, tile=10)
+    grid = GridSlicer().apply(ctx.canvas(), ctx)
+    stack = BondSlicer(bond="custom", step=0.0).apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(stack.center, grid.center)
+    a, b, c = (BondSlicer(bond="random", seed=s).apply(ctx.canvas(), ctx) for s in (1, 1, 2))
+    np.testing.assert_array_equal(a.center, b.center)
+    assert not np.array_equal(a.center, c.center) or len(a) != len(c)
+    assert np.all(cover_counts(a, 100, 65) == 1)
+
+
+@pytest.mark.parametrize("aspect", [2.0, 1.5, 1.0, 0.5])
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"orientation": "vertical"},
+        {"angle": 45.0},
+        {"anchor": "top_left"},
+        {"pattern": "basketweave"},
+        {"pattern": "basketweave", "weave_auto": False, "weave": 3, "angle": 30.0},
+    ],
+)
+def test_patterns_cover_the_canvas_exactly_once(aspect, settings):
+    ctx = tiled(200, 150, tile=20, aspect=aspect)
+    regions = PatternSlicer(**settings).apply(ctx.canvas(), ctx)
+    assert np.all(cover_counts(regions, 200, 150) == 1)
+    assert np.all((regions.rotation > -math.pi / 2) & (regions.rotation <= math.pi / 2 + 1e-9))
+
+
+def test_herringbone_uses_tile_shaped_bricks_in_two_directions():
+    ctx = tiled(200, 150, tile=30, aspect=1.5)  # 30 x 20 tiles
+    regions = PatternSlicer().apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(regions.size, [[30, 20]] * len(regions))
+    assert set(np.round(regions.rotation, 9)) == {0.0, round(math.pi / 2, 9)}
+    portrait = tiled(200, 150, tile=20, aspect=2 / 3)  # 20 x 30 tiles
+    np.testing.assert_allclose(PatternSlicer().apply(portrait.canvas(), portrait).size[0], [20, 30])
+
+
+def test_basketweave_blocks_match_a_two_to_one_tile():
+    ctx = tiled(160, 160, tile=40, aspect=2.0)
+    regions = PatternSlicer(pattern="basketweave", anchor="top_left").apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(regions.size, [[40, 20]] * len(regions))
+    assert len(regions) == 16 * 2  # 16 square blocks of 2 bricks, no overhang
+    assert PatternSlicer.weave.is_active(PatternSlicer(pattern="basketweave", weave_auto=False))
+    assert not PatternSlicer.weave.is_active(PatternSlicer())
+
+
+def test_custom_pattern_appears_in_choices_and_slices():
+    from skitter.core.slicing import patterns as pattern_list
+    from skitter.core.slicing import register_pattern
+    from skitter.core.slicing.patterns import _patterns
+
+    @register_pattern("test_stack", "Test stack")
+    def stack(b):
+        b.add(b.length / 2, b.thickness / 2)
+        return b.unit((b.length, 0), (0, b.thickness), corner=(0, 0))
+
+    try:
+        assert ("test_stack", "Test stack") in PatternSlicer.pattern.choices
+        assert any(p.id == "test_stack" for p in pattern_list())
+        ctx = tiled(100, 65, tile=10)
+        regions = PatternSlicer(pattern="test_stack", anchor="top_left").apply(ctx.canvas(), ctx)
+        top_left = GridSlicer(anchor="top_left").apply(ctx.canvas(), ctx)
+        np.testing.assert_allclose(regions.center, top_left.center)
+    finally:
+        del _patterns["test_stack"]
+
+
+def test_pattern_inside_rotated_region_and_too_fine_patterns():
+    ctx = tiled(200, 150, tile=20, aspect=2.0)
+    parent = RegionSet.from_arrays([[100, 75]], [[80, 60]], rotation=0.3)
+    regions = PatternSlicer().apply(parent, ctx)
+    np.testing.assert_allclose(regions.rotation % (math.pi / 2), 0.3, atol=1e-9)
+    huge = tiled(4000, 4000, tile=1)
+    with pytest.raises(SlicingError):
+        PatternSlicer(cell_size=0.05).apply(huge.canvas(), huge)

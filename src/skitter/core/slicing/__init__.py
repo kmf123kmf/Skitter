@@ -27,6 +27,15 @@ from skitter.core.slicing.params import (
     Param,
     TileSizeParam,
 )
+from skitter.core.slicing.patterns import (
+    BrickPattern,
+    PatternBuilder,
+    PatternUnit,
+    get_pattern,
+    patterns,
+    register_pattern,
+    tile_pattern,
+)
 from skitter.core.slicing.plan import MAX_REGIONS, SlicingPlan, Stage, StageResult
 from skitter.core.slicing.regions import REGION_DTYPE, Region, RegionSet
 
@@ -36,11 +45,14 @@ __all__ = [
     "REGION_DTYPE",
     "TILE_ASPECTS",
     "BoolParam",
+    "BrickPattern",
     "ChoiceParam",
     "FloatParam",
     "IntParam",
     "MosaicLayout",
     "Param",
+    "PatternBuilder",
+    "PatternUnit",
     "Region",
     "RegionSet",
     "SliceContext",
@@ -54,9 +66,13 @@ __all__ = [
     "TileSizeParam",
     "coverage",
     "get_operation_type",
+    "get_pattern",
     "operation_from_dict",
     "operation_types",
     "operations",
+    "patterns",
     "register_operation",
+    "register_pattern",
     "summarize",
+    "tile_pattern",
 ]

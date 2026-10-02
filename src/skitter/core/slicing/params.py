@@ -109,11 +109,26 @@ class BoolParam(Param):
 
 
 class ChoiceParam(Param):
-    """One of a fixed set of values, each shown with a label."""
+    """One of a set of values, each shown with a label.
 
-    def __init__(self, default, label: str = "", *, choices: Sequence[tuple[Any, str]], **kwargs):
-        self.choices = list(choices)
+    choices is a list of (value, label) pairs, or a function returning one,
+    for choices drawn from a registry that may grow (like brick patterns).
+    """
+
+    def __init__(
+        self,
+        default,
+        label: str = "",
+        *,
+        choices: Sequence[tuple[Any, str]] | Callable[[], Sequence[tuple[Any, str]]],
+        **kwargs,
+    ):
+        self._choices = choices if callable(choices) else list(choices)
         super().__init__(default, label, **kwargs)
+
+    @property
+    def choices(self) -> list[tuple[Any, str]]:
+        return list(self._choices()) if callable(self._choices) else self._choices
 
     def validate(self, value):
         if value not in [v for v, _ in self.choices]:
