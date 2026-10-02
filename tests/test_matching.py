@@ -163,7 +163,7 @@ def test_error_diffusion_mixes_tiles_to_keep_average_color():
 
 
 def flat_ctx(image, columns=8, tile=10):
-    return SliceContext(image, MosaicLayout(tile_width=tile, columns=columns))
+    return SliceContext(image, MosaicLayout(columns=columns), tile_width=tile)
 
 
 def test_quality_rewards_faithful_mosaics():

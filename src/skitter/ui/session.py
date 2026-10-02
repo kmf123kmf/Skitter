@@ -124,7 +124,7 @@ class Session(QObject):
         self._evaluate_slicing()
 
     def mosaic_size(self) -> tuple[float, float] | None:
-        """Canvas size in mosaic pixels, once the source is committed."""
+        """Canvas size in mosaic units, once the source is committed."""
         ctx = self._slice_context
         return None if ctx is None else (ctx.width, ctx.height)
 

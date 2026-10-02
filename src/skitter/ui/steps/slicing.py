@@ -1,8 +1,8 @@
 """Step 2: divide the final source image into target regions for tile matching.
 
-The user picks the mosaic layout (base tile width, tile aspect, columns),
-which sets the mosaic canvas size, and builds a slicing plan: an ordered
-list of operations (see skitter.core.slicing). The page lists the stages, generates a settings form
+The user picks the mosaic layout (tile aspect and columns; pixel sizes are
+chosen only on export) and builds a slicing plan: an ordered list of
+operations (see skitter.core.slicing). The page lists the stages, generates a settings form
 for the selected one from its declared parameters, and draws the resulting
 regions over the image as they change. Regions may overlap: the preview
 draws them in stacking order, so upper regions hide what they cover.
@@ -120,10 +120,6 @@ class SlicingStep(StepPage):
     # Construction
 
     def _build_mosaic_group(self) -> QGroupBox:
-        self.tile_width = QSpinBox()
-        self.tile_width.setRange(4, 4096)
-        self.tile_width.setSuffix(" px")
-        self.tile_width.setToolTip("Width of a base tile on the finished mosaic.")
         self.tile_aspect = QComboBox()
         for value, label in TILE_ASPECTS:
             self.tile_aspect.addItem(label, value)
@@ -131,31 +127,25 @@ class SlicingStep(StepPage):
         self.columns = QSpinBox()
         self.columns.setRange(1, 5000)
         self.columns.setToolTip("Base tiles across the mosaic. Rows follow the image's shape.")
-        for spin in (self.tile_width, self.columns):
-            spin.setKeyboardTracking(False)
-            spin.valueChanged.connect(lambda _: self._relayout.start())
+        self.columns.setKeyboardTracking(False)
+        self.columns.valueChanged.connect(lambda _: self._relayout.start())
         self.tile_aspect.currentIndexChanged.connect(lambda _: self._relayout.start())
 
-        self._tile_px = QLabel("—")
-        self._mosaic_px = QLabel("—")
         self._rows = QLabel("—")
         self._source_px = QLabel("—")
         self._source_px.setToolTip(
             "Source image pixels across one base tile: how much of the image "
             "each tile's color is judged from."
         )
-        self._memory = QLabel("—")
+        hint = _muted(QLabel("Pixel sizes are chosen when you export the mosaic."))
 
         group = QGroupBox("Mosaic")
         form = QFormLayout(group)
-        form.addRow("Tile width:", self.tile_width)
         form.addRow("Tile aspect:", self.tile_aspect)
         form.addRow("Columns:", self.columns)
-        form.addRow("Tile:", self._tile_px)
-        form.addRow("Mosaic:", self._mosaic_px)
         form.addRow("Rows:", self._rows)
         form.addRow("Source per tile:", self._source_px)
-        form.addRow("Memory:", self._memory)
+        form.addRow(hint)
         return group
 
     def _build_plan_group(self) -> QGroupBox:
@@ -336,22 +326,20 @@ class SlicingStep(StepPage):
     def _show_layout(self) -> None:
         """Put the project's layout into the controls."""
         layout = self.session.project.layout
-        for widget in (self.tile_width, self.tile_aspect, self.columns):
+        for widget in (self.tile_aspect, self.columns):
             widget.blockSignals(True)
-        self.tile_width.setValue(layout.tile_width)
         index = min(
             range(self.tile_aspect.count()),
             key=lambda i: abs(self.tile_aspect.itemData(i) - layout.tile_aspect),
         )
         self.tile_aspect.setCurrentIndex(index)
         self.columns.setValue(layout.columns)
-        for widget in (self.tile_width, self.tile_aspect, self.columns):
+        for widget in (self.tile_aspect, self.columns):
             widget.blockSignals(False)
         self._refresh_layout_info()
 
     def _apply_layout(self) -> None:
         layout = self.session.project.layout.replace(
-            tile_width=self.tile_width.value(),
             tile_aspect=self.tile_aspect.currentData(),
             columns=self.columns.value(),
         )
@@ -359,27 +347,19 @@ class SlicingStep(StepPage):
 
     def _refresh_layout_info(self) -> None:
         layout = self.session.project.layout
-        tile_w, tile_h = layout.tile_size
-        self._tile_px.setText(f"{tile_w:,.0f} × {tile_h:,.1f} px".replace(".0 px", " px"))
-        self.form.set_context(tile_size=layout.tile_size)
         final = self.session.project.source_final
         if final is None:
-            for label in (self._mosaic_px, self._rows, self._source_px, self._memory):
+            for label in (self._rows, self._source_px):
                 label.setText("—")
             return
         src_h, src_w = final.shape[:2]
-        width, height = layout.canvas_size(src_w, src_h)
         rows = layout.rows(src_w, src_h)
         whole = layout.whole_rows(src_w, src_h)
-        self._mosaic_px.setText(f"{width:,.0f} × {height:,.0f} px")
-        self._rows.setText(f"{rows:,.2f} ({whole:,} whole)" if whole != rows else f"{whole:,}")
-        per_tile = tile_w * src_w / width
+        exact = math.isclose(rows, whole, abs_tol=1e-6)
+        self._rows.setText(f"{whole:,}" if exact else f"{rows:,.2f} ({whole:,} whole)")
+        per_tile = layout.source_per_tile(src_w)
         self._source_px.setText(f"{per_tile:,.1f} px")
         self._source_px.setStyleSheet(WARNING_STYLE if per_tile < MIN_SOURCE_PX_PER_TILE else "")
-        megabytes = width * height * 3 / 1e6
-        self._memory.setText(
-            f"{megabytes / 1000:,.1f} GB" if megabytes >= 1000 else f"{megabytes:,.0f} MB"
-        )
 
     # Plan editing
 
@@ -495,7 +475,7 @@ class SlicingStep(StepPage):
                 (self._median, summary.median),
                 (self._largest, summary.largest),
             ):
-                label.setText(f"{w:,.1f} × {h:,.1f} px")
+                label.setText(self._in_tiles(w, h))
         else:
             for label in (
                 self._count, self._density, self._coverage,
@@ -517,9 +497,17 @@ class SlicingStep(StepPage):
         region = regions[index]
         layer = int(regions.stacking_rank()[index]) + 1
         self._hover.setText(
-            f"#{index + 1:,}: {region.width:,.1f} × {region.height:,.1f} px, "
+            f"#{index + 1:,}: {self._in_tiles(region.width, region.height)}, "
             f"{math.degrees(region.rotation):+.1f}°, layer {layer:,} of {len(regions):,}"
         )
+
+    def _in_tiles(self, width: float, height: float) -> str:
+        """A region size in base tiles (1 × 1 is one base tile)."""
+        ctx = self.session.slice_context
+        if ctx is None:
+            return "—"
+        tile_w, tile_h = ctx.tile_size
+        return f"{width / tile_w:,.2f} × {height / tile_h:,.2f} tiles"
 
     def is_complete(self) -> bool:
         return bool(self.session.project.regions)

@@ -3,7 +3,6 @@
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QLabel
 
 from skitter.core.edits import Crop
 from skitter.core.imaging import save_image
@@ -64,7 +63,7 @@ def test_next_commits_source_and_opens_slicing(window, source):
     assert final[0, 0, 0] == 0  # the flip is baked in
     assert window.tabs.currentWidget() is window.step(SlicingStep)
     assert window.step(SlicingStep).viewer.image is final
-    assert window.step(SlicingStep)._mosaic_px.text() == "3,200 × 2,400 px"  # 40 x 80 px tiles
+    assert window.step(SlicingStep)._rows.text() == "30"  # 40 columns over a 4:3 image
     assert window.next_button.text() == "Next: Tiles"
     assert not window.back_button.isHidden()
 
@@ -188,10 +187,11 @@ def flush(qapp):
 
 
 def test_slicing_shows_default_grid_of_base_tiles(slicing):
-    # 40x30 image, default layout: 40 columns of 80 px square tiles -> 3200 x 2400 canvas.
+    # 40x30 image, default layout: 40 columns of square tiles, TILE_UNIT mosaic units each.
     regions = slicing.session.project.regions
     assert len(regions) == 40 * 30
-    assert slicing.viewer.world_size == (3200, 2400)
+    assert slicing.viewer.world_size == (4000, 3000)
+    assert slicing._median.text() == "1.00 × 1.00 tiles"
     assert slicing._count.text() == "1,200"
     assert slicing._density.text() == "1.00×"
     assert slicing._coverage.text() == "100.0%"
@@ -206,21 +206,17 @@ def test_layout_controls_resize_mosaic_and_reslice(slicing, qapp):
     slicing.columns.setValue(10)
     flush(qapp)
     assert slicing.session.project.layout.columns == 10
-    assert slicing._mosaic_px.text() == "800 × 600 px"
     assert len(slicing.session.project.regions) == 10 * 8  # 7.5 rows -> 8 with overhang
     assert slicing._rows.text() == "7.50 (8 whole)"
-    assert slicing.viewer.world_size == (800, 600)
+    assert slicing.viewer.world_size == (1000, 750)
     assert slicing._source_px.styleSheet() == ""  # 4 source px per tile
 
     slicing.tile_aspect.setCurrentIndex(1)  # 4:3
     flush(qapp)
-    assert slicing._tile_px.text() == "80 × 60 px"
     assert len(slicing.session.project.regions) == 10 * 10
-
-    slicing.tile_width.setValue(40)
-    flush(qapp)
-    assert slicing._mosaic_px.text() == "400 × 300 px"
-    assert slicing.form.editor("cell_size").widget.findChild(QLabel).text() == "40 × 30 px"
+    assert slicing._rows.text() == "10"
+    assert slicing.viewer.world_size == (1000, 750)  # same canvas, flatter tiles
+    assert not hasattr(slicing, "tile_width")  # pixel sizes are chosen on export
 
 
 def test_param_form_edits_recompute_regions(slicing, qapp):
@@ -244,20 +240,20 @@ def test_param_form_edits_recompute_regions(slicing, qapp):
 
 
 def test_add_reorder_disable_remove_stages(slicing, qapp):
-    from skitter.core.slicing.operations import GapAdjust, GridSlicer
+    from skitter.core.slicing.operations import GridSlicer, JitterAdjust
 
-    gap_action = next(a for a in slicing.add_menu.actions() if a.text() == "Gap")
-    gap_action.trigger()
+    assert "Gap" not in [a.text() for a in slicing.add_menu.actions()]
+    jitter_action = next(a for a in slicing.add_menu.actions() if a.text() == "Jitter")
+    jitter_action.trigger()
     flush(qapp)
-    assert [type(s.operation) for s in slicing.plan.stages] == [GridSlicer, GapAdjust]
+    assert [type(s.operation) for s in slicing.plan.stages] == [GridSlicer, JitterAdjust]
     assert slicing.current_row() == 1
-    assert slicing._settings_group.title() == "Gap Settings"
-    assert slicing.session.project.regions.size[0, 0] == 78  # 80 px tiles, 2 px gap
+    assert slicing._settings_group.title() == "Jitter Settings"
     assert float(slicing._coverage.text().rstrip("%")) < 100
     assert "c42b1c" in slicing._coverage.styleSheet()
 
     slicing.move_stage(-1)
-    assert [type(s.operation) for s in slicing.plan.stages] == [GapAdjust, GridSlicer]
+    assert [type(s.operation) for s in slicing.plan.stages] == [JitterAdjust, GridSlicer]
 
     slicing._stages.item(1).setCheckState(Qt.CheckState.Unchecked)  # disable the grid
     flush(qapp)
@@ -291,7 +287,7 @@ def test_recommitted_source_keeps_layout_and_plan(window, slicing, qapp):
     window.next_button.click()
     assert slicing.session.project.layout.columns == 4
     assert slicing.columns.value() == 4
-    assert slicing._mosaic_px.text() == "320 × 427 px"  # now portrait
+    assert slicing._rows.text() == "5.33 (6 whole)"  # now portrait
     assert len(slicing.session.project.regions) == 4 * 6  # 5.33 rows -> 6
 
 

@@ -2,7 +2,7 @@
 
 Each region has a short list of candidates sorted by cost (see index.py).
 The rules: a tile image may be used at most `max_uses` times (0: no limit),
-and two uses of the same image must be at least `spacing` apart (mosaic px;
+and two uses of the same image must be at least `spacing` apart (mosaic units;
 0: off). Crops and mirrored copies of one image count as that image.
 
 `Assignment.greedy` visits regions in priority order and gives each its

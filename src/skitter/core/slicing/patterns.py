@@ -36,7 +36,7 @@ MAX_CANDIDATES = 4_000_000  # brick copies tested per region
 
 @dataclass(frozen=True)
 class PatternUnit:
-    """One repeat of a pattern in pattern coordinates (mosaic pixels)."""
+    """One repeat of a pattern in pattern coordinates (mosaic units)."""
 
     bricks: RegionSet
     period: np.ndarray  # (2, 2): rows are the period vectors a and b

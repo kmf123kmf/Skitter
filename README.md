@@ -60,16 +60,16 @@ Slicing divides the final image into regions for tile matching. The result is al
 
 ### Mosaic layout
 
-- The user picks the **base tile** (width in mosaic px and an aspect ratio) and the number of **columns** (`MosaicLayout`). Everything else is derived:
-  - **Mosaic canvas** = the source image scaled uniformly to columns x tile width. Height follows the source's aspect ratio, so the canvas usually holds a fractional number of tile rows.
-  - **Slicing works in mosaic pixels.** The source is only used to sample colors (`SliceContext.patch` handles the scaling).
-- Slicers try to **cover 100% of the canvas**, and the resulting tiles are what they are. Edge tiles may overhang, and the grid centers its overhang by default. Cropping or squaring off the assembled mosaic is a later post-processing step, not slicing's job.
+- The user picks the **tile aspect** and the number of **columns** (`MosaicLayout`). Nothing has a size in pixels until export (see below), so the same mosaic can be exported at any resolution. Everything else is derived:
+  - **Mosaic canvas** = the source image scaled uniformly to `columns` base tiles across. Height follows the source's aspect ratio, so the canvas usually holds a fractional number of tile rows.
+  - **Slicing and matching work in mosaic units**: a base tile is `TILE_UNIT` (100) units wide. The unit only sets the internal scale; results don't depend on it (`SliceContext` takes another `tile_width`, which tests use). The source is only used to sample colors (`SliceContext.patch` handles the scaling).
+- Slicers try to **cover 100% of the canvas**, and the resulting tiles are what they are. Edge tiles may overhang, and the grid centers its overhang by default. Trimming the overhang is an export option, not slicing's job.
 - **Size settings** use `TileSizeParam`, measured in base tiles (1.0 = one tile), so plans follow the user's tile size. Resizing the mosaic means changing columns: more tiles of the same size.
 - The Slicing tab shows, live:
-  - mosaic size, rows (exact and whole), source px per tile (warns below 2), memory
+  - rows (exact and whole), source px per tile (warns below 2)
   - region count, **density** (regions relative to a plain grid of base tiles; a grid is about 1.0x)
   - **coverage** (estimated by stratified sampling; warns below 100%)
-  - smallest / median / largest region
+  - smallest / median / largest region, in base tiles
 - In the preview, parts of regions past the image edge show as neutral gray.
 
 ### Plans and operations
@@ -85,7 +85,7 @@ Slicing divides the final image into regions for tile matching. The result is al
   - **Brick Pattern**: repeating patterns that mix brick directions: herringbone (any tile shape, any rotation; 45° gives diagonal herringbone) and basketweave. Bricks lying the other way are base tiles turned 90°, so regions keep the tile shape.
   - **Quadtree**: splits where the image has detail, down to a minimum in tiles. Use after a Grid.
   - **Photo Pile**: overlapping rotated photos in the tile shape. Spread 1.0 guarantees coverage.
-  - **Jitter**, **Gap**, **Stacking Order**.
+  - **Jitter**, **Stacking Order**.
 
 ### Overlap and stacking
 
@@ -119,7 +119,7 @@ class Stripes(Subdivider):
 
 - Subclass `Subdivider` to split each region independently in its local frame (the framework handles position and rotation). Subclass `SlicingOperation` and implement `apply` for anything else.
 - Parameters (`IntParam`, `FloatParam`, `BoolParam`, `ChoiceParam`) give validation, the generated settings form, and saving. `when=` greys a parameter out depending on others. A new `Param` type needs an editor factory: `@register_editor` in `ui/widgets/param_form.py`.
-- Sizes: use `TileSizeParam` for lengths and convert with `ctx.tile_size` (base tile in mosaic px). `ctx.width/height` is the canvas.
+- Sizes: use `TileSizeParam` for lengths and convert with `ctx.tile_size` (base tile in mosaic units). `ctx.width/height` is the canvas. Never use absolute lengths: they would change meaning with the export size.
 - `ctx.image` / `ctx.luminance` give the read-only final image in source pixels. `ctx.patch(region)` samples the source inside a (possibly rotated) canvas region on a grid aligned with it.
 - Operations must be deterministic (take a seed parameter for randomness) and must not modify inputs. Set `z` when the regions you create overlap (see above). RegionSets are immutable: build new ones with `replace`, `from_arrays`, `from_rects`, `grid`, `concat`.
 - **Brick patterns** (`slicing/patterns.py`): a pattern is a repeating unit, a few bricks plus two period vectors, built by a function registered with `@register_pattern(id, name)`; `tile_pattern` fills a region with copies. Describe bricks in landscape terms with `PatternBuilder.add(cx, cy, horizontal)`; it makes each one a region in the base tile's shape (turned for portrait tiles). Pass `length=`/`thickness=` for bricks of other shapes. A pattern that needs settings lists them in `options`, and they become `PatternSlicer` parameters of the same name. Built-in patterns live in `operations/pattern.py`.
@@ -159,8 +159,16 @@ Matching (`core/matching`, Qt-free) gives every visible region a tile crop:
 
 - Tinting moves only a tile's average color toward its region's (presets None, Subtle and Custom); tiles are never blended with the source.
 - The Matching tab previews the result with thumbnails packed into texture atlases (`ui/render/atlas.py`; each sprite's `uv` selects its cell and its `offset` applies the tint). It also has an error heat map and the statistics above.
-  - A background job then reads each used tile from its original file and cuts its crop at the region's size in mosaic pixels (`core/tiles/render.py`, process pool, JPEGs decoded at reduced scale). The crops are shelf-packed into atlas pages (`pack_images`) and replace the thumbnails. Regions showing the same crop at the same size share one image. If the total would exceed `DETAIL_TEXELS` (about 400 MB of GPU memory), every crop is scaled down by the same factor. Unreadable files fall back to their thumbnails.
+  - A background job then reads each used tile from its original file and cuts its crop at one texel per mosaic unit (`core/tiles/render.py`, process pool, JPEGs decoded at reduced scale). The crops are shelf-packed into atlas pages (`pack_images`) and replace the thumbnails. Regions showing the same crop at the same size share one image. If the total would exceed `DETAIL_TEXELS` (about 400 MB of GPU memory), every crop is scaled down by the same factor. Unreadable files fall back to their thumbnails.
 - `scripts/bench_matching.py` benchmarks index build, search accuracy and speed, and assignment at library scale.
+
+## Export
+
+**Mosaic → Export Image** (enabled only while the mosaic is valid: matched for the current regions, committed source and unchanged tiles) renders the mosaic at full detail in the background (`core/assembly.py`, `ui/export_dialog.py`).
+
+- **Size** is chosen here, and only here: by base tile width, image width or image height in pixels. The window shows the resulting image and tile size and how many tiles would be shown larger than their photos have pixels for.
+- **Framing**: the image frame (trims overhanging tiles) or whole tiles. **Background**: white, black, gray, or transparent (PNG). **Format**: PNG or JPEG (quality setting, no chroma subsampling).
+- Each tile is its matched crop read from the original photo at output resolution (Lanczos), mirrored and tinted exactly as matching modeled it (an OKLab shift per pixel), then placed with bicubic sampling. Edges use 4 x 4 coverage samples, drawn front to back, so seams between tiles never show the background. Large images render in strips to bound memory.
 
 ## Layout
 
@@ -174,6 +182,7 @@ src/skitter/
     geometry.py     rectangle math for interactive tools (crop box)
     color.py        sRGB <-> OKLab (vectorized and for numba kernels)
     project.py      Project dataclass (state across all steps)
+    assembly.py     full-detail mosaic rendering and export settings
     tiles/          tile library
       library.py    on-disk cache: sqlite metadata + memory-mapped thumbnails
       ingest.py     parallel, reduced-scale thumbnail decoding
@@ -189,17 +198,18 @@ src/skitter/
       matcher.py    the pipeline and its caches
       settings.py   MatchSettings (Params)
     slicing/        slicing framework
-      layout.py     MosaicLayout: base tile, columns, canvas size
+      layout.py     MosaicLayout: tile aspect and columns; mosaic units
       regions.py    Region / RegionSet (rotated rectangles)
       params.py     declarative operation parameters
       base.py       SliceContext, SlicingOperation, Subdivider, registry
       plan.py       SlicingPlan, stages, cached evaluation
       analysis.py   coverage, density and size summary
       patterns.py   brick pattern framework (repeating units, tiler)
-      operations/   built-ins: grid, bond, pattern, quadtree, pile, jitter, gap, stacking
+      operations/   built-ins: grid, bond, pattern, quadtree, pile, jitter, stacking
   ui/
     main_window.py  tabbed window, Back/Next footer, step gating, menus
     session.py      observable Project wrapper shared by steps
+    export_dialog.py  Export Image window
     steps/
       base.py       StepPage base class
       source.py     step 1: source image selection and editing

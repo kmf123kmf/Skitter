@@ -173,10 +173,23 @@ def test_export_image_from_the_mosaic_menu(sliced, photos, tmp_path):
     target = tmp_path / "out" / "mosaic.png"
     target.parent.mkdir()
     dialog.path.setText(str(target))
-    dialog.form.editor("scale").widget.setValue(0.5)
-    width, height = session.mosaic_size()
-    size = (round(width * 0.5), round(height * 0.5))
-    assert dialog.size_label.text().startswith(f"{size[0]:,} × {size[1]:,} px")
+    # Pixels are chosen here: 8 columns of 40 px tiles over a 4:3 image.
+    dialog.form.editor("tile_px").widget.setValue(40)
+    size = (320, 240)
+    assert dialog.size_label.text().startswith("320 × 240 px")
+    assert dialog.tile_label.text() == "40 px"
+    assert dialog.detail_label.text().startswith("Full detail")  # photos are 60-90 px
+
+    # Or by the image's width; tiles follow, and outgrow the 60 px photos.
+    assert dialog.form.editor("width_px").widget.value() == 320  # inactive sizes follow
+    dialog.form.editor("size_by").widget.setCurrentIndex(1)
+    assert dialog.size_label.text().startswith("320 × 240 px")  # switching keeps the size
+    dialog.form.editor("width_px").widget.setValue(560)
+    assert dialog.size_label.text().startswith("560 × 420 px")
+    assert dialog.tile_label.text() == "70 px" and "enlarged" in dialog.detail_label.text()
+    dialog.form.editor("size_by").widget.setCurrentIndex(0)
+    assert dialog.form.editor("tile_px").widget.value() == 70  # back to tiles, same size
+    dialog.form.editor("tile_px").widget.setValue(40)
 
     dialog.export()
     session.wait_for_job()

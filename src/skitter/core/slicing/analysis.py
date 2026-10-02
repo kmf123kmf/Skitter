@@ -73,7 +73,7 @@ class SliceSummary:
     count: int
     grid_tiles: float  # base tiles that fit on the canvas (canvas area / tile area)
     coverage: float  # estimated fraction of the canvas covered, 0..1
-    smallest: tuple[float, float]  # region (w, h) in mosaic px, by area
+    smallest: tuple[float, float]  # region (w, h) in mosaic units, by area
     median: tuple[float, float]
     largest: tuple[float, float]
     source_px_per_tile: float  # source pixels across one base tile

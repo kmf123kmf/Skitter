@@ -42,22 +42,6 @@ class JitterAdjust(SlicingOperation):
 
 
 @register_operation
-class GapAdjust(SlicingOperation):
-    id = "gap"
-    name = "Gap"
-    category = "Adjust"
-    description = "Shrink every region to leave a gap (grout) between neighbors."
-
-    gap = FloatParam(2.0, "Gap", min=0.0, max=500.0, step=0.5, decimals=1, suffix=" px")
-
-    def apply(self, regions: RegionSet, ctx: SliceContext) -> RegionSet:
-        return regions.replace(size=np.maximum(regions.size - self.gap, 0.5))
-
-    def summary(self) -> str:
-        return f"{self.gap:g} px"
-
-
-@register_operation
 class StackingAdjust(SlicingOperation):
     id = "stacking"
     name = "Stacking Order"

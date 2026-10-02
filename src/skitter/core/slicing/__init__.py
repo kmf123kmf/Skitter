@@ -1,7 +1,7 @@
 """Slicing: divide the final source image into regions for tile matching.
 
 The result of slicing is always a RegionSet: rectangles with a center, size,
-rotation and stacking order, in mosaic pixels (see layout.py). See base.py
+rotation and stacking order, in mosaic units (see layout.py). See base.py
 for how to write a new slicing operation.
 """
 
@@ -18,7 +18,7 @@ from skitter.core.slicing.base import (
     operation_types,
     register_operation,
 )
-from skitter.core.slicing.layout import TILE_ASPECTS, MosaicLayout
+from skitter.core.slicing.layout import TILE_ASPECTS, TILE_UNIT, MosaicLayout
 from skitter.core.slicing.params import (
     BoolParam,
     ChoiceParam,
@@ -45,6 +45,7 @@ __all__ = [
     "MAX_REGIONS",
     "REGION_DTYPE",
     "TILE_ASPECTS",
+    "TILE_UNIT",
     "BoolParam",
     "BrickPattern",
     "ChoiceParam",

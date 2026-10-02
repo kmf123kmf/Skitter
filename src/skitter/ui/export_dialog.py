@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+import numpy as np
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
@@ -18,13 +19,31 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from skitter.core.assembly import FORMATS, ExportReport, check_size, export_frame
+from skitter.core.assembly import (
+    FORMATS,
+    SIZE_BY,
+    SIZE_PARAMS,
+    ExportReport,
+    check_size,
+    enlargement,
+    export_frame,
+)
 from skitter.ui import preferences
 from skitter.ui.widgets.param_form import ParamForm
 
 WARNING_STYLE = "color: #c42b1c;"
 FILTERS = {"png": "PNG image (*.png)", "jpeg": "JPEG image (*.jpg *.jpeg)"}
 SUFFIX_FORMATS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}
+ENLARGED = 1.05  # a tile shown this much larger than its photo's pixels counts as enlarged
+
+
+def _pixels(width: float, height: float) -> str:
+    def number(value: float) -> str:
+        return f"{value:,.1f}".removesuffix(".0")
+
+    if abs(width - height) < 0.05:
+        return f"{number(width)} px"
+    return f"{number(width)} × {number(height)} px"
 
 
 class ExportDialog(QDialog):
@@ -51,6 +70,12 @@ class ExportDialog(QDialog):
         self.form.changed.connect(self._on_setting_changed)
         self.size_label = QLabel()
         self.tile_label = QLabel()
+        self.detail_label = QLabel()
+        self.detail_label.setWordWrap(True)
+        self.detail_label.setToolTip(
+            "Tiles shown larger than their photos have pixels for look soft. "
+            "A smaller size, or larger photos, avoid it."
+        )
         self.warning = QLabel()
         self.warning.setWordWrap(True)
         self.warning.setStyleSheet(WARNING_STYLE)
@@ -61,6 +86,7 @@ class ExportDialog(QDialog):
         info = QFormLayout()
         info.addRow("Image size:", self.size_label)
         info.addRow("Base tile:", self.tile_label)
+        info.addRow("Tile photos:", self.detail_label)
         options_layout.addLayout(info)
         options_layout.addWidget(self.warning)
 
@@ -167,12 +193,15 @@ class ExportDialog(QDialog):
             channels = 4 if self.settings.alpha else 3
             memory = w * h * channels / 2**20
             self.size_label.setText(f"{w:,} × {h:,} px ({w * h / 1e6:,.1f} MP, {memory:,.0f} MB)")
-            tw, th = session.project.layout.tile_size
-            s = self.settings.scale
-            self.tile_label.setText(f"{tw * s:,.0f} × {th * s:,.0f} px")
+            tw, th = session.slice_context.tile_size
+            s = frame.scale
+            self.tile_label.setText(_pixels(tw * s, th * s))
+            self._show_detail(frame.scale)
+            self._sync_sizes((max(1, round(tw * s)), w, h))
         else:
-            self.size_label.setText("—")
-            self.tile_label.setText("—")
+            for label in (self.size_label, self.tile_label, self.detail_label):
+                label.setText("—")
+                label.setStyleSheet("")
         problem = self._size_problem()
         self.warning.setText(problem or "")
         self.warning.setVisible(bool(problem))
@@ -187,6 +216,35 @@ class ExportDialog(QDialog):
             self.status.setText(f"Waiting for {session.busy} to finish…")
         elif not exporting and self.status.text().startswith("Waiting"):
             self.status.clear()
+
+    def _sync_sizes(self, sizes: tuple[int, int, int]) -> None:
+        """Show the resulting size in the inactive size fields, so switching keeps it."""
+        for (key, _), name, value in zip(SIZE_BY, SIZE_PARAMS, sizes, strict=True):
+            if key == self.settings.size_by:
+                continue
+            param = type(self.settings).__dict__[name]
+            value = min(max(value, param.min), param.max)
+            setattr(self.settings, name, value)
+            widget = self.form.editor(name).widget
+            widget.blockSignals(True)
+            widget.setValue(value)
+            widget.blockSignals(False)
+
+    def _show_detail(self, scale: float) -> None:
+        """Whether the tile photos have enough pixels for this size."""
+        library = self.session.library
+        ratio = enlargement(self.session.project.matches, library.width, scale)
+        enlarged = ratio > ENLARGED
+        if not enlarged.any():
+            self.detail_label.setText("Full detail (no tile is enlarged)")
+            self.detail_label.setStyleSheet("")
+            return
+        share = enlarged.mean()
+        self.detail_label.setText(
+            f"{np.count_nonzero(enlarged):,} of {len(ratio):,} tiles ({share:.0%}) enlarged, "
+            f"up to {ratio.max():,.1f}×"
+        )
+        self.detail_label.setStyleSheet(WARNING_STYLE if share > 0.1 else "")
 
     # Export
 

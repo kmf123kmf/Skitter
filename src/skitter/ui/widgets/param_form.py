@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QSpinBox,
     QWidget,
@@ -26,7 +25,6 @@ from skitter.core.slicing import (
     FloatParam,
     IntParam,
     Param,
-    TileSizeParam,
 )
 
 
@@ -36,8 +34,6 @@ class Editor:
     set_value: Callable[[object], None]
     # Connects a callback that receives the new value when the user edits it.
     on_change: Callable[[Callable[[object], None]], None]
-    # Receives the form's context (e.g. {"tile_size": (w, h)}) when it changes.
-    set_context: Callable[[dict], None] | None = None
     # Receives the target after any edit, to update what the editor offers.
     refresh: Callable[[object], None] | None = None
 
@@ -82,40 +78,6 @@ def _float_editor(param: FloatParam) -> Editor:
     return Editor(spin, spin.setValue, spin.valueChanged.connect)
 
 
-@register_editor(TileSizeParam)
-def _tile_size_editor(param: TileSizeParam) -> Editor:
-    """Base-tile multiple, with the size in mosaic pixels shown beside it."""
-    spin = QDoubleSpinBox()
-    spin.setDecimals(param.decimals)
-    spin.setRange(param.min, param.max)
-    spin.setSingleStep(param.step)
-    spin.setSuffix(param.suffix)
-    spin.setKeyboardTracking(False)
-    pixels = QLabel()
-    pixels.setStyleSheet("color: palette(placeholder-text);")
-    widget = QWidget()
-    layout = QHBoxLayout(widget)
-    layout.setContentsMargins(0, 0, 0, 0)
-    layout.addWidget(spin, stretch=1)
-    layout.addWidget(pixels)
-    context = {"tile_size": None}
-
-    def refresh() -> None:
-        tile = context["tile_size"]
-        if tile is None:
-            pixels.clear()
-            return
-        w, h = spin.value() * tile[0], spin.value() * tile[1]
-        pixels.setText(f"{w:,.0f} px" if abs(w - h) < 0.5 else f"{w:,.0f} × {h:,.0f} px")
-
-    def set_context(new: dict) -> None:
-        context.update(new)
-        refresh()
-
-    spin.valueChanged.connect(lambda _: refresh())
-    return Editor(widget, spin.setValue, spin.valueChanged.connect, set_context)
-
-
 @register_editor(BoolParam)
 def _bool_editor(param: BoolParam) -> Editor:
     check = QCheckBox()
@@ -157,14 +119,6 @@ class ParamForm(QWidget):
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._target = None
         self._rows: list[tuple[Param, Editor, QLabel]] = []
-        self._context: dict = {}
-
-    def set_context(self, **context) -> None:
-        """Information editors may display, e.g. tile_size=(w, h) in mosaic px."""
-        self._context.update(context)
-        for _, editor, _ in self._rows:
-            if editor.set_context is not None:
-                editor.set_context(self._context)
 
     def set_target(self, target) -> None:
         """Show editors for target's parameters (None clears the form)."""
@@ -177,8 +131,6 @@ class ParamForm(QWidget):
         for param in target.params():
             editor = create_editor(param)
             editor.set_value(getattr(target, param.name))
-            if editor.set_context is not None:
-                editor.set_context(self._context)
             editor.widget.setToolTip(param.help)
             editor.on_change(lambda value, p=param: self._on_edit(p, value))
             label = QLabel(f"{param.label}:")

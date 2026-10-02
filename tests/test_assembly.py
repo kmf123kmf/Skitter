@@ -12,6 +12,7 @@ from skitter.core.assembly import (
     ExportSettings,
     TileFiles,
     check_size,
+    enlargement,
     export_frame,
     render_mosaic,
     save_mosaic,
@@ -23,7 +24,7 @@ from skitter.core.slicing import MosaicLayout, RegionSet, SliceContext
 
 def context(width, height):
     """A context whose mosaic is width x height mosaic pixels."""
-    return SliceContext(np.zeros((height, width, 3), np.uint8), MosaicLayout(1, 1.0, width))
+    return SliceContext(np.zeros((height, width, 3), np.uint8), MosaicLayout(1.0, width), 1.0)
 
 
 def tile_files(tmp_path, images):
@@ -54,6 +55,7 @@ def noise(size, seed):
 
 
 def render(result, ctx, files, **settings):
+    settings.setdefault("tile_px", 1)  # one pixel per mosaic unit (the contexts' base tile)
     image, report = render_mosaic(result, ctx, files, ExportSettings(**settings), workers=0)
     return image, report
 
@@ -76,7 +78,7 @@ def test_mirroring_scale_and_missing_files(tmp_path):
     image, _ = render(result_for(regions, [0], mirrored=[True]), context(20, 20), files)
     np.testing.assert_array_equal(image, tile[:, ::-1])
 
-    image, _ = render(result_for(regions, [0]), context(20, 20), files, scale=2.0)
+    image, _ = render(result_for(regions, [0]), context(20, 20), files, tile_px=2)
     assert image.shape == (40, 40, 3)
 
     files.paths[0] = str(tmp_path / "gone.png")
@@ -118,8 +120,13 @@ def test_framing_transparency_and_stacking(tmp_path):
     regions = RegionSet.from_rects([0, 2], [0, 2], [12, 4], [8, 4], z=[0, 1])
     result = result_for(regions, [0, 1])
     ctx = context(10, 8)
-    assert export_frame(result, ctx, ExportSettings()).size == (10, 8)
-    assert export_frame(result, ctx, ExportSettings(framing="tiles")).size == (12, 8)
+    assert export_frame(result, ctx, ExportSettings(tile_px=1)).size == (10, 8)
+    assert export_frame(result, ctx, ExportSettings(tile_px=1, framing="tiles")).size == (12, 8)
+    by_width = ExportSettings(size_by="width", width_px=600, framing="tiles")
+    assert export_frame(result, ctx, by_width).size == (600, 400)
+    by_height = ExportSettings(size_by="height", height_px=80)
+    assert export_frame(result, ctx, by_height).size == (100, 80)
+    assert export_frame(result, ctx, ExportSettings(tile_px=30)).size == (300, 240)
 
     image, _ = render(result, ctx, files)
     assert image[0, 0, 0] == 50 and image[3, 3, 0] == 250
@@ -139,6 +146,14 @@ def test_strips_render_the_same_image(tmp_path, monkeypatch):
     monkeypatch.setattr(assembly, "CROP_BUDGET", 3000)
     stripped, _ = render(result, context(90, 300), files)
     np.testing.assert_array_equal(whole, stripped)
+
+
+def test_enlargement_compares_tile_size_with_photo_pixels():
+    regions = RegionSet.from_rects([0, 10], 0, 10, 10)
+    result = result_for(regions, [0, 1])
+    result.rect[1] = [0.25, 0, 0.75, 1]  # half the photo's width
+    ratio = enlargement(result, np.array([100, 100]), scale=20.0)  # 200 px tiles
+    np.testing.assert_allclose(ratio, [2.0, 4.0])
 
 
 def test_cancel(tmp_path):

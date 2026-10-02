@@ -30,7 +30,7 @@ from PIL import Image
 from skitter.core.color import LINEAR_LUT, rgb8_to_oklab_nb
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.slicing import SliceContext
-from skitter.core.slicing.params import ChoiceParam, Configurable, FloatParam, IntParam
+from skitter.core.slicing.params import ChoiceParam, Configurable, IntParam
 from skitter.core.tiles.library import TileLibrary
 from skitter.core.tiles.render import render_crops_or_thumbs
 
@@ -49,12 +49,31 @@ class ExportCancelled(Exception):
     pass
 
 
+SIZE_BY = (("tile", "Tile width"), ("width", "Image width"), ("height", "Image height"))
+SIZE_PARAMS = ("tile_px", "width_px", "height_px")  # the setting each SIZE_BY choice uses
+
+
 class ExportSettings(Configurable):
+    """How to export the mosaic. This is where the mosaic first gets a size in pixels."""
+
     format = ChoiceParam("png", "Format", choices=[("png", "PNG"), ("jpeg", "JPEG")])
-    scale = FloatParam(
-        1.0, "Scale", min=0.05, max=16.0, step=0.25, decimals=2, suffix=" ×",
-        help="Image pixels per mosaic pixel. Tiles are read from their original files, "
-             "so scales above 1 add real detail as long as the photos have it.",
+    size_by = ChoiceParam(
+        "tile", "Size by", choices=SIZE_BY,
+        help="Set the image size from the width of a base tile, or from the whole "
+             "image's width or height; the others follow.",
+    )  # fmt: skip
+    tile_px = IntParam(
+        100, "Tile width", min=1, max=20_000, suffix=" px", when=lambda s: s.size_by == "tile",
+        help="Width of a base tile in the image. Tiles are read from their original "
+             "files, so large tiles keep real detail as long as the photos have it.",
+    )  # fmt: skip
+    width_px = IntParam(
+        4000, "Image width", min=1, max=1_000_000, suffix=" px",
+        when=lambda s: s.size_by == "width",
+    )  # fmt: skip
+    height_px = IntParam(
+        3000, "Image height", min=1, max=1_000_000, suffix=" px",
+        when=lambda s: s.size_by == "height",
     )  # fmt: skip
     framing = ChoiceParam(
         "frame", "Framing",
@@ -88,7 +107,7 @@ class ExportSettings(Configurable):
 
 @dataclass(frozen=True)
 class Frame:
-    """The part of the mosaic exported, in mosaic pixels, and its output scale."""
+    """The part of the mosaic exported, in mosaic units, and pixels per unit."""
 
     x: float
     y: float
@@ -106,21 +125,42 @@ class Frame:
 
 
 def export_frame(result: MatchResult, ctx: SliceContext, settings: ExportSettings) -> Frame:
+    x, y, w, h = 0.0, 0.0, float(ctx.width), float(ctx.height)
     if settings.framing == "tiles":
         placed = result.tile >= 0
         if placed.any():
             bounds = result.regions.bounds()[placed]
-            x0, y0 = bounds[:, :2].min(axis=0)
+            x, y = (float(v) for v in bounds[:, :2].min(axis=0))
             x1, y1 = bounds[:, 2:].max(axis=0)
-            return Frame(float(x0), float(y0), float(x1 - x0), float(y1 - y0), settings.scale)
-    return Frame(0.0, 0.0, float(ctx.width), float(ctx.height), settings.scale)
+            w, h = float(x1) - x, float(y1) - y
+    if settings.size_by == "width":
+        scale = settings.width_px / w
+    elif settings.size_by == "height":
+        scale = settings.height_px / h
+    else:
+        scale = settings.tile_px / ctx.tile_size[0]
+    return Frame(x, y, w, h, scale)
+
+
+def enlargement(result: MatchResult, photo_width, scale: float) -> np.ndarray:
+    """How much each placed tile's crop is enlarged beyond its photo's resolution.
+
+    photo_width is each library slot's upright image width (indexable by
+    result.tile). Values above 1 mean the export shows the crop larger than
+    the photo has pixels for.
+    """
+    placed = np.flatnonzero(result.tile >= 0)
+    rect = result.rect[placed]
+    available = (rect[:, 2] - rect[:, 0]) * np.asarray(photo_width)[result.tile[placed]]
+    needed = result.regions.size[placed, 0] * scale
+    return needed / np.maximum(available, 1e-9)
 
 
 def check_size(size: tuple[int, int], settings: ExportSettings) -> str | None:
     """Why an image of this size can't be saved in the chosen format, if it can't."""
     if settings.format == "jpeg" and max(size) > JPEG_MAX:
         return (
-            f"JPEG images can be at most {JPEG_MAX:,} pixels on a side; use PNG or a smaller scale."
+            f"JPEG images can be at most {JPEG_MAX:,} pixels on a side; use PNG or a smaller size."
         )
     return None
 

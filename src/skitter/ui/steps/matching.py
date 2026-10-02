@@ -3,7 +3,7 @@
 Matching runs in the background (see core/matching). The preview draws each
 region's chosen tile crop, tinted as the settings ask: first from the
 library's thumbnails, then, once a background job has read them from the
-original files, from crops at the region's size in mosaic pixels (reduced
+original files, from crops of one texel per mosaic unit (reduced
 uniformly if they would exceed DETAIL_TEXELS). A heat map shows where the
 mosaic differs most from the image as seen from a distance.
 """
@@ -45,7 +45,7 @@ class TileDetail:
     """Full-detail crops, packed for the GPU."""
 
     atlas: PackedAtlas
-    scale: float  # texels per mosaic pixel (1.0 = full size)
+    scale: float  # texels per mosaic unit (1.0 = full size)
     failed: int  # files that could not be read (their thumbnails are shown)
 
 
@@ -157,7 +157,6 @@ class MatchingStep(StepPage):
 
     def _build_settings_group(self) -> QGroupBox:
         self.form = ParamForm()
-        self.form.set_context(tile_size=self.session.project.layout.tile_size)
         self.form.set_target(self.session.project.match_settings)
         self.form.changed.connect(lambda _: self.session.match_settings_edited())
         group = QGroupBox("Settings")
@@ -256,7 +255,6 @@ class MatchingStep(StepPage):
         self.cancel_button.setEnabled(matching)
         self.progress.setVisible(matching)
         self.form.setEnabled(not matching)
-        self.form.set_context(tile_size=session.project.layout.tile_size)
         self._error.setText(session.match_error or "")
         self._error.setVisible(bool(session.match_error))
         if not matching:

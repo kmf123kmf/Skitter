@@ -144,7 +144,7 @@ def test_raster_paints_in_stacking_order():
 
 
 def make_ctx(image, columns, tile=1):
-    return SliceContext(image, MosaicLayout(tile_width=tile, columns=columns))
+    return SliceContext(image, MosaicLayout(columns=columns), tile_width=tile)
 
 
 def test_region_descriptor_matches_tile_of_same_picture():

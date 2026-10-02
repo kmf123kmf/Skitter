@@ -45,7 +45,7 @@ class Raster:
 
     ids: np.ndarray
     origin: tuple[float, float]  # world position of pixel (0, 0)'s corner
-    px: float  # world units (mosaic px) per raster pixel
+    px: float  # mosaic units per raster pixel
 
     def lookup(self, points: np.ndarray) -> np.ndarray:
         """Topmost region index at (..., 2) world points (-1 outside the raster)."""

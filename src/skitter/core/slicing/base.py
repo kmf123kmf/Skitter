@@ -6,7 +6,7 @@ A slicing operation transforms a set of regions:
 
 A plan starts from one region covering the whole image and runs its
 operations in order. So one interface covers operations that split regions
-(grid, quadtree), adjust them (jitter, gap), filter or merge them, or add
+(grid, quadtree), adjust them (jitter, stacking), filter or merge them, or add
 regions drawn by hand.
 
 To add an operation: subclass `Subdivider` (to split each region on its own)
@@ -29,7 +29,7 @@ from typing import ClassVar
 
 import numpy as np
 
-from skitter.core.slicing.layout import MosaicLayout
+from skitter.core.slicing.layout import TILE_UNIT, MosaicLayout
 from skitter.core.slicing.params import Configurable
 from skitter.core.slicing.regions import Region, RegionSet
 
@@ -63,22 +63,35 @@ def region_rng(seed: int, region: Region) -> np.random.Generator:
 class SliceContext:
     """Read-only inputs available to slicing operations.
 
-    Slicing works in mosaic pixels: the canvas is (0, 0, width, height), the
-    final source image scaled uniformly to the mosaic layout. Operations size
-    regions from `tile_size` (the base tile) and read the image through
-    `patch`, which handles the scaling.
+    Slicing works in mosaic units (see layout.py): the canvas is (0, 0,
+    width, height), the final source image scaled uniformly to the mosaic
+    layout. Operations size regions from `tile_size` (the base tile) and
+    read the image through `patch`, which handles the scaling. Results do
+    not depend on the unit size other than by scale.
+
+    tile_width is the base tile's width in mosaic units: TILE_UNIT by
+    default, or one unit per source pixel (1 px tiles) when no layout is
+    given, which tests use.
 
     One context is created per final image and layout and reused across
     evaluations, so derived data (like luminance) is computed once.
     """
 
-    def __init__(self, image: np.ndarray, layout: MosaicLayout | None = None):
+    def __init__(
+        self,
+        image: np.ndarray,
+        layout: MosaicLayout | None = None,
+        tile_width: float | None = None,
+    ):
         self.image = image  # (H, W, 3) uint8 RGB, read-only
         h, w = image.shape[:2]
-        # Default layout: one mosaic pixel per source pixel, 1:1 tiles.
-        self.layout = layout or MosaicLayout(tile_width=1, columns=w)
-        self.width, self.height = self.layout.canvas_size(w, h)
-        self.scale = self.layout.scale(w)  # mosaic pixels per source pixel
+        if tile_width is None:
+            tile_width = 1.0 if layout is None else TILE_UNIT
+        self.layout = layout or MosaicLayout(columns=w)
+        self.tile_width = float(tile_width)
+        self.width = self.layout.columns * self.tile_width
+        self.height = self.width * h / w
+        self.scale = self.width / w  # mosaic units per source pixel
 
     @property
     def source_width(self) -> int:
@@ -90,8 +103,8 @@ class SliceContext:
 
     @property
     def tile_size(self) -> tuple[float, float]:
-        """Base tile (width, height) in mosaic pixels."""
-        return self.layout.tile_size
+        """Base tile (width, height) in mosaic units."""
+        return (self.tile_width, self.tile_width / self.layout.tile_aspect)
 
     @property
     def tile_aspect(self) -> float:
@@ -116,7 +129,7 @@ class SliceContext:
 
         Returns (samples, scale): samples[j, i] is the source pixel nearest to
         local point ((i + 0.5) / scale, (j + 0.5) / scale), so scale is samples
-        per mosaic pixel. It gives about one sample per source pixel, fewer if
+        per mosaic unit. It gives about one sample per source pixel, fewer if
         that would exceed max_samples. Points outside the image take the
         nearest edge pixel. source is "luminance" or "rgb".
         """

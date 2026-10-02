@@ -1,6 +1,6 @@
 """Regions: the output of slicing.
 
-A region is a rectangle in mosaic pixel coordinates (see layout.py), given by its
+A region is a rectangle in mosaic unit coordinates (see layout.py), given by its
 center, size (width, height), and rotation in radians. Rotation is clockwise
 on screen (image y points down), matching the GPU sprite shader, so regions
 can be drawn directly as sprite instances.
