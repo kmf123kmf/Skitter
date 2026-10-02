@@ -7,7 +7,14 @@ from PySide6.QtCore import QObject, Signal
 
 from skitter.core.edits import Edit, apply_edits
 from skitter.core.project import Project
-from skitter.core.slicing import RegionSet, SliceContext, SlicingError, StageResult
+from skitter.core.slicing import (
+    MosaicLayout,
+    SliceContext,
+    SliceSummary,
+    SlicingError,
+    StageResult,
+    summarize,
+)
 
 
 class Session(QObject):
@@ -20,7 +27,8 @@ class Session(QObject):
     source_changed = Signal()  # a new source image was loaded
     source_edited = Signal(object, bool)  # (edit, undone); edit is None after revert
     source_committed = Signal()  # project.source_final changed; later steps must refresh
-    slicing_changed = Signal()  # project.regions recomputed (see slicing_error)
+    layout_changed = Signal()  # project.layout changed (tile size, aspect, columns)
+    slicing_changed = Signal()  # project.regions recomputed (see slicing_error, slicing_summary)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -31,6 +39,7 @@ class Session(QObject):
         self._slice_context: SliceContext | None = None
         self._slicing_cache: list[StageResult] = []
         self.slicing_error: str | None = None
+        self.slicing_summary: SliceSummary | None = None
 
     def set_source(self, path: Path, image: np.ndarray) -> None:
         project = self.project
@@ -64,11 +73,30 @@ class Session(QObject):
         final.setflags(write=False)
         self.project.source_final = final
         self._committed_key = self._source_key()
-        self._slice_context = SliceContext(final)
-        self._slicing_cache = []
+        self._rebuild_slice_context()
         self._evaluate_slicing()
         self.source_committed.emit()
         return True
+
+    # Mosaic layout
+
+    def set_layout(self, layout: MosaicLayout) -> None:
+        """Change the base tile or column count; re-slices the final image."""
+        if layout == self.project.layout:
+            return
+        self.project.layout = layout
+        self._rebuild_slice_context()  # first, so listeners see the new mosaic size
+        self.layout_changed.emit()
+        self._evaluate_slicing()
+
+    def mosaic_size(self) -> tuple[float, float] | None:
+        """Canvas size in mosaic pixels, once the source is committed."""
+        ctx = self._slice_context
+        return None if ctx is None else (ctx.width, ctx.height)
+
+    @property
+    def slice_context(self) -> SliceContext | None:
+        return self._slice_context
 
     # Slicing
 
@@ -76,8 +104,16 @@ class Session(QObject):
         """Re-run slicing after project.slicing_plan (stages or parameters) changed."""
         self._evaluate_slicing()
 
+    def _rebuild_slice_context(self) -> None:
+        """New final image or layout: new context, no cached stage results."""
+        final = self.project.source_final
+        if final is not None:
+            self._slice_context = SliceContext(final, self.project.layout)
+        self._slicing_cache = []
+
     def _evaluate_slicing(self) -> None:
         project = self.project
+        self.slicing_summary = None
         if self._slice_context is None:
             project.regions = None
         else:
@@ -93,10 +129,10 @@ class Session(QObject):
                 self.slicing_error = None
                 ctx = self._slice_context
                 project.regions = (
-                    self._slicing_cache[-1].regions
-                    if self._slicing_cache
-                    else RegionSet.covering(ctx.width, ctx.height)
+                    self._slicing_cache[-1].regions if self._slicing_cache else ctx.canvas()
                 )
+                if project.regions:
+                    self.slicing_summary = summarize(project.regions, ctx)
         self.slicing_changed.emit()
 
     # Source edits

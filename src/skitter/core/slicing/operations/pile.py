@@ -5,7 +5,7 @@ import math
 import numpy as np
 
 from skitter.core.slicing.base import SliceContext, Subdivider, register_operation
-from skitter.core.slicing.params import ChoiceParam, FloatParam, IntParam
+from skitter.core.slicing.params import FloatParam, IntParam, TileSizeParam
 from skitter.core.slicing.regions import Region, RegionSet
 
 JITTER = 0.25  # center jitter, as a fraction of the cell spacing
@@ -17,42 +17,47 @@ class PileSlicer(Subdivider):
     name = "Photo Pile"
     description = (
         "Cover each region with a pile of overlapping, randomly rotated photos "
-        "stacked in random order. Every point is covered."
+        "in the base tile's shape, stacked in random order. At spread 1.0 every "
+        "point is covered."
     )
 
-    photo_size = FloatParam(
-        200.0, "Photo size", min=4.0, max=20_000.0, step=10.0, decimals=0, suffix=" px",
-        help="Length of each photo's longer side.",
-    )  # fmt: skip
-    aspect = ChoiceParam(1.5, "Aspect", choices=[(1.0, "Square"), (4 / 3, "4:3"), (1.5, "3:2")])
+    photo_size = TileSizeParam(1.0, "Photo size", help="Photo size in base tiles.")
     portrait = FloatParam(
         0.3, "Portrait share", min=0.0, max=1.0, step=0.05,
-        help="Fraction of photos turned to portrait orientation.",
+        help="Fraction of photos turned a quarter turn (portrait for landscape tiles).",
     )  # fmt: skip
     rotation = FloatParam(15.0, "Rotation", min=0.0, max=45.0, step=1.0, decimals=1, suffix="°")
-    overlap = FloatParam(
-        0.2, "Extra overlap", min=0.0, max=0.9, step=0.05,
-        help="Overlap beyond what full coverage needs. Higher means more, denser photos.",
+    spread = FloatParam(
+        1.25, "Spread", min=0.3, max=3.0, step=0.05,
+        help=(
+            "Photo spacing. 1.0 places photos as far apart as guaranteed full coverage "
+            "allows; higher uses fewer photos but may leave gaps (see Coverage); lower "
+            "piles them deeper."
+        ),
     )  # fmt: skip
     seed = IntParam(1, "Seed", min=0, max=999_999)
 
-    def spacing(self) -> float:
-        """Cell spacing that guarantees coverage.
+    def photo_dims(self, ctx: SliceContext) -> tuple[float, float]:
+        tile_w, tile_h = ctx.tile_size
+        return self.photo_size * tile_w, self.photo_size * tile_h
+
+    def spacing(self, ctx: SliceContext) -> float:
+        """Cell spacing; at spread 1.0 it guarantees coverage.
 
         Each photo, at any rotation up to the limit, contains an axis-aligned
         square of half-size r around its center. Centers sit in cells of this
         spacing, jittered by up to JITTER of it, so every point of a cell is
         within (0.5 + JITTER) * spacing of its photo's center on each axis.
         """
-        short = self.photo_size / self.aspect
+        short = min(self.photo_dims(ctx))
         theta = math.radians(self.rotation)
         r = (short / 2) / (math.cos(theta) + math.sin(theta))
-        return (1 - self.overlap) * 2 * r / (1 + 2 * JITTER)
+        return self.spread * 2 * r / (1 + 2 * JITTER)
 
     def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
         # Seed per region (by position) so neighbors don't get identical piles.
         rng = np.random.default_rng([self.seed, round(region.cx * 64), round(region.cy * 64)])
-        spacing = self.spacing()
+        spacing = self.spacing(ctx)
         nx = max(1, math.ceil(region.width / spacing))
         ny = max(1, math.ceil(region.height / spacing))
         cell_w, cell_h = region.width / nx, region.height / ny  # <= spacing: still covered
@@ -60,11 +65,12 @@ class PileSlicer(Subdivider):
         n = len(cells)
 
         jitter = rng.uniform(-JITTER, JITTER, (n, 2)) * (cell_w, cell_h)
-        long_side, short_side = self.photo_size, self.photo_size / self.aspect
-        portrait = rng.random(n) < self.portrait
-        size = np.where(portrait[:, None], (short_side, long_side), (long_side, short_side))
+        photo_w, photo_h = self.photo_dims(ctx)
+        turned = rng.random(n) < self.portrait
+        size = np.where(turned[:, None], (photo_h, photo_w), (photo_w, photo_h))
         turn = rng.uniform(-1, 1, n) * math.radians(self.rotation)
         return RegionSet.from_arrays(cells.center + jitter, size, turn, z=rng.permutation(n))
 
     def summary(self) -> str:
-        return f"{self.photo_size:g} px photos, ±{self.rotation:g}°"
+        size = "tile-size" if self.photo_size == 1 else f"{self.photo_size:g}× tile"
+        return f"{size} photos, ±{self.rotation:g}°"

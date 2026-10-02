@@ -115,11 +115,22 @@ class RegionSet:
     @classmethod
     def grid(cls, width: float, height: float, columns: int, rows: int) -> "RegionSet":
         """columns x rows equal cells exactly covering [0, width] x [0, height]."""
-        cell_w, cell_h = width / columns, height / rows
-        cx = (np.arange(columns) + 0.5) * cell_w
-        cy = (np.arange(rows) + 0.5) * cell_h
-        xx, yy = np.meshgrid(cx, cy)  # row-major: left to right, top to bottom
-        return cls.from_arrays(np.stack([xx.ravel(), yy.ravel()], axis=-1), (cell_w, cell_h))
+        return cls.cells(width / columns, height / rows, columns, rows)
+
+    @classmethod
+    def cells(
+        cls, cell_width: float, cell_height: float, columns: int, rows: int, origin=(0.0, 0.0)
+    ) -> "RegionSet":
+        """columns x rows cells of the given size, the first with its top-left at origin.
+
+        Ordered row by row: left to right, top to bottom.
+        """
+        cx = origin[0] + (np.arange(columns) + 0.5) * cell_width
+        cy = origin[1] + (np.arange(rows) + 0.5) * cell_height
+        xx, yy = np.meshgrid(cx, cy)
+        return cls.from_arrays(
+            np.stack([xx.ravel(), yy.ravel()], axis=-1), (cell_width, cell_height)
+        )
 
     @classmethod
     def concat(cls, sets: Iterable["RegionSet"]) -> "RegionSet":

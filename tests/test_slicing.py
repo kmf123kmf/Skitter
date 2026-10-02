@@ -8,6 +8,7 @@ from skitter.core.slicing import (
     BoolParam,
     FloatParam,
     IntParam,
+    MosaicLayout,
     Region,
     RegionSet,
     SliceContext,
@@ -16,17 +17,26 @@ from skitter.core.slicing import (
     SlicingPlan,
     Stage,
     Subdivider,
+    coverage,
     get_operation_type,
     operation_from_dict,
     operation_types,
     register_operation,
+    summarize,
 )
 from skitter.core.slicing.base import _registry
 from skitter.core.slicing.operations import GapAdjust, GridSlicer, JitterAdjust, QuadtreeSlicer
 
 
 def blank(width=100, height=60):
+    """One mosaic pixel per source pixel, 1 px base tiles."""
     return SliceContext(np.zeros((height, width, 3), np.uint8))
+
+
+def tiled(width, height, tile, aspect=1.0):
+    """Canvas the same size as the image, with tile x tile/aspect base tiles."""
+    layout = MosaicLayout(tile_width=tile, tile_aspect=aspect, columns=width // tile)
+    return SliceContext(np.zeros((height, width, 3), np.uint8), layout)
 
 
 # Regions
@@ -159,8 +169,8 @@ def test_register_custom_operation_roundtrips():
 # Plans
 
 
-def test_default_plan_is_square_grid():
-    regions = SlicingPlan.default().regions(blank(240, 120))
+def test_default_plan_is_grid_of_base_tiles():
+    regions = SlicingPlan.default().regions(tiled(240, 120, tile=10))
     assert len(regions) == 24 * 12
     np.testing.assert_allclose(regions.size[0], [10, 10])
 
@@ -171,7 +181,12 @@ def test_empty_plan_yields_whole_image():
 
 
 def test_disabled_stage_passes_through():
-    plan = SlicingPlan([Stage(GridSlicer(columns=4)), Stage(GridSlicer(columns=2), enabled=False)])
+    plan = SlicingPlan(
+        [
+            Stage(GridSlicer(mode="count", columns=4)),
+            Stage(GridSlicer(mode="count", columns=2), enabled=False),
+        ]
+    )
     assert len(plan.regions(blank(100, 100))) == 16
 
 
@@ -185,7 +200,9 @@ def test_evaluate_reuses_unchanged_prefix():
             calls.append(self.columns)
             return super().apply(regions, ctx)
 
-    plan = SlicingPlan([Stage(Counting(columns=2)), Stage(Counting(columns=3))])
+    plan = SlicingPlan(
+        [Stage(Counting(mode="count", columns=2)), Stage(Counting(mode="count", columns=3))]
+    )
     ctx = blank(60, 60)
     cache = plan.evaluate(ctx)
     plan.stages[1].operation.columns = 4
@@ -195,7 +212,8 @@ def test_evaluate_reuses_unchanged_prefix():
 
 
 def test_too_many_regions_raises():
-    plan = SlicingPlan([Stage(GridSlicer(columns=1000, square_cells=False, rows=1000))])
+    grid = GridSlicer(mode="count", columns=1000, square_cells=False, rows=1000)
+    plan = SlicingPlan([Stage(grid)])
     with pytest.raises(SlicingError, match=f"{MAX_REGIONS:,}"):
         plan.evaluate(blank())
 
@@ -230,7 +248,8 @@ def test_grid_square_cells_follow_aspect():
 
 def test_grid_inside_rotated_region_stays_inside():
     parent = RegionSet.from_arrays([[50, 50]], (40, 20), math.pi / 6)
-    cells = GridSlicer(columns=4, square_cells=False, rows=2).apply(parent, blank())
+    grid = GridSlicer(mode="count", columns=4, square_cells=False, rows=2)
+    cells = grid.apply(parent, blank())
     assert len(cells) == 8
     for corner in cells.corners().reshape(-1, 2):
         assert parent.contains(*(corner * 0.999 + parent.center[0] * 0.001))[0]
@@ -325,9 +344,10 @@ def test_jitter_and_gap_preserve_stacking():
 def test_pile_covers_every_point_with_random_stacking():
     from skitter.core.slicing.operations import PileSlicer
 
-    ctx = blank(600, 400)
-    pile = PileSlicer(photo_size=120, rotation=30, overlap=0.0, portrait=0.5)
-    regions = pile.apply(RegionSet.covering(600, 400), ctx)
+    ctx = tiled(600, 400, tile=120, aspect=1.5)
+    pile = PileSlicer(rotation=30, spread=1.0, portrait=0.5)  # 1.0: coverage guaranteed
+    regions = pile.apply(ctx.canvas(), ctx)
+    assert {tuple(size) for size in regions.size.tolist()} == {(120.0, 80.0), (80.0, 120.0)}
     assert sorted(regions.z.tolist()) == list(range(len(regions)))
     assert np.abs(regions.rotation).max() <= math.radians(30) + 1e-9
     ys, xs = np.mgrid[0:400:5, 0:600:5]
@@ -338,9 +358,10 @@ def test_pile_covers_every_point_with_random_stacking():
 def test_pile_is_deterministic_per_seed():
     from skitter.core.slicing.operations import PileSlicer
 
-    a = PileSlicer(seed=4).apply(RegionSet.covering(500, 500), blank(500, 500))
-    b = PileSlicer(seed=4).apply(RegionSet.covering(500, 500), blank(500, 500))
-    c = PileSlicer(seed=5).apply(RegionSet.covering(500, 500), blank(500, 500))
+    ctx = tiled(500, 500, tile=50)
+    a = PileSlicer(seed=4).apply(ctx.canvas(), ctx)
+    b = PileSlicer(seed=4).apply(ctx.canvas(), ctx)
+    c = PileSlicer(seed=5).apply(ctx.canvas(), ctx)
     np.testing.assert_array_equal(a.data, b.data)
     assert not np.array_equal(a.data, c.data)
 
@@ -358,3 +379,83 @@ def test_stacking_order_operation():
     shuffled = StackingAdjust(order="random", seed=3).apply(regions, blank())
     assert sorted(shuffled.z.tolist()) == [0, 1, 2]
     assert not StackingAdjust.seed.is_active(StackingAdjust(order="reverse"))
+
+
+# Mosaic layout, mosaic-pixel slicing, analysis
+
+
+def test_layout_derives_canvas_rows_and_scale():
+    layout = MosaicLayout(tile_width=80, tile_aspect=4 / 3, columns=40)
+    assert layout.tile_size == (80.0, 60.0)
+    assert layout.canvas_size(3000, 2000) == (3200.0, pytest.approx(3200 * 2 / 3))
+    assert layout.rows(3000, 2000) == pytest.approx(35.555, abs=1e-3)
+    assert layout.whole_rows(3000, 2000) == 36
+    assert layout.scale(3000) == pytest.approx(3200 / 3000)
+    assert MosaicLayout.from_dict(layout.to_dict()) == layout
+    assert layout.replace(columns=10).canvas_width == 800
+    with pytest.raises(ValueError):
+        MosaicLayout(columns=0)
+
+
+def test_tile_grid_is_centered_with_overhang():
+    ctx = tiled(100, 65, tile=10)  # 6.5 rows of tiles
+    regions = GridSlicer().apply(ctx.canvas(), ctx)
+    assert len(regions) == 10 * 7
+    assert regions.bounds()[:, 1].min() == pytest.approx(-2.5)  # overhang split top/bottom
+    assert regions.bounds()[:, 3].max() == pytest.approx(67.5)
+    top_left = GridSlicer(anchor="top_left").apply(ctx.canvas(), ctx)
+    assert top_left.bounds()[:, 1].min() == 0 and top_left.bounds()[:, 3].max() == 70
+
+
+def test_tile_grid_follows_tile_shape_and_cell_size():
+    ctx = tiled(120, 120, tile=30, aspect=1.5)  # 30 x 20 tiles
+    regions = GridSlicer(cell_size=2).apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(regions.size[0], [60, 40])
+    assert len(regions) == 2 * 3
+
+
+def test_context_works_in_mosaic_pixels():
+    image = np.zeros((10, 10, 3), np.uint8)
+    image[2, 7] = 255
+    ctx = SliceContext(image, MosaicLayout(tile_width=5, columns=4))  # 20 x 20 canvas
+    assert (ctx.width, ctx.height, ctx.scale) == (20, 20, 2)
+    patch, per_px = ctx.patch(Region(15, 5, 2, 2), source="rgb")
+    assert per_px == 0.5 and patch.shape == (1, 1, 3) and patch[0, 0, 0] == 255
+
+
+def test_quadtree_minimum_is_in_tiles():
+    image = (np.indices((64, 64)).sum(0) % 2 * 255).astype(np.uint8)[..., None].repeat(3, -1)
+    ctx = SliceContext(image, MosaicLayout(tile_width=16, columns=4))  # busy everywhere
+    regions = QuadtreeSlicer(min_size=0.5, max_depth=8).apply(ctx.canvas(), ctx)
+    assert regions.size.min() == 8  # half a 16 px tile, never smaller
+
+
+def test_coverage_estimates():
+    full = RegionSet.covering(100, 50)
+    assert coverage(full, 100, 50, spacing=5)[0] == 1.0
+    left_half = RegionSet.from_rects(0, 0, 50, 50)
+    assert coverage(left_half, 100, 50, spacing=5)[0] == pytest.approx(0.5, abs=0.02)
+    rotated = RegionSet.from_arrays([[50, 25]], (40, 40), math.pi / 4)  # diamond, area 1600
+    assert coverage(rotated, 100, 50, spacing=1)[0] == pytest.approx(
+        (1600 - 2 * 0.5 * 3.28**2 * 4) / 5000, abs=0.02
+    )  # the diamond pokes past the canvas top and bottom
+    assert coverage(RegionSet(), 10, 10, spacing=1)[0] == 0.0
+
+
+def test_summary_reports_density_coverage_and_sizes():
+    ctx = SliceContext(np.zeros((60, 100, 3), np.uint8), MosaicLayout(tile_width=20, columns=10))
+    grid = SlicingPlan.default().regions(ctx)  # 200 x 120 canvas, 20 px tiles
+    summary = summarize(grid, ctx)
+    assert summary.count == 60 and summary.density == pytest.approx(1.0)
+    assert summary.coverage == 1.0
+    assert summary.median == (20.0, 20.0)
+    assert summary.source_px_per_tile == pytest.approx(10.0)
+    gapped = summarize(GapAdjust(gap=4).apply(grid, ctx), ctx)
+    assert gapped.coverage == pytest.approx(0.64, abs=0.03)  # 16 x 16 of each 20 x 20 tile
+
+
+def test_tile_size_param_defaults():
+    from skitter.core.slicing import TileSizeParam
+
+    assert GridSlicer.cell_size.suffix == " × tile"
+    assert isinstance(QuadtreeSlicer.min_size, TileSizeParam)

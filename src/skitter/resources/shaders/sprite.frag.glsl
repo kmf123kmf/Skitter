@@ -44,9 +44,14 @@ void main() {
 
     vec4 color;
     if (u_outline_px > 0.0) {
-        vec4 fill = u_project == 1
-            ? vec4(texture(u_textures, vec3(v_world / u_texture_size, 0.0)).rgb, 1.0)
-            : vec4(v_tint.rgb, u_fill_alpha);
+        vec2 uv = v_world / u_texture_size;
+        bool beyond = any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)));
+        vec4 fill = vec4(v_tint.rgb, u_fill_alpha);
+        if (u_project == 1) {
+            // Parts of regions hanging past the texture show a neutral gray.
+            fill = beyond ? vec4(0.24, 0.24, 0.26, 0.92)
+                          : vec4(texture(u_textures, vec3(uv, 0.0)).rgb, 1.0);
+        }
         color = mix(fill, vec4(0.0, 0.0, 0.0, max(fill.a, 0.55)), band(inside_px, u_outline_px + u_edge_px));
         color = mix(color, vec4(v_tint.rgb, 1.0), band(inside_px, u_outline_px));
     } else {

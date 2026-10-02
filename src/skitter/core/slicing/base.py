@@ -29,6 +29,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 
+from skitter.core.slicing.layout import MosaicLayout
 from skitter.core.slicing.params import Param
 from skitter.core.slicing.regions import Region, RegionSet
 
@@ -43,20 +44,43 @@ class SlicingError(Exception):
 class SliceContext:
     """Read-only inputs available to slicing operations.
 
-    One context is created per final source image and reused across
+    Slicing works in mosaic pixels: the canvas is (0, 0, width, height), the
+    final source image scaled uniformly to the mosaic layout. Operations size
+    regions from `tile_size` (the base tile) and read the image through
+    `patch`, which handles the scaling.
+
+    One context is created per final image and layout and reused across
     evaluations, so derived data (like luminance) is computed once.
     """
 
-    def __init__(self, image: np.ndarray):
+    def __init__(self, image: np.ndarray, layout: MosaicLayout | None = None):
         self.image = image  # (H, W, 3) uint8 RGB, read-only
+        h, w = image.shape[:2]
+        # Default layout: one mosaic pixel per source pixel, 1:1 tiles.
+        self.layout = layout or MosaicLayout(tile_width=1, columns=w)
+        self.width, self.height = self.layout.canvas_size(w, h)
+        self.scale = self.layout.scale(w)  # mosaic pixels per source pixel
 
     @property
-    def width(self) -> int:
+    def source_width(self) -> int:
         return self.image.shape[1]
 
     @property
-    def height(self) -> int:
+    def source_height(self) -> int:
         return self.image.shape[0]
+
+    @property
+    def tile_size(self) -> tuple[float, float]:
+        """Base tile (width, height) in mosaic pixels."""
+        return self.layout.tile_size
+
+    @property
+    def tile_aspect(self) -> float:
+        return self.layout.tile_aspect
+
+    def canvas(self) -> RegionSet:
+        """One region covering the whole canvas: where every plan starts."""
+        return RegionSet.covering(self.width, self.height)
 
     @cached_property
     def luminance(self) -> np.ndarray:
@@ -69,27 +93,31 @@ class SliceContext:
     def patch(
         self, region: Region, source: str = "luminance", max_samples: int = 4_000_000
     ) -> tuple[np.ndarray, float]:
-        """Sample the image inside region on a grid aligned with the region's frame.
+        """Sample the source image inside a (canvas) region, aligned with its frame.
 
-        Returns (samples, scale): samples[j, i] is the nearest pixel to local
-        point ((i + 0.5) / scale, (j + 0.5) / scale). scale is 1 (one sample
-        per pixel) unless that would exceed max_samples. Points outside the
-        image take the nearest edge pixel. source is "luminance" or "rgb".
+        Returns (samples, scale): samples[j, i] is the source pixel nearest to
+        local point ((i + 0.5) / scale, (j + 0.5) / scale), so scale is samples
+        per mosaic pixel. It gives about one sample per source pixel, fewer if
+        that would exceed max_samples. Points outside the image take the
+        nearest edge pixel. source is "luminance" or "rgb".
         """
         image = self.luminance if source == "luminance" else self.image
-        scale = min(1.0, math.sqrt(max_samples / max(region.area, 1.0)))
+        scale = min(1.0 / self.scale, math.sqrt(max_samples / max(region.area, 1.0)))
         pw = max(1, math.ceil(region.width * scale))
         ph = max(1, math.ceil(region.height * scale))
         u = (np.arange(pw) + 0.5) / scale
         v = (np.arange(ph) + 0.5) / scale
+        src_w, src_h = self.source_width, self.source_height
         if region.is_axis_aligned:
-            xs = np.clip(np.floor(region.cx - region.width / 2 + u), 0, self.width - 1)
-            ys = np.clip(np.floor(region.cy - region.height / 2 + v), 0, self.height - 1)
-            return image[np.ix_(ys.astype(int), xs.astype(int))], scale
+            xs = np.floor((region.cx - region.width / 2 + u) / self.scale)
+            ys = np.floor((region.cy - region.height / 2 + v) / self.scale)
+            xs = np.clip(xs, 0, src_w - 1).astype(int)
+            ys = np.clip(ys, 0, src_h - 1).astype(int)
+            return image[np.ix_(ys, xs)], scale
         uu, vv = np.meshgrid(u, v)
-        world = region.local_to_world(np.stack([uu, vv], axis=-1))
-        xi = np.clip(np.floor(world[..., 0]), 0, self.width - 1).astype(int)
-        yi = np.clip(np.floor(world[..., 1]), 0, self.height - 1).astype(int)
+        world = region.local_to_world(np.stack([uu, vv], axis=-1)) / self.scale
+        xi = np.clip(np.floor(world[..., 0]), 0, src_w - 1).astype(int)
+        yi = np.clip(np.floor(world[..., 1]), 0, src_h - 1).astype(int)
         return image[yi, xi], scale
 
 

@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from skitter.core.edits import Edit
-from skitter.core.slicing import RegionSet, SlicingPlan
+from skitter.core.slicing import MosaicLayout, RegionSet, SlicingPlan
 
 
 @dataclass
@@ -19,8 +19,9 @@ class Project:
     # step. Every later step works from this, not from the editable image.
     source_final: np.ndarray | None = None
 
+    layout: MosaicLayout = field(default_factory=MosaicLayout)  # base tile and columns
     slicing_plan: SlicingPlan = field(default_factory=SlicingPlan.default)
-    regions: RegionSet | None = None  # slicing_plan evaluated on source_final
+    regions: RegionSet | None = None  # slicing_plan evaluated on source_final, mosaic px
 
     @property
     def has_source(self) -> bool:

@@ -3,6 +3,7 @@
 import numpy as np
 import pytest
 from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QLabel
 
 from skitter.core.edits import Crop
 from skitter.core.imaging import save_image
@@ -62,7 +63,7 @@ def test_next_commits_source_and_opens_slicing(window, source):
     assert final[0, 0, 0] == 0  # the flip is baked in
     assert window.tabs.currentWidget() is window.step(SlicingStep)
     assert window.step(SlicingStep).viewer.image is final
-    assert window.step(SlicingStep)._size.text() == "40 × 30 px"
+    assert window.step(SlicingStep)._mosaic_px.text() == "3,200 × 2,400 px"  # 40 x 80 px tiles
     assert window.next_button.isHidden()  # last step
     assert not window.back_button.isHidden()
 
@@ -185,18 +186,49 @@ def flush(qapp):
     qapp.processEvents()  # runs the coalesced recompute timer
 
 
-def test_slicing_shows_default_grid(slicing):
+def test_slicing_shows_default_grid_of_base_tiles(slicing):
+    # 40x30 image, default layout: 40 columns of 80 px square tiles -> 3200 x 2400 canvas.
     regions = slicing.session.project.regions
-    assert len(regions) == 24 * 18  # 40x30 image, square cells
-    assert slicing._count.text() == f"{len(regions):,}"
+    assert len(regions) == 40 * 30
+    assert slicing.viewer.world_size == (3200, 2400)
+    assert slicing._count.text() == "1,200"
+    assert slicing._density.text() == "1.00×"
+    assert slicing._coverage.text() == "100.0%"
+    assert slicing._rows.text() == "30"
     assert slicing.overlay.regions is regions
-    assert slicing._stages.count() == 1
-    assert slicing._stages.item(0).text() == "Grid — 24 columns, square cells"
+    assert slicing._stages.item(0).text() == "Grid — base tiles"
+    assert "c42b1c" in slicing._source_px.styleSheet()  # 1 source px per tile: warn
     assert slicing.is_complete()
 
 
+def test_layout_controls_resize_mosaic_and_reslice(slicing, qapp):
+    slicing.columns.setValue(10)
+    flush(qapp)
+    assert slicing.session.project.layout.columns == 10
+    assert slicing._mosaic_px.text() == "800 × 600 px"
+    assert len(slicing.session.project.regions) == 10 * 8  # 7.5 rows -> 8 with overhang
+    assert slicing._rows.text() == "7.50 (8 whole)"
+    assert slicing.viewer.world_size == (800, 600)
+    assert slicing._source_px.styleSheet() == ""  # 4 source px per tile
+
+    slicing.tile_aspect.setCurrentIndex(1)  # 4:3
+    flush(qapp)
+    assert slicing._tile_px.text() == "80 × 60 px"
+    assert len(slicing.session.project.regions) == 10 * 10
+
+    slicing.tile_width.setValue(40)
+    flush(qapp)
+    assert slicing._mosaic_px.text() == "400 × 300 px"
+    assert slicing.form.editor("cell_size").widget.findChild(QLabel).text() == "40 × 30 px"
+
+
 def test_param_form_edits_recompute_regions(slicing, qapp):
-    slicing.form.editor("columns").widget.setValue(4)
+    columns = slicing.form.editor("columns").widget
+    assert not columns.isEnabled()  # count settings inactive in base-tile mode
+    slicing.form.editor("mode").widget.setCurrentIndex(1)  # fixed count
+    assert columns.isEnabled()
+    assert not slicing.form.editor("cell_size").widget.isEnabled()
+    columns.setValue(4)
     flush(qapp)
     assert len(slicing.session.project.regions) == 4 * 3
     assert slicing._stages.item(0).text() == "Grid — 4 columns, square cells"
@@ -219,7 +251,9 @@ def test_add_reorder_disable_remove_stages(slicing, qapp):
     assert [type(s.operation) for s in slicing.plan.stages] == [GridSlicer, GapAdjust]
     assert slicing.current_row() == 1
     assert slicing._settings_group.title() == "Gap Settings"
-    assert slicing.session.project.regions.size[0, 0] < 40 / 24
+    assert slicing.session.project.regions.size[0, 0] == 78  # 80 px tiles, 2 px gap
+    assert float(slicing._coverage.text().rstrip("%")) < 100
+    assert "c42b1c" in slicing._coverage.styleSheet()
 
     slicing.move_stage(-1)
     assert [type(s.operation) for s in slicing.plan.stages] == [GapAdjust, GridSlicer]
@@ -235,6 +269,7 @@ def test_add_reorder_disable_remove_stages(slicing, qapp):
 
 
 def test_slicing_error_is_reported(slicing, qapp):
+    slicing.form.editor("mode").widget.setCurrentIndex(1)
     slicing.form.editor("square_cells").widget.setChecked(False)
     slicing.form.editor("columns").widget.setValue(1000)
     slicing.form.editor("rows").widget.setValue(1000)
@@ -245,16 +280,18 @@ def test_slicing_error_is_reported(slicing, qapp):
     assert not slicing.is_complete()
 
 
-def test_recommitted_source_keeps_plan_and_reslices(window, slicing, qapp):
+def test_recommitted_source_keeps_layout_and_plan(window, slicing, qapp):
     from skitter.ui.steps.source import SourceStep
 
-    slicing.form.editor("columns").widget.setValue(4)
+    slicing.columns.setValue(4)
     flush(qapp)
     window.back_button.click()
     window.step(SourceStep).rotate_right_action.trigger()
     window.next_button.click()
-    assert slicing.plan.stages[0].operation.columns == 4
-    assert len(slicing.session.project.regions) == 4 * 5  # now 30x40, portrait
+    assert slicing.session.project.layout.columns == 4
+    assert slicing.columns.value() == 4
+    assert slicing._mosaic_px.text() == "320 × 427 px"  # now portrait
+    assert len(slicing.session.project.regions) == 4 * 6  # 5.33 rows -> 6
 
 
 def test_overlay_draws_in_stacking_order():
@@ -270,14 +307,14 @@ def test_pile_hover_reports_topmost_region(slicing, qapp):
     from skitter.core.slicing import Stage
     from skitter.core.slicing.operations import PileSlicer
 
-    slicing.plan.stages[:] = [Stage(PileSlicer(photo_size=12, rotation=20))]
+    slicing.plan.stages[:] = [Stage(PileSlicer(rotation=20))]
     slicing._refresh_stages(select=0)
     slicing.session.slicing_edited()
     regions = slicing.session.project.regions
-    assert len(regions) > 4
+    assert len(regions) > 1200  # denser than the grid of base tiles
 
-    slicing.viewer.canvas.cursor_moved.emit(20.0, 15.0)
-    expected = regions.hit_test(20.0, 15.0)
+    slicing.viewer.canvas.cursor_moved.emit(1600.0, 1200.0)
+    expected = regions.hit_test(1600.0, 1200.0)
     assert slicing.overlay.highlighted == expected
     assert f"of {len(regions):,}" in slicing._hover.text()
     slicing.viewer.canvas.cursor_left.emit()

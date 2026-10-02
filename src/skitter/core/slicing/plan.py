@@ -30,7 +30,7 @@ class StageResult:
 
 
 class SlicingPlan:
-    """Stages run in order, starting from one region covering the whole image.
+    """Stages run in order, starting from one region covering the whole canvas.
 
     Disabled stages pass their input through unchanged.
     """
@@ -51,7 +51,7 @@ class SlicingPlan:
         editing stage k only stages k onward are recomputed. A cache is only
         valid for the context it was computed with.
         """
-        regions = RegionSet.covering(ctx.width, ctx.height)
+        regions = ctx.canvas()
         results: list[StageResult] = []
         reusing = cache is not None
         for i, stage in enumerate(self.stages):
@@ -72,7 +72,7 @@ class SlicingPlan:
 
     def regions(self, ctx: SliceContext) -> RegionSet:
         results = self.evaluate(ctx)
-        return results[-1].regions if results else RegionSet.covering(ctx.width, ctx.height)
+        return results[-1].regions if results else ctx.canvas()
 
     def to_dict(self) -> dict:
         return {

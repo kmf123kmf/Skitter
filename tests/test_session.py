@@ -97,3 +97,28 @@ def test_reloading_source_invalidates_commit(session):
     session.commit_source()
     session.set_source("photo.png", session.project.source_original)
     assert not session.source_is_committed
+
+
+def test_layout_before_commit_is_kept_and_used(session):
+    from skitter.core.slicing import MosaicLayout
+
+    session.set_layout(MosaicLayout(tile_width=2, columns=2))  # no final image yet
+    assert session.project.regions is None and session.mosaic_size() is None
+    session.commit_source()  # 2x4 image -> 4 x 2 canvas
+    assert session.mosaic_size() == (4.0, 2.0)
+    assert len(session.project.regions) == 2  # 2 columns x 1 row of 2 px tiles
+
+
+def test_layout_change_reslices_and_announces_new_size(session):
+    from skitter.core.slicing import MosaicLayout
+
+    session.commit_source()
+    seen = []
+    session.layout_changed.connect(lambda: seen.append(session.mosaic_size()))
+    sliced = record(session.slicing_changed)
+    session.set_layout(MosaicLayout(tile_width=10, columns=3))
+    assert seen == [(30.0, 15.0)]  # listeners already see the new size
+    assert len(sliced) == 1
+    assert session.slicing_summary.count == 3 * 2  # 1.5 rows -> 2 with overhang
+    session.set_layout(MosaicLayout(tile_width=10, columns=3))  # unchanged: no-op
+    assert len(seen) == 1

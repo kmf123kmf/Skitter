@@ -1,7 +1,9 @@
 """Image viewer: GPU canvas with scrollbars, zoom controls, and animated edits.
 
-World coordinates on the canvas equal image pixel coordinates: the image
-occupies the world rect (0, 0, width, height).
+By default world coordinates on the canvas equal image pixel coordinates:
+the image occupies the world rect (0, 0, width, height). A world size can be
+given instead, stretching the image over (0, 0, world_w, world_h); the
+Slicing step uses this to show the source at mosaic scale.
 """
 
 from collections.abc import Callable
@@ -100,6 +102,8 @@ class ImageViewer(QWidget):
         self._transition: object | None = None
         self._finalize: Callable[[], None] | None = None
         self._dimming = 0.0
+        self._world_size: tuple[float, float] | None = None  # None: image pixels
+        self._content_bounds: tuple[float, float, float, float] | None = None
 
         self.canvas = MosaicCanvas()
         self.canvas.clamp_to_bounds = True
@@ -224,10 +228,10 @@ class ImageViewer(QWidget):
         self.zoom_changed.emit(percent)
 
     def _update_zoom_limits(self) -> None:
-        if self.image is None:
+        if self.image is None or self.canvas.bounds is None:
             return
         cam, dpr = self.canvas.camera, self.canvas.devicePixelRatioF()
-        h, w = self.image.shape[:2]
+        _, _, w, h = self.canvas.bounds
         fit = self.canvas.fit_margin * min(cam.viewport[0] / w, cam.viewport[1] / h)
         cam.min_zoom = min(MIN_ZOOM_PERCENT / 100 / dpr, fit)
         cam.max_zoom = MAX_ZOOM_PERCENT / 100 / dpr
@@ -267,13 +271,15 @@ class ImageViewer(QWidget):
     def _show_cursor(self, x: float, y: float) -> None:
         if self.image is None:
             return
-        px, py = int(np.floor(x)), int(np.floor(y))
         h, w = self.image.shape[:2]
+        world_w, world_h = self._world_dims(self.image)
+        px, py = int(np.floor(x * w / world_w)), int(np.floor(y * h / world_h))
         if not (0 <= px < w and 0 <= py < h):
             self._clear_cursor()
             return
         r, g, b = (int(v) for v in self.image[py, px, :3])
-        self._cursor_label.setText(f"X {px}   Y {py}     RGB {r}, {g}, {b}")
+        wx, wy = int(np.floor(x)), int(np.floor(y))
+        self._cursor_label.setText(f"X {wx}   Y {wy}     RGB {r}, {g}, {b}")
         self._swatch.setStyleSheet(f"background: rgb({r},{g},{b}); border: 1px solid gray;")
         self._swatch.show()
 
@@ -283,10 +289,16 @@ class ImageViewer(QWidget):
 
     # Showing images
 
-    def show_image(self, image: np.ndarray) -> None:
-        """Display a new image: fit it to the view and fade it in."""
+    def show_image(self, image: np.ndarray, world_size: tuple[float, float] | None = None) -> None:
+        """Display a new image: fit it to the view and fade it in.
+
+        world_size stretches the image over (0, 0, *world_size) instead of
+        its own pixel size.
+        """
         self._finish_transition()
         self.image = image
+        self._world_size = world_size
+        self._content_bounds = None
         layer = self._make_layer(image, alpha=0.0)
         self._set_layer(layer)
         self._set_bounds(image)
@@ -357,6 +369,38 @@ class ImageViewer(QWidget):
         self._set_bounds(image)
         self.canvas.zoom_to_fit(animate=True, duration=TRANSITION_S)
 
+    def set_world_size(self, width: float, height: float) -> None:
+        """Re-stretch the current image over (0, 0, width, height) and refit."""
+        self._finish_transition()
+        self._world_size = (width, height)
+        if self._layer is not None:
+            self._layer.instances["pos"] = (width / 2, height / 2)
+            self._layer.instances["size"] = (width, height)
+            self._layer.mark_dirty()
+        self._set_bounds(self.image)
+        self.canvas.zoom_to_fit(animate=True)
+
+    def set_content_bounds(self, bounds: tuple[float, float, float, float] | None) -> None:
+        """World rect (x, y, w, h) to fit and scroll over, if larger than the image.
+
+        For example, tiles overhanging the image edges. Refits if in fit mode.
+        """
+        self._content_bounds = bounds
+        self._set_bounds(self.image)
+        if self.canvas.fit_mode:
+            self.canvas.zoom_to_fit(animate=True)
+
+    @property
+    def world_size(self) -> tuple[float, float] | None:
+        """The world size the image is stretched over, or None for its pixel size."""
+        return self._world_size
+
+    def _world_dims(self, image: np.ndarray) -> tuple[float, float]:
+        if self._world_size is not None:
+            return self._world_size
+        h, w = image.shape[:2]
+        return float(w), float(h)
+
     @property
     def image_layer(self) -> SpriteLayer | None:
         """The canvas layer currently showing the image (replaced by some edits)."""
@@ -371,7 +415,7 @@ class ImageViewer(QWidget):
             self.canvas.update()
 
     def _make_layer(self, image: np.ndarray, alpha: float = 1.0) -> SpriteLayer:
-        h, w = image.shape[:2]
+        w, h = self._world_dims(image)
         instances = make_instances(1)
         instances["pos"] = (w / 2, h / 2)
         instances["size"] = (w, h)
@@ -388,8 +432,15 @@ class ImageViewer(QWidget):
         self._layer = self.canvas.add_layer(layer, index)
 
     def _set_bounds(self, image: np.ndarray) -> None:
-        h, w = image.shape[:2]
-        self.canvas.bounds = (0.0, 0.0, float(w), float(h))
+        w, h = self._world_dims(image)
+        bounds = (0.0, 0.0, w, h)
+        if self._content_bounds is not None:
+            x0 = min(0.0, self._content_bounds[0])
+            y0 = min(0.0, self._content_bounds[1])
+            x1 = max(w, self._content_bounds[0] + self._content_bounds[2])
+            y1 = max(h, self._content_bounds[1] + self._content_bounds[3])
+            bounds = (x0, y0, x1 - x0, y1 - y0)
+        self.canvas.bounds = bounds
         self._update_zoom_limits()
 
     def _run_transition(

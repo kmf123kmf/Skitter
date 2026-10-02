@@ -1,11 +1,11 @@
 """Base class for workflow step pages."""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QScrollArea, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QScrollArea, QStyle, QVBoxLayout, QWidget
 
 from skitter.ui.session import Session
 
-SIDE_PANEL_WIDTH = 300
+SIDE_PANEL_WIDTH = 320  # content width; the panel adds room for its scrollbar
 
 
 class StepPage(QWidget):
@@ -66,6 +66,9 @@ def side_panel(*widgets: QWidget, stretch_last: bool = False) -> QWidget:
     scroll.setWidget(content)
     scroll.setWidgetResizable(True)
     scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-    scroll.setFixedWidth(SIDE_PANEL_WIDTH)
     scroll.setFrameShape(QFrame.Shape.StyledPanel)
+    # Leave room for the vertical scrollbar so content never gets clipped when it appears.
+    style = scroll.style()
+    scrollbar = style.pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
+    scroll.setFixedWidth(SIDE_PANEL_WIDTH + scrollbar + 2 * scroll.frameWidth())
     return scroll

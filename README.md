@@ -55,14 +55,34 @@ To add a step: subclass `StepPage`, set `title`, implement `is_complete()` (and 
 
 ## Slicing
 
-Slicing divides `project.source_final` into regions for tile matching. The result is always a `RegionSet`: rectangles with a center, size and rotation (radians, clockwise on screen), stored as parallel numpy arrays (`skitter.core.slicing`, Qt-free).
+Slicing divides the final image into regions for tile matching. The result is always a `RegionSet`: rectangles with a center, size, rotation (radians, clockwise on screen) and stacking order, stored as parallel numpy arrays (`skitter.core.slicing`, Qt-free).
+
+### Mosaic layout
+
+- The user picks the **base tile** (width in mosaic px and an aspect ratio) and the number of **columns** (`MosaicLayout`). Everything else is derived:
+  - **Mosaic canvas** = the source image scaled uniformly to columns x tile width. Height follows the source's aspect ratio, so the canvas usually holds a fractional number of tile rows.
+  - **Slicing works in mosaic pixels.** The source is only used to sample colors (`SliceContext.patch` handles the scaling).
+- Slicers try to **cover 100% of the canvas**, and the resulting tiles are what they are. Edge tiles may overhang, and the grid centers its overhang by default. Cropping or squaring off the assembled mosaic is a later post-processing step, not slicing's job.
+- **Size settings** use `TileSizeParam`, measured in base tiles (1.0 = one tile), so plans follow the user's tile size. Resizing the mosaic means changing columns: more tiles of the same size.
+- The Slicing tab shows, live:
+  - mosaic size, rows (exact and whole), source px per tile (warns below 2), memory
+  - region count, **density** (regions relative to a plain grid of base tiles; a grid is about 1.0x)
+  - **coverage** (estimated by stratified sampling; warns below 100%)
+  - smallest / median / largest region
+- In the preview, parts of regions past the image edge show as neutral gray.
+
+### Plans and operations
 
 - A **slicing operation** transforms regions: `apply(regions, ctx) -> regions`.
-- A **plan** (`project.slicing_plan`) is an ordered list of stages, each an operation plus an enabled flag. It starts from one region covering the whole image.
+- A **plan** (`project.slicing_plan`) is an ordered list of stages, each an operation plus an enabled flag. It starts from one region covering the whole canvas.
   - Splitting, adjusting, filtering and hand-drawn regions all fit this one interface, and operations nest: a grid inside jittered regions gives rotated cells.
-- `Session` re-evaluates the plan when it or the final image changes, reusing cached results for unchanged leading stages.
+- `Session` re-evaluates the plan when it, the layout, or the final image changes, reusing cached results for unchanged leading stages.
 - The Slicing tab lists the stages (add from a menu grouped by category, reorder, enable/disable, remove), generates a settings form from the selected operation's parameters, and draws the regions on the GPU.
-- Built-in operations: **Grid**, **Quadtree** (splits where the image has detail), **Photo Pile** (overlapping rotated photos; coverage guaranteed), **Jitter**, **Gap**, **Stacking Order**.
+- Built-in operations:
+  - **Grid**: base-tile cells with centered overhang, or a fixed count that fits exactly.
+  - **Quadtree**: splits where the image has detail, down to a minimum in tiles. Use after a Grid.
+  - **Photo Pile**: overlapping rotated photos in the tile shape. Spread 1.0 guarantees coverage.
+  - **Jitter**, **Gap**, **Stacking Order**.
 
 ### Overlap and stacking
 
@@ -96,7 +116,8 @@ class Stripes(Subdivider):
 
 - Subclass `Subdivider` to split each region independently in its local frame (the framework handles position and rotation). Subclass `SlicingOperation` and implement `apply` for anything else.
 - Parameters (`IntParam`, `FloatParam`, `BoolParam`, `ChoiceParam`) give validation, the generated settings form, and saving. `when=` greys a parameter out depending on others. A new `Param` type needs an editor factory: `@register_editor` in `ui/widgets/param_form.py`.
-- `ctx.image` / `ctx.luminance` give the read-only final image. `ctx.patch(region)` samples the pixels inside a (possibly rotated) region on a grid aligned with it.
+- Sizes: use `TileSizeParam` for lengths and convert with `ctx.tile_size` (base tile in mosaic px). `ctx.width/height` is the canvas.
+- `ctx.image` / `ctx.luminance` give the read-only final image in source pixels. `ctx.patch(region)` samples the source inside a (possibly rotated) canvas region on a grid aligned with it.
 - Operations must be deterministic (take a seed parameter for randomness) and must not modify inputs. Set `z` when the regions you create overlap (see above). RegionSets are immutable: build new ones with `replace`, `from_arrays`, `from_rects`, `grid`, `concat`.
 - Optionally override `summary()` for the stage list. Make sure the module is imported (built-ins are imported by `skitter/core/slicing/operations/__init__.py`).
 
@@ -112,10 +133,12 @@ src/skitter/
     geometry.py     rectangle math for interactive tools (crop box)
     project.py      Project dataclass (state across all steps)
     slicing/        slicing framework
+      layout.py     MosaicLayout: base tile, columns, canvas size
       regions.py    Region / RegionSet (rotated rectangles)
       params.py     declarative operation parameters
       base.py       SliceContext, SlicingOperation, Subdivider, registry
       plan.py       SlicingPlan, stages, cached evaluation
+      analysis.py   coverage, density and size summary
       operations/   built-ins: grid, quadtree, pile, jitter, gap, stacking
   ui/
     main_window.py  tabbed window, Back/Next footer, step gating, menus

@@ -87,6 +87,20 @@ class FloatParam(Param):
         return value
 
 
+class TileSizeParam(FloatParam):
+    """A length measured in base tiles: 1.0 is one base tile (see MosaicLayout).
+
+    Sizes given this way follow the user's tile size, so plans keep their
+    character when the tile size changes. Operations convert to mosaic
+    pixels with `ctx.tile_size`; the UI shows the pixel size alongside.
+    """
+
+    def __init__(self, default: float, label: str = "", *, min: float = 0.05,
+                 max: float = 100.0, step: float = 0.05, decimals: int = 2, **kwargs):  # fmt: skip
+        kwargs.setdefault("suffix", " × tile")
+        super().__init__(default, label, min=min, max=max, step=step, decimals=decimals, **kwargs)
+
+
 class BoolParam(Param):
     def validate(self, value) -> bool:
         if not isinstance(value, bool):

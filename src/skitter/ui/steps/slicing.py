@@ -1,7 +1,8 @@
 """Step 2: divide the final source image into target regions for tile matching.
 
-The user builds a slicing plan: an ordered list of operations (see
-skitter.core.slicing). The page lists the stages, generates a settings form
+The user picks the mosaic layout (base tile width, tile aspect, columns),
+which sets the mosaic canvas size, and builds a slicing plan: an ordered
+list of operations (see skitter.core.slicing). The page lists the stages, generates a settings form
 for the selected one from its declared parameters, and draws the resulting
 regions over the image as they change. Regions may overlap: the preview
 draws them in stacking order, so upper regions hide what they cover.
@@ -20,18 +21,27 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QSpinBox,
     QStyle,
     QToolButton,
     QVBoxLayout,
 )
 
-from skitter.core.slicing import SlicingOperation, SlicingPlan, Stage, operation_types
+from skitter.core.slicing import (
+    TILE_ASPECTS,
+    SlicingOperation,
+    SlicingPlan,
+    Stage,
+    operation_types,
+)
 from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.widgets.image_viewer import ImageViewer
 from skitter.ui.widgets.param_form import ParamForm
 from skitter.ui.widgets.region_overlay import OUTLINES, STACKED, RegionOverlay
 
 UNCOVERED_DIMMING = 0.6
+MIN_SOURCE_PX_PER_TILE = 2.0  # below this, tile colors come from too few source pixels
+WARNING_STYLE = "color: #c42b1c;"
 HIDDEN = "hidden"
 DISPLAY_MODES = (
     (STACKED, "Stacked", "Regions show the image; upper regions hide what they cover."),
@@ -64,6 +74,10 @@ class SlicingStep(StepPage):
         self._recompute.setSingleShot(True)
         self._recompute.setInterval(0)
         self._recompute.timeout.connect(session.slicing_edited)
+        self._relayout = QTimer(self)
+        self._relayout.setSingleShot(True)
+        self._relayout.setInterval(0)
+        self._relayout.timeout.connect(self._apply_layout)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -71,6 +85,7 @@ class SlicingStep(StepPage):
         layout.addWidget(self.viewer, stretch=1)
         layout.addWidget(
             side_panel(
+                self._build_mosaic_group(),
                 self._build_plan_group(),
                 self._build_settings_group(),
                 self._build_result_group(),
@@ -79,17 +94,58 @@ class SlicingStep(StepPage):
         )
 
         session.source_committed.connect(self._on_source_committed)
+        session.layout_changed.connect(self._on_layout_changed)
         session.slicing_changed.connect(self._on_slicing_changed)
         self.viewer.canvas.cursor_moved.connect(self._on_hover)
         self.viewer.canvas.cursor_left.connect(lambda: self._on_hover(None, None))
         self._refresh_stages(select=0)
         self._apply_display()
+        self._show_layout()
 
     @property
     def plan(self) -> SlicingPlan:
         return self.session.project.slicing_plan
 
     # Construction
+
+    def _build_mosaic_group(self) -> QGroupBox:
+        self.tile_width = QSpinBox()
+        self.tile_width.setRange(4, 4096)
+        self.tile_width.setSuffix(" px")
+        self.tile_width.setToolTip("Width of a base tile on the finished mosaic.")
+        self.tile_aspect = QComboBox()
+        for value, label in TILE_ASPECTS:
+            self.tile_aspect.addItem(label, value)
+        self.tile_aspect.setToolTip("Shape of a base tile (width : height).")
+        self.columns = QSpinBox()
+        self.columns.setRange(1, 5000)
+        self.columns.setToolTip("Base tiles across the mosaic. Rows follow the image's shape.")
+        for spin in (self.tile_width, self.columns):
+            spin.setKeyboardTracking(False)
+            spin.valueChanged.connect(lambda _: self._relayout.start())
+        self.tile_aspect.currentIndexChanged.connect(lambda _: self._relayout.start())
+
+        self._tile_px = QLabel("—")
+        self._mosaic_px = QLabel("—")
+        self._rows = QLabel("—")
+        self._source_px = QLabel("—")
+        self._source_px.setToolTip(
+            "Source image pixels across one base tile: how much of the image "
+            "each tile's color is judged from."
+        )
+        self._memory = QLabel("—")
+
+        group = QGroupBox("Mosaic")
+        form = QFormLayout(group)
+        form.addRow("Tile width:", self.tile_width)
+        form.addRow("Tile aspect:", self.tile_aspect)
+        form.addRow("Columns:", self.columns)
+        form.addRow("Tile:", self._tile_px)
+        form.addRow("Mosaic:", self._mosaic_px)
+        form.addRow("Rows:", self._rows)
+        form.addRow("Source per tile:", self._source_px)
+        form.addRow("Memory:", self._memory)
+        return group
 
     def _build_plan_group(self) -> QGroupBox:
         self._stages = QListWidget()
@@ -132,7 +188,7 @@ class SlicingStep(StepPage):
         for button in (self._up_button, self._down_button, self._remove_button):
             buttons.addWidget(button)
 
-        hint = _muted(QLabel("Stages run top to bottom, starting from the whole image."))
+        hint = _muted(QLabel("Stages run top to bottom, starting from the whole mosaic."))
         group = QGroupBox("Slicing Plan")
         layout = QVBoxLayout(group)
         layout.addWidget(self._stages)
@@ -159,22 +215,31 @@ class SlicingStep(StepPage):
         return self._settings_group
 
     def _build_result_group(self) -> QGroupBox:
-        self._size = QLabel("—")
         self._count = QLabel("—")
+        self._density = QLabel("—")
+        self._density.setToolTip(
+            "Regions compared with a plain grid of base tiles covering the mosaic "
+            "(a grid is about 1.0×)."
+        )
+        self._coverage = QLabel("—")
+        self._coverage.setToolTip("Share of the mosaic covered by regions (estimated).")
         self._smallest = QLabel("—")
+        self._median = QLabel("—")
         self._largest = QLabel("—")
         self._hover = QLabel("—")
         self._hover.setWordWrap(True)
         self._error = QLabel()
         self._error.setWordWrap(True)
-        self._error.setStyleSheet("color: #c42b1c;")
+        self._error.setStyleSheet(WARNING_STYLE)
         self._error.hide()
 
         group = QGroupBox("Result")
         form = QFormLayout(group)
-        form.addRow("Image:", self._size)
         form.addRow("Regions:", self._count)
+        form.addRow("Density:", self._density)
+        form.addRow("Coverage:", self._coverage)
         form.addRow("Smallest:", self._smallest)
+        form.addRow("Median:", self._median)
         form.addRow("Largest:", self._largest)
         form.addRow("Under cursor:", self._hover)
         form.addRow(self._error)
@@ -214,6 +279,56 @@ class SlicingStep(StepPage):
         # Dimming only reads correctly when regions repaint the image they cover.
         dim = stacked and self.dim_uncovered.isChecked()
         self.viewer.set_dimming(UNCOVERED_DIMMING if dim else 0.0)
+
+    # Mosaic layout
+
+    def _show_layout(self) -> None:
+        """Put the project's layout into the controls."""
+        layout = self.session.project.layout
+        for widget in (self.tile_width, self.tile_aspect, self.columns):
+            widget.blockSignals(True)
+        self.tile_width.setValue(layout.tile_width)
+        index = min(
+            range(self.tile_aspect.count()),
+            key=lambda i: abs(self.tile_aspect.itemData(i) - layout.tile_aspect),
+        )
+        self.tile_aspect.setCurrentIndex(index)
+        self.columns.setValue(layout.columns)
+        for widget in (self.tile_width, self.tile_aspect, self.columns):
+            widget.blockSignals(False)
+        self._refresh_layout_info()
+
+    def _apply_layout(self) -> None:
+        layout = self.session.project.layout.replace(
+            tile_width=self.tile_width.value(),
+            tile_aspect=self.tile_aspect.currentData(),
+            columns=self.columns.value(),
+        )
+        self.session.set_layout(layout)
+
+    def _refresh_layout_info(self) -> None:
+        layout = self.session.project.layout
+        tile_w, tile_h = layout.tile_size
+        self._tile_px.setText(f"{tile_w:,.0f} × {tile_h:,.1f} px".replace(".0 px", " px"))
+        self.form.set_context(tile_size=layout.tile_size)
+        final = self.session.project.source_final
+        if final is None:
+            for label in (self._mosaic_px, self._rows, self._source_px, self._memory):
+                label.setText("—")
+            return
+        src_h, src_w = final.shape[:2]
+        width, height = layout.canvas_size(src_w, src_h)
+        rows = layout.rows(src_w, src_h)
+        whole = layout.whole_rows(src_w, src_h)
+        self._mosaic_px.setText(f"{width:,.0f} × {height:,.0f} px")
+        self._rows.setText(f"{rows:,.2f} ({whole:,} whole)" if whole != rows else f"{whole:,}")
+        per_tile = tile_w * src_w / width
+        self._source_px.setText(f"{per_tile:,.1f} px")
+        self._source_px.setStyleSheet(WARNING_STYLE if per_tile < MIN_SOURCE_PX_PER_TILE else "")
+        megabytes = width * height * 3 / 1e6
+        self._memory.setText(
+            f"{megabytes / 1000:,.1f} GB" if megabytes >= 1000 else f"{megabytes:,.0f} MB"
+        )
 
     # Plan editing
 
@@ -287,27 +402,56 @@ class SlicingStep(StepPage):
     # Session updates
 
     def _on_source_committed(self) -> None:
-        image = self.session.project.source_final
-        self.viewer.show_image(image)
-        h, w = image.shape[:2]
-        self.overlay.set_image(self.viewer.image_layer, w, h)
-        self._size.setText(f"{w:,} × {h:,} px")
+        self.viewer.show_image(self.session.project.source_final, self.session.mosaic_size())
+        self._refresh_layout_info()
+        self._sync_preview()
+
+    def _on_layout_changed(self) -> None:
+        self._refresh_layout_info()
+        size = self.session.mosaic_size()
+        if size is not None and self.viewer.world_size != size:
+            self.viewer.set_world_size(*size)
+        self._sync_preview()
+
+    def _sync_preview(self) -> None:
+        """Point the overlay at the image and fit the view around overhanging regions."""
+        size = self.session.mosaic_size()
+        if size is None or self.viewer.image_layer is None:
+            return
+        self.overlay.set_image(self.viewer.image_layer, *size)
+        regions = self.session.project.regions
+        if regions:
+            bounds = regions.bounds()
+            x0, y0 = bounds[:, :2].min(axis=0)
+            x1, y1 = bounds[:, 2:].max(axis=0)
+            self.viewer.set_content_bounds((x0, y0, x1 - x0, y1 - y0))
 
     def _on_slicing_changed(self) -> None:
         regions = self.session.project.regions
+        summary = self.session.slicing_summary
         self.overlay.set_regions(regions)
+        self._sync_preview()
         error = self.session.slicing_error
         self._error.setText(error or "")
         self._error.setVisible(bool(error))
-        if regions:
-            area = regions.area()
-            small, large = regions.size[area.argmin()], regions.size[area.argmax()]
-            self._count.setText(f"{len(regions):,}")
-            self._smallest.setText(f"{small[0]:,.1f} × {small[1]:,.1f} px")
-            self._largest.setText(f"{large[0]:,.1f} × {large[1]:,.1f} px")
+        if regions and summary:
+            self._count.setText(f"{summary.count:,}")
+            self._density.setText(f"{summary.density:,.2f}×")
+            self._coverage.setText(f"{summary.coverage * 100:.1f}%")
+            self._coverage.setStyleSheet(WARNING_STYLE if summary.coverage < 0.999 else "")
+            for label, (w, h) in (
+                (self._smallest, summary.smallest),
+                (self._median, summary.median),
+                (self._largest, summary.largest),
+            ):
+                label.setText(f"{w:,.1f} × {h:,.1f} px")
         else:
-            for label in (self._count, self._smallest, self._largest):
+            for label in (
+                self._count, self._density, self._coverage,
+                self._smallest, self._median, self._largest,
+            ):  # fmt: skip
                 label.setText("—")
+            self._coverage.setStyleSheet("")
         self._hover.setText("—")
         self.state_changed.emit()
 
