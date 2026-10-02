@@ -114,9 +114,12 @@ def test_matching_step_runs_and_shows_mosaic(sliced, photos, qapp):
     assert step._tile_layer.instances["uv"].max() <= 1.0
     thumbnail_layer = step._tile_layer
 
-    # Full-size crops replace the thumbnails once read, below the heat map.
-    step._detail_job.wait()
-    assert step._detail_job is None and step._detail.text() == "Full size"
+    # Full-size crops (the session's shared textures) replace the thumbnails, below the heat map.
+    textures = window.session.textures
+    assert textures.scene is window.session.scene and len(textures.scene) == len(result.regions)
+    textures.wait()
+    assert not textures.loading and textures.detail is not None
+    assert step._detail.text() == "Full size"
     layer = step._tile_layer
     assert layer is not thumbnail_layer and len(layer.instances) == len(result.regions)
     layers = step.viewer.canvas.layers
@@ -261,6 +264,50 @@ def test_export_needs_a_valid_mosaic(sliced, photos, tmp_path):
     assert session.project.matches is None and not action.isEnabled()
 
 
+def test_build_animation_preview_plays_the_scene(sliced, photos, qapp):
+    window = sliced
+    session = window.session
+    assert not window.build_preview_action.isEnabled()
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.start_matching()
+    session.wait_for_job()
+    assert window.build_preview_action.isEnabled()
+
+    preview = window.open_build_preview()
+    scene, player = session.scene, preview.player
+    assert preview.scene is scene and player.timeline is not None
+    assert player.time == 0 and np.all(player.layer.instances["alpha"] == 0)
+
+    # The last moment is the finished mosaic, exactly as the Matching preview draws it.
+    player.seek(player.duration)
+    final = session.textures.instances()
+    for field in ("pos", "size", "rotation", "layer", "uv", "offset"):
+        np.testing.assert_allclose(player.layer.instances[field], final[field], atol=1e-5)
+    assert np.all(player.layer.instances["alpha"] == 1)
+    assert preview.slider.value() == 1000
+
+    # Scrubbing pauses; settings changes replan and keep the moment.
+    player.play()
+    assert player.playing and preview.play_button.text() == "Pause"
+    preview._on_slider(500)
+    assert not player.playing and player.time == pytest.approx(4.0)  # half of 8 s
+    preview.form.editor("duration").widget.setValue(20)
+    assert player.duration == pytest.approx(20) and player.time == pytest.approx(4.0)
+
+    # Full-size textures arrive: the layer swaps to them.
+    session.textures.wait()
+    qapp.processEvents()
+    assert player.layer.textures.shape[1] == session.textures.pages.shape[1]
+
+    # Re-slicing drops the mosaic.
+    layout = session.project.layout
+    session.set_layout(replace(layout, columns=layout.columns + 1))
+    assert preview.scene is None and player.layer is None
+    assert not window.build_preview_action.isEnabled()
+    preview.close()
+
+
 def test_matching_can_be_cancelled(sliced, photos):
     window = sliced
     build_library(window, photos)
@@ -317,7 +364,7 @@ def test_pack_images_places_every_image_once():
 
 
 def test_detail_sizes_keep_full_size_within_budget():
-    from skitter.ui.steps.matching import detail_sizes
+    from skitter.ui.render.tile_textures import detail_sizes
 
     sizes, scale = detail_sizes([[100, 150], [99.5, 10.2]], budget=10**6)
     assert scale == 1 and sizes.tolist() == [[100, 150], [100, 11]]

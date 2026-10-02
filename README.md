@@ -158,7 +158,8 @@ Matching (`core/matching`, Qt-free) gives every visible region a tile crop:
    - Adaptive passes search harder for the worst regions and keep the result only if the score improves.
 
 - Tinting moves only a tile's average color toward its region's (presets None, Subtle and Custom); tiles are never blended with the source.
-- The Matching tab previews the result with thumbnails packed into texture atlases (`ui/render/atlas.py`; each sprite's `uv` selects its cell and its `offset` applies the tint). It also has an error heat map and the statistics above.
+- The finished mosaic is a **scene** (`core/scene.py`, `session.scene`): every placed tile in its final state, bottom to top (position, size, rotation, crop, mirroring, tint), plus attributes to order or group tiles by (distance from center, reading order, lightness, colors, match error, repeated photos). The Matching preview, export and animations all read it.
+- The Matching tab previews the scene with the session's shared tile textures (`ui/render/tile_textures.py`, `session.textures`): thumbnails packed into texture atlases at once (`ui/render/atlas.py`; each sprite's `uv` selects its cell and its `offset` applies the tint). It also has an error heat map and the statistics above.
   - A background job then reads each used tile from its original file and cuts its crop at one texel per mosaic unit (`core/tiles/render.py`, process pool, JPEGs decoded at reduced scale). The crops are shelf-packed into atlas pages (`pack_images`) and replace the thumbnails. Regions showing the same crop at the same size share one image. If the total would exceed `DETAIL_TEXELS` (about 400 MB of GPU memory), every crop is scaled down by the same factor. Unreadable files fall back to their thumbnails.
 - `scripts/bench_matching.py` benchmarks index build, search accuracy and speed, and assignment at library scale.
 
@@ -169,6 +170,14 @@ Matching (`core/matching`, Qt-free) gives every visible region a tile crop:
 - **Size** is chosen here, and only here: by base tile width, image width or image height in pixels. The window shows the resulting image and tile size and how many tiles would be shown larger than their photos have pixels for.
 - **Framing**: the image frame (trims overhanging tiles) or whole tiles. **Background**: white, black, gray, or transparent (PNG). **Format**: PNG or JPEG (quality setting, no chroma subsampling).
 - Each tile is its matched crop read from the original photo at output resolution (Lanczos), mirrored and tinted exactly as matching modeled it (an OKLab shift per pixel), then placed with bicubic sampling. Edges use 4 x 4 coverage samples, drawn front to back, so seams between tiles never show the background. Large images render in strips to bound memory.
+
+## Animated construction
+
+Groundwork for animating the tiles into the finished mosaic (`core/animation/`):
+
+- A **choreography** is a configurable recipe (settings as `Param`s, registered with `@register_choreography`) that plans a **timeline** for a scene. `timeline.frame(t)` gives every tile's center, size, rotation, alpha, tint and draw order at time t: a pure function of time, so it can be played, paused, scrubbed or rendered frame by frame. `frame(duration)` must be exactly the finished mosaic (`TileFrame.final`), which a test checks for every registered choreography.
+- `FlightTimeline` covers tiles travelling from a start state to their final state with per-tile delays and easing; tiles in the air draw above landed ones. The built-in **Assemble** flies tiles in from all around (order by distance, reading order, lightness or random).
+- `ui/render/player.py` plays a timeline on a canvas (`TimelinePlayer`, `seek`/`play`/`pause`). **Demo > Build Animation Preview** is a temporary window for trying choreographies until the feature gets its own step. Updating every tile each frame with numpy costs about 0.25 µs per tile (15,000 tiles run at over 100 fps).
 
 ## Layout
 
@@ -182,7 +191,9 @@ src/skitter/
     geometry.py     rectangle math for interactive tools (crop box)
     color.py        sRGB <-> OKLab (vectorized and for numba kernels)
     project.py      Project dataclass (state across all steps)
+    scene.py        MosaicScene: the finished mosaic's tiles in their final state
     assembly.py     full-detail mosaic rendering and export settings
+    animation/      choreographies, timelines, tile frames (animated construction)
     tiles/          tile library
       library.py    on-disk cache: sqlite metadata + memory-mapped thumbnails
       ingest.py     parallel, reduced-scale thumbnail decoding
@@ -210,6 +221,7 @@ src/skitter/
     main_window.py  tabbed window, Back/Next footer, step gating, menus
     session.py      observable Project wrapper shared by steps
     export_dialog.py  Export Image window
+    build_preview.py  Build Animation Preview window (temporary, Demo menu)
     steps/
       base.py       StepPage base class
       source.py     step 1: source image selection and editing
@@ -229,6 +241,8 @@ src/skitter/
       camera.py     2D pan/zoom math
       sprites.py    SpriteLayer data and instanced renderer
       atlas.py      texture atlases: thumbnail cells, packed full-detail crops
+      tile_textures.py  a scene's tile textures, shared by views (full detail in background)
+      player.py     plays an animation timeline on a sprite layer
   resources/
     shaders/        GLSL sources
 tests/              pytest suite (headless; Qt widgets run offscreen)

@@ -19,6 +19,7 @@ from skitter.core.assembly import (
 )
 from skitter.core.color import oklab_to_rgb8, rgb8_to_oklab
 from skitter.core.matching.matcher import MatchResult
+from skitter.core.scene import MosaicScene
 from skitter.core.slicing import MosaicLayout, RegionSet, SliceContext
 
 
@@ -56,7 +57,8 @@ def noise(size, seed):
 
 def render(result, ctx, files, **settings):
     settings.setdefault("tile_px", 1)  # one pixel per mosaic unit (the contexts' base tile)
-    image, report = render_mosaic(result, ctx, files, ExportSettings(**settings), workers=0)
+    scene = MosaicScene.from_result(result, ctx)
+    image, report = render_mosaic(scene, files, ExportSettings(**settings), workers=0)
     return image, report
 
 
@@ -120,13 +122,21 @@ def test_framing_transparency_and_stacking(tmp_path):
     regions = RegionSet.from_rects([0, 2], [0, 2], [12, 4], [8, 4], z=[0, 1])
     result = result_for(regions, [0, 1])
     ctx = context(10, 8)
-    assert export_frame(result, ctx, ExportSettings(tile_px=1)).size == (10, 8)
-    assert export_frame(result, ctx, ExportSettings(tile_px=1, framing="tiles")).size == (12, 8)
+    assert export_frame(MosaicScene.from_result(result, ctx), ExportSettings(tile_px=1)).size == (
+        10,
+        8,
+    )
+    assert export_frame(
+        MosaicScene.from_result(result, ctx), ExportSettings(tile_px=1, framing="tiles")
+    ).size == (12, 8)
     by_width = ExportSettings(size_by="width", width_px=600, framing="tiles")
-    assert export_frame(result, ctx, by_width).size == (600, 400)
+    assert export_frame(MosaicScene.from_result(result, ctx), by_width).size == (600, 400)
     by_height = ExportSettings(size_by="height", height_px=80)
-    assert export_frame(result, ctx, by_height).size == (100, 80)
-    assert export_frame(result, ctx, ExportSettings(tile_px=30)).size == (300, 240)
+    assert export_frame(MosaicScene.from_result(result, ctx), by_height).size == (100, 80)
+    assert export_frame(MosaicScene.from_result(result, ctx), ExportSettings(tile_px=30)).size == (
+        300,
+        240,
+    )
 
     image, _ = render(result, ctx, files)
     assert image[0, 0, 0] == 50 and image[3, 3, 0] == 250
@@ -152,7 +162,8 @@ def test_enlargement_compares_tile_size_with_photo_pixels():
     regions = RegionSet.from_rects([0, 10], 0, 10, 10)
     result = result_for(regions, [0, 1])
     result.rect[1] = [0.25, 0, 0.75, 1]  # half the photo's width
-    ratio = enlargement(result, np.array([100, 100]), scale=20.0)  # 200 px tiles
+    scene = MosaicScene.from_result(result, context(20, 10))
+    ratio = enlargement(scene, np.array([100, 100]), scale=20.0)  # 200 px tiles
     np.testing.assert_allclose(ratio, [2.0, 4.0])
 
 
@@ -160,7 +171,8 @@ def test_cancel(tmp_path):
     files = tile_files(tmp_path, [noise(10, 0)])
     regions = RegionSet.grid(10, 10, 1, 1)
     with pytest.raises(ExportCancelled):
-        render_mosaic(result_for(regions, [0]), context(10, 10), files, ExportSettings(),
+        scene = MosaicScene.from_result(result_for(regions, [0]), context(10, 10))
+        render_mosaic(scene, files, ExportSettings(),
                       cancelled=lambda: True, workers=0)  # fmt: skip
 
 

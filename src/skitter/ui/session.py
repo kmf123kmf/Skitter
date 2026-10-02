@@ -18,6 +18,7 @@ from skitter.core.assembly import (
 from skitter.core.edits import Edit, apply_edits
 from skitter.core.matching.matcher import MatchCancelled, Matcher, MatchResult
 from skitter.core.project import Project
+from skitter.core.scene import MosaicScene
 from skitter.core.slicing import (
     MosaicLayout,
     SliceContext,
@@ -28,6 +29,7 @@ from skitter.core.slicing import (
 )
 from skitter.core.tiles.library import OK, TileLibrary, UpdateReport, default_library_folder
 from skitter.ui.jobs import Job
+from skitter.ui.render.tile_textures import TileTextures
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +49,7 @@ class Session(QObject):
     library_changed = Signal()  # tile library opened, updated, or its folders changed
     library_progress = Signal(str, float)  # (message, fraction; -1 unknown) while updating
     matching_changed = Signal()  # project.matches replaced, or matching failed or stopped
+    # (scene and textures always match project.matches when it is emitted)
     matching_progress = Signal(str, float)
     export_progress = Signal(str, float)
     export_finished = Signal(
@@ -72,6 +75,8 @@ class Session(QObject):
         self.match_error: str | None = None
         self._match_key: tuple | None = None  # inputs project.matches was computed from
         self._match_tiles: tuple | None = None  # the library tiles it uses (see mosaic_is_valid)
+        self.scene: MosaicScene | None = None  # project.matches as a scene (core/scene.py)
+        self.textures: TileTextures | None = None  # the scene's tile textures, shared by views
         self._job: Job | None = None
         self._job_kind: str | None = None
 
@@ -240,6 +245,14 @@ class Session(QObject):
         if self._job is not None:
             self._job.wait(timeout)
 
+    def shutdown(self, timeout: float = 10) -> None:
+        """Stop all background work (the app is closing)."""
+        self.cancel_job()
+        if self.textures is not None:
+            self.textures.cancel()
+            self.textures.wait(timeout)
+        self.wait_for_job(timeout)
+
     def _start_job(self, kind: str, work, progress_signal, on_done, cancel_errors=()) -> Job:
         if self.busy:
             raise RuntimeError(f"{self.busy} job already running")
@@ -265,7 +278,7 @@ class Session(QObject):
         if self.library is not None:
             self.library.close()
         if self.project.matches is not None:  # its tiles refer to the old library
-            self.project.matches = self._match_key = self._match_tiles = None
+            self._set_matches(None)
             self.matching_changed.emit()
         self.library = TileLibrary(folder or default_library_folder())
         self.matcher = Matcher(self.library)
@@ -328,7 +341,7 @@ class Session(QObject):
         (A library or settings change only makes them out of date.)
         """
         if self.project.matches is not None and not self._same_regions(self._match_key):
-            self.project.matches = self._match_key = self._match_tiles = None
+            self._set_matches(None)
             self.matching_changed.emit()
 
     @property
@@ -352,8 +365,7 @@ class Session(QObject):
         def done(result: MatchResult | None, error: str | None):
             self.match_error = error
             if result is not None and self._same_regions(key):  # else re-sliced meanwhile
-                self.project.matches, self._match_key = result, key
-                self._match_tiles = self._tile_snapshot(result.tile)
+                self._set_matches(result, key)
             self.matching_changed.emit()
 
         self.match_error = None
@@ -364,6 +376,18 @@ class Session(QObject):
         self.matching_changed.emit()
 
     # Export
+
+    def _set_matches(self, result: MatchResult | None, key: tuple | None = None) -> None:
+        """Replace project.matches, with its scene and textures (callers emit matching_changed)."""
+        if self.textures is not None:
+            self.textures.cancel()
+        self.project.matches, self._match_key = result, key
+        if result is None:
+            self._match_tiles = self.scene = self.textures = None
+            return
+        self._match_tiles = self._tile_snapshot(result.tile)
+        self.scene = MosaicScene.from_result(result, self._slice_context)
+        self.textures = TileTextures(self.scene, self.library, self)
 
     def _tile_snapshot(self, tiles) -> tuple:
         """The library and the state of the tiles a mosaic uses."""
@@ -413,12 +437,12 @@ class Session(QObject):
         if not self.can_export:
             raise RuntimeError("export needs a matched mosaic")
         path = Path(path)
-        result, ctx = self.project.matches, self._slice_context
-        files = TileFiles.read(self.library, result.tile)  # here: the library isn't threadsafe
+        scene = self.scene
+        files = TileFiles.read(self.library, scene.slot)  # here: the library isn't threadsafe
         settings = settings.copy()
 
         def work(progress, cancelled) -> ExportReport:
-            image, report = render_mosaic(result, ctx, files, settings, progress, cancelled)
+            image, report = render_mosaic(scene, files, settings, progress, cancelled)
             progress(f"Saving {path.name}…", None)
             part = path.with_name(path.name + ".part")  # never leave a half-written image
             try:

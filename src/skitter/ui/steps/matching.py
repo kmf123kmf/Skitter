@@ -1,14 +1,11 @@
 """Step 4: choose a tile for every region and preview the mosaic.
 
-Matching runs in the background (see core/matching). The preview draws each
-region's chosen tile crop, tinted as the settings ask: first from the
-library's thumbnails, then, once a background job has read them from the
-original files, from crops of one texel per mosaic unit (reduced
-uniformly if they would exceed DETAIL_TEXELS). A heat map shows where the
-mosaic differs most from the image as seen from a distance.
+Matching runs in the background (see core/matching). The preview draws the
+session's scene of the result (core/scene.py) with its shared textures:
+thumbnails first, full-size crops once read (ui/render/tile_textures.py).
+A heat map shows where the mosaic differs most from the image as seen from
+a distance.
 """
-
-from dataclasses import dataclass
 
 import numpy as np
 from PySide6.QtWidgets import (
@@ -23,10 +20,9 @@ from PySide6.QtWidgets import (
 )
 
 from skitter.core.matching.matcher import MatchResult
-from skitter.core.tiles.render import render_crops_or_thumbs
-from skitter.ui.jobs import Job, JobCancelled
-from skitter.ui.render.atlas import PackedAtlas, build_atlas, pack_images
+from skitter.core.scene import MosaicScene
 from skitter.ui.render.sprites import SpriteLayer, make_instances
+from skitter.ui.render.tile_textures import TileTextures
 from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.widgets.image_viewer import ImageViewer
 from skitter.ui.widgets.param_form import ParamForm
@@ -36,51 +32,6 @@ TILES, HEAT, SOURCE = "tiles", "heat", "source"
 DISPLAY_MODES = ((TILES, "Tiles"), (HEAT, "Error heat map"), (SOURCE, "Source image"))
 HEAT_MAX_DE = 25.0  # ΔE shown fully red
 HEAT_ALPHA = 0.75
-DETAIL_TEXELS = 96 * 2**20  # full-detail budget: about 400 MB of GPU memory (RGBA) + mipmaps
-DETAIL_PAGE = 4096  # atlas page size, texels
-
-
-@dataclass(frozen=True)
-class TileDetail:
-    """Full-detail crops, packed for the GPU."""
-
-    atlas: PackedAtlas
-    scale: float  # texels per mosaic unit (1.0 = full size)
-    failed: int  # files that could not be read (their thumbnails are shown)
-
-
-def detail_sizes(sizes, budget: int = DETAIL_TEXELS, page: int = DETAIL_PAGE):
-    """Pixel sizes (w, h) for crops of the given mosaic sizes, and the uniform scale used.
-
-    Full size unless the total would exceed budget texels; no crop exceeds page.
-    """
-    sizes = np.asarray(sizes, dtype=np.float64).reshape(-1, 2)
-    area = float(np.prod(np.ceil(sizes), axis=1).sum())
-    scale = min(1.0, (budget / area) ** 0.5) if area else 1.0
-    scaled = sizes * scale
-    scaled *= np.minimum(1.0, page / scaled.max(axis=1, initial=1))[:, None]
-    return np.clip(np.ceil(scaled - 1e-6), 1, page).astype(np.int64), scale
-
-
-def build_detail(paths, rects, sizes, thumbs, thumb_size, progress, cancelled) -> TileDetail:
-    """Read and pack full-detail crops (runs in a background job).
-
-    paths, rects, sizes describe each distinct crop; thumbs / thumb_size are
-    each crop's library thumbnail, shown instead when its file can't be read.
-    """
-    pixels, scale = detail_sizes(sizes)
-
-    def report(done, total):
-        progress(f"Loading full-size tiles: {done:,} of {total:,} files", done / max(total, 1))
-
-    rendered = render_crops_or_thumbs(
-        paths, rects, pixels, thumbs, thumb_size, progress=report, cancelled=cancelled
-    )
-    if rendered is None:
-        raise JobCancelled
-    images, failed = rendered
-    progress("Packing tiles…", None)
-    return TileDetail(pack_images(images, DETAIL_PAGE), scale, len(failed))
 
 
 def heat_colors(error: np.ndarray) -> np.ndarray:
@@ -105,8 +56,8 @@ class MatchingStep(StepPage):
         self.viewer = ImageViewer()
         self._tile_layer: SpriteLayer | None = None
         self._heat_layer: SpriteLayer | None = None
-        self._shown: MatchResult | None = None
-        self._detail_job: Job | None = None
+        self._shown: MosaicScene | None = None
+        self._textures: TileTextures | None = None
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -222,11 +173,6 @@ class MatchingStep(StepPage):
         self._sync_image()
         self._refresh()
 
-    def shutdown(self) -> None:
-        if self._detail_job is not None:
-            self._detail_job.cancel()
-            self._detail_job.wait(timeout=10)
-
     # Display
 
     def _sync_image(self) -> None:
@@ -270,99 +216,54 @@ class MatchingStep(StepPage):
                 self.status.setText("Out of date: the regions, library or settings changed.")
             else:
                 self.status.setText("Up to date.")
-        result = session.project.matches
-        if result is not self._shown and not matching:
-            self._show_result(result)
+        if session.scene is not self._shown and not matching:
+            self._show_scene(session.scene)
         self.state_changed.emit()
 
-    def _show_result(self, result: MatchResult | None) -> None:
+    def _show_scene(self, scene: MosaicScene | None) -> None:
         canvas = self.viewer.canvas
         for layer in (self._tile_layer, self._heat_layer):
             if layer is not None:
                 canvas.remove_layer(layer)
         self._tile_layer = self._heat_layer = None
-        self._shown = result
-        self._show_stats(result)
-        if self._detail_job is not None:
-            self._detail_job.cancel()
-            self._detail_job = None
+        if self._textures is not None:
+            self._textures.changed.disconnect(self._on_textures_changed)
+            self._textures.status_changed.disconnect(self._detail.setText)
+        self._shown, self._textures = scene, self.session.textures
+        self._show_stats(None if scene is None else scene.result)
         self._detail.setText("—")
-        library = self.session.library
-        if result is None or library is None:
+        if scene is None or self._textures is None:
             return
+        self._textures.changed.connect(self._on_textures_changed)
+        self._textures.status_changed.connect(self._detail.setText)
+        self._detail.setText(self._textures.status)
         if self.viewer.image is None:
             self._sync_image()
-        regions = result.regions
-        order = regions.stacking_order()
-        order = order[result.tile[order] >= 0]
-        if not len(order):
+        if not len(scene):
             return
-        atlas = build_atlas(library.thumbs, library.thumb_size, result.tile[order])
-        tiles = make_instances(len(order))
-        tiles["pos"] = regions.center[order]
-        tiles["size"] = regions.size[order]
-        tiles["rotation"] = regions.rotation[order]
-        tiles["layer"], tiles["uv"] = atlas.locate(
-            result.tile[order], result.rect[order], result.mirrored[order]
-        )
-        tiles["offset"] = result.tint_offset()[order]
-        self._tile_layer = canvas.add_layer(SpriteLayer(atlas.pages, tiles))
+        tiles = self._textures.instances()
+        self._tile_layer = canvas.add_layer(SpriteLayer(self._textures.pages, tiles))
 
-        heat = make_instances(len(order))
+        heat = make_instances(len(scene))
         for field in ("pos", "size", "rotation"):
             heat[field] = tiles[field]
-        heat["tint"][:, :3] = heat_colors(result.quality.region_error[order])
+        heat["tint"][:, :3] = heat_colors(scene.error)
         heat["tint"][:, 3] = 1.0
         heat["alpha"] = HEAT_ALPHA
         self._heat_layer = canvas.add_layer(SpriteLayer(None, heat))
-        bounds = regions.bounds()[order]
-        x0, y0 = bounds[:, :2].min(axis=0)
-        x1, y1 = bounds[:, 2:].max(axis=0)
+        x0, y0, x1, y1 = scene.bounds
         self.viewer.set_content_bounds((x0, y0, x1 - x0, y1 - y0))
         self._apply_display()
-        self._load_detail(result, order)
 
-    def _load_detail(self, result: MatchResult, order: np.ndarray) -> None:
-        """Replace the thumbnail tiles with full-size crops read in the background."""
-        library = self.session.library
-        slot = result.tile[order]
-        rect = result.rect[order].astype(np.float64)
-        size = np.ceil(result.regions.size[order] - 1e-6)
-        # Regions showing the same crop at the same size share one image.
-        keys, image = np.unique(np.column_stack([slot, rect, size]), axis=0, return_inverse=True)
-        image = image.reshape(-1)
-        crop_slot = keys[:, 0].astype(np.int64)
-        paths = library.paths(crop_slot)
-        thumbs = np.asarray(library.thumbs[crop_slot])  # read here: the library isn't threadsafe
-        thumb_size = library.thumb_size[crop_slot]
-
-        def work(progress, cancelled):
-            return build_detail(paths, keys[:, 1:5], keys[:, 5:7], thumbs, thumb_size,
-                                progress, cancelled)  # fmt: skip
-
-        job = Job(work, parent=self)
-        job.progress.connect(lambda message, _: self._detail.setText(message))
-        job.finished.connect(lambda detail: self._show_detail(job, detail, image, order))
-        job.failed.connect(lambda message: self._detail.setText(f"Thumbnails ({message})"))
-        self._detail_job = job
-        self._detail.setText("Loading full-size tiles…")
-        job.start()
-
-    def _show_detail(self, job: Job, detail: TileDetail, image, order) -> None:
-        if job is not self._detail_job or self._tile_layer is None:
-            return  # a newer result replaced the one this job loaded
-        self._detail_job = None
-        result = self._shown
-        tiles = self._tile_layer.instances.copy()
-        tiles["layer"], tiles["uv"] = detail.atlas.locate(image, result.mirrored[order])
+    def _on_textures_changed(self) -> None:
+        """Full-size tiles arrived: swap them in below the heat map."""
+        if self._tile_layer is None:
+            return
         canvas = self.viewer.canvas
         index = canvas.layers.index(self._tile_layer)
         canvas.remove_layer(self._tile_layer)
-        self._tile_layer = canvas.add_layer(SpriteLayer(detail.atlas.pages, tiles), index)
-        text = "Full size" if detail.scale >= 1 else f"Reduced to {detail.scale:.0%} (memory)"
-        if detail.failed:
-            text += f"; {detail.failed:,} unreadable files show thumbnails"
-        self._detail.setText(text)
+        layer = SpriteLayer(self._textures.pages, self._textures.instances())
+        self._tile_layer = canvas.add_layer(layer, index)
         self._apply_display()
 
     def _apply_display(self) -> None:
@@ -400,9 +301,10 @@ class MatchingStep(StepPage):
         labels["time"].setText(f"{sum(stats['timings'].values()):.1f} s")
 
     def _on_hover(self, x: float, y: float) -> None:
-        result, library = self._shown, self.session.library
-        if result is None or library is None:
+        library = self.session.library
+        if self._shown is None or library is None:
             return
+        result = self._shown.result
         index = result.regions.hit_test(x, y)
         if index < 0 or result.tile[index] < 0:
             self._hover.setText("—")

@@ -1,6 +1,6 @@
 """Assembly: render the matched mosaic at full detail and save it.
 
-Every region shows its chosen crop exactly as matching chose it: the crop
+Every tile of the scene (see scene.py) shows its chosen crop exactly as matching chose it: the crop
 window of the original tile photo (read at full resolution, EXIF-upright,
 resized to the region's output size with Lanczos), mirrored if chosen, and
 tinted by matching's own model: each pixel's OKLab color shifted by the
@@ -28,8 +28,7 @@ from numba import njit, prange
 from PIL import Image
 
 from skitter.core.color import LINEAR_LUT, rgb8_to_oklab_nb
-from skitter.core.matching.matcher import MatchResult
-from skitter.core.slicing import SliceContext
+from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import ChoiceParam, Configurable, IntParam
 from skitter.core.tiles.library import TileLibrary
 from skitter.core.tiles.render import render_crops_or_thumbs
@@ -124,36 +123,29 @@ class Frame:
         )
 
 
-def export_frame(result: MatchResult, ctx: SliceContext, settings: ExportSettings) -> Frame:
-    x, y, w, h = 0.0, 0.0, float(ctx.width), float(ctx.height)
-    if settings.framing == "tiles":
-        placed = result.tile >= 0
-        if placed.any():
-            bounds = result.regions.bounds()[placed]
-            x, y = (float(v) for v in bounds[:, :2].min(axis=0))
-            x1, y1 = bounds[:, 2:].max(axis=0)
-            w, h = float(x1) - x, float(y1) - y
+def export_frame(scene: MosaicScene, settings: ExportSettings) -> Frame:
+    x, y, (w, h) = 0.0, 0.0, scene.canvas
+    if settings.framing == "tiles" and len(scene):
+        x, y, x1, y1 = scene.bounds
+        w, h = x1 - x, y1 - y
     if settings.size_by == "width":
         scale = settings.width_px / w
     elif settings.size_by == "height":
         scale = settings.height_px / h
     else:
-        scale = settings.tile_px / ctx.tile_size[0]
+        scale = settings.tile_px / scene.tile_size[0]
     return Frame(x, y, w, h, scale)
 
 
-def enlargement(result: MatchResult, photo_width, scale: float) -> np.ndarray:
-    """How much each placed tile's crop is enlarged beyond its photo's resolution.
+def enlargement(scene: MosaicScene, photo_width, scale: float) -> np.ndarray:
+    """How much each tile's crop is enlarged beyond its photo's resolution.
 
     photo_width is each library slot's upright image width (indexable by
-    result.tile). Values above 1 mean the export shows the crop larger than
-    the photo has pixels for.
+    slot). Values above 1 mean the export shows the crop larger than the
+    photo has pixels for.
     """
-    placed = np.flatnonzero(result.tile >= 0)
-    rect = result.rect[placed]
-    available = (rect[:, 2] - rect[:, 0]) * np.asarray(photo_width)[result.tile[placed]]
-    needed = result.regions.size[placed, 0] * scale
-    return needed / np.maximum(available, 1e-9)
+    available = (scene.rect[:, 2] - scene.rect[:, 0]) * np.asarray(photo_width)[scene.slot]
+    return scene.size[:, 0] * scale / np.maximum(available, 1e-9)
 
 
 def check_size(size: tuple[int, int], settings: ExportSettings) -> str | None:
@@ -195,8 +187,7 @@ class ExportReport:
 
 
 def render_mosaic(
-    result: MatchResult,
-    ctx: SliceContext,
+    scene: MosaicScene,
     files: TileFiles,
     settings: ExportSettings,
     progress: Progress = lambda message, fraction: None,
@@ -204,17 +195,17 @@ def render_mosaic(
     workers: int | None = None,
 ) -> tuple[np.ndarray, ExportReport]:
     """The mosaic as an (H, W, 3) uint8 RGB image ((H, W, 4) RGBA if settings.alpha)."""
-    frame = export_frame(result, ctx, settings)
+    frame = export_frame(scene, settings)
     width, height = frame.size
     s = frame.scale
-    regions = result.regions
 
-    # Regions to draw, front to back, in output pixels.
-    order = regions.stacking_order()[::-1]
-    order = order[result.tile[order] >= 0]
-    center = (regions.center[order] - (frame.x, frame.y)) * s
-    size = regions.size[order] * s
-    bounds = (regions.bounds()[order] - (frame.x, frame.y, frame.x, frame.y)) * s
+    # Tiles to draw, front to back, in output pixels.
+    order = np.arange(len(scene))[::-1]
+    center = (scene.center[order] - (frame.x, frame.y)) * s
+    size = scene.size[order] * s
+    corners = scene.corners[order]
+    bounds = np.concatenate([corners.min(axis=1), corners.max(axis=1)], axis=1)
+    bounds = (bounds - (frame.x, frame.y, frame.x, frame.y)) * s
     box = np.empty((len(order), 4), np.int64)
     box[:, :2] = np.floor(bounds[:, :2]) - 1
     box[:, 2:] = np.ceil(bounds[:, 2:]) + 1
@@ -224,16 +215,16 @@ def render_mosaic(
     order, center, size, box = order[shown], center[shown], size[shown], box[shown]
     n = len(order)
 
-    rotation = regions.rotation[order]
+    rotation = scene.rotation[order]
     geom = np.column_stack([center, size / 2, np.cos(rotation), np.sin(rotation)]).astype(
         np.float64
     )
     crop_size = np.maximum(1, np.round(size)).astype(np.int64)  # (w, h) texels
-    mirrored = result.mirrored[order].astype(np.bool_)
-    shift = (result.tinted_mean() - result.tile_mean)[order].astype(np.float64)
+    mirrored = scene.mirrored[order].astype(np.bool_)
+    shift = scene.tint_shift[order].astype(np.float64)
     tinted = np.any(np.abs(shift) > 1e-6, axis=1)
-    file_index = files.index(result.tile[order])
-    rects = result.rect[order].astype(np.float64)
+    file_index = files.index(scene.slot[order])
+    rects = scene.rect[order].astype(np.float64)
 
     # Strips of rows, each needing at most about CROP_BUDGET texels of crops.
     texels = crop_size[:, 0] * crop_size[:, 1]

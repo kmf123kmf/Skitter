@@ -181,14 +181,14 @@ class ExportDialog(QDialog):
         session = self.session
         if not session.can_export:
             return "Match tiles first: there is no mosaic to export."
-        frame = export_frame(session.project.matches, session.slice_context, self.settings)
+        frame = export_frame(session.scene, self.settings)
         return check_size(frame.size, self.settings)
 
     def _refresh(self) -> None:
         session = self.session
         exporting = session.busy == "export"
         if session.can_export:
-            frame = export_frame(session.project.matches, session.slice_context, self.settings)
+            frame = export_frame(session.scene, self.settings)
             w, h = frame.size
             channels = 4 if self.settings.alpha else 3
             memory = w * h * channels / 2**20
@@ -233,7 +233,7 @@ class ExportDialog(QDialog):
     def _show_detail(self, scale: float) -> None:
         """Whether the tile photos have enough pixels for this size."""
         library = self.session.library
-        ratio = enlargement(self.session.project.matches, library.width, scale)
+        ratio = enlargement(self.session.scene, library.width, scale)
         enlarged = ratio > ENLARGED
         if not enlarged.any():
             self.detail_label.setText("Full detail (no tile is enlarged)")
