@@ -73,6 +73,7 @@ class _GpuLayer:
         self.texture.build_mipmaps()
         self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
         self.texture.anisotropy = 8.0
+        self.nearest_mag = False
 
         self.ctx, self.program, self.quad = ctx, program, quad
         self.capacity = 0
@@ -94,6 +95,12 @@ class _GpuLayer:
             )
         if len(instances):
             self.vbo.write(np.ascontiguousarray(instances, dtype=INSTANCE_DTYPE).tobytes())
+
+    def set_nearest_mag(self, nearest: bool) -> None:
+        if nearest != self.nearest_mag:
+            mag = moderngl.NEAREST if nearest else moderngl.LINEAR
+            self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, mag)
+            self.nearest_mag = nearest
 
     def render(self, count: int) -> None:
         if self.vao is None or count == 0:
@@ -133,13 +140,15 @@ class SpriteRenderer:
         self.program["u_zoom"] = camera.zoom
         self.program["u_viewport"] = tuple(camera.viewport)
 
-    def render(self, layer: SpriteLayer) -> None:
+    def render(self, layer: SpriteLayer, nearest_mag: bool = False) -> None:
+        """Draw a layer; nearest_mag shows magnified texels as sharp squares."""
         gpu = self._layers.get(layer)
         if gpu is None:
             gpu = self._layers[layer] = _GpuLayer(self.ctx, self.program, self.quad, layer)
         if layer.dirty:
             gpu.write_instances(layer.instances)
             layer.dirty = False
+        gpu.set_nearest_mag(nearest_mag)
         gpu.render(len(layer.instances))
 
     def release(self, layer: SpriteLayer) -> None:

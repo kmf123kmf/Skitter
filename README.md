@@ -18,8 +18,25 @@ A photo mosaic generator with an animated graphical interface.
 - Animations are functions `f(seconds) -> keep_running`, registered with `canvas.add_animation`.
   - Each frame they write directly into the instance arrays and call `layer.mark_dirty()`.
   - The canvas uploads changed arrays and redraws once per vsync while any animation is running, and stays idle otherwise.
+  - Animations advance after each frame is presented (`frameSwapped`), never inside `paintGL()`. Their side effects (signals that show, hide or resize widgets) would corrupt Qt's paint pass and crash. Keep `paintGL()` render-only.
+- Navigation: set `canvas.bounds` to the content's world rect.
+  - `zoom_to_fit()` enters fit mode, which refits on every resize. Any other zoom or pan leaves fit mode.
+  - `clamp_to_bounds` stops the view from scrolling past the content's edges.
 - Use the vectorized curves in `skitter.core.easing` to animate thousands of tiles in one numpy expression.
 - World coordinates follow image conventions (y points down). Sprite `pos` is the sprite's center.
+
+## Source step
+
+- Edits are non-destructive: `Project` keeps `source_original` plus a list of edit values (`core.edits`: flip, rotate, crop). `source_image` is recomputed from them.
+  - `Session` provides undo, redo and revert (revert keeps the edits available to redo).
+- `ImageViewer` (`ui/widgets/image_viewer.py`) is the reusable viewer. It has:
+  - fit by default, scrollbars only when the image overflows
+  - a bottom bar with the cursor's pixel and RGB value, zoom out, an editable zoom %, zoom in, Fit (Ctrl+0) and 1:1 (Ctrl+1)
+  - wheel zoom about the cursor, drag to pan, double-click to toggle fit/100%
+  - sharp pixels at 400% and above
+  - animated transitions for flip, rotate and crop
+- `CropOverlay` is a transparent child widget of the canvas that draws the crop box. Left drags edit the box; wheel and middle-drag fall through to the canvas.
+  - The box math lives in `core.geometry` (Qt-free, tested).
 
 ## Workflow tabs
 
@@ -40,21 +57,27 @@ src/skitter/
   core/             numpy-only image processing and mosaic logic
     imaging.py      load/save/resize/crop helpers
     easing.py       vectorized easing curves
+    edits.py        non-destructive edits: flip, rotate, crop
+    geometry.py     rectangle math for interactive tools (crop box)
     project.py      Project dataclass (state across all steps)
   ui/
     main_window.py  tabbed window, step gating, menus
     session.py      observable Project wrapper shared by steps
     steps/
       base.py       StepPage base class
-      source.py     step 1: source image selection
-    canvas.py       GPU canvas widget: layers, animations, pan/zoom input
+      source.py     step 1: source image selection and editing
+    widgets/
+      image_viewer.py  canvas + scrollbars + zoom bar + edit transitions
+      crop_overlay.py  interactive crop box over a canvas
+    canvas.py       GPU canvas widget: layers, animations, navigation
+    icons.py        vector toolbar icons drawn with QPainter
     demo.py         flying-tiles stress demo window
     render/
       camera.py     2D pan/zoom math
       sprites.py    SpriteLayer data and instanced renderer
   resources/
     shaders/        GLSL sources
-tests/              pytest suite (Qt-free parts)
+tests/              pytest suite (headless; Qt widgets run offscreen)
 ```
 
 ## Setup

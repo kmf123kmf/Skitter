@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from skitter.ui.render.camera import Camera2D
+from skitter.ui.render.camera import Camera2D, clamp_center
 from skitter.ui.render.sprites import INSTANCE_DTYPE, SpriteLayer, make_instances
 
 
@@ -42,6 +42,22 @@ def test_pan_moves_content_with_drag():
     before = camera.world_to_screen(10, 10)
     camera.pan_pixels(30, -20)
     np.testing.assert_allclose(camera.world_to_screen(10, 10), before + [30, -20])
+
+
+def test_clamp_centers_small_content_and_limits_large():
+    viewport = np.array([800.0, 600.0])
+    # 1000x200 world rect at zoom 1: wider than the view, shorter than it.
+    center = clamp_center((-500, 999), 1.0, viewport, (0, 0, 1000, 200))
+    np.testing.assert_allclose(center, [400, 100])  # left edge aligned; vertically centered
+    center = clamp_center((5000, 0), 1.0, viewport, (0, 0, 1000, 200))
+    np.testing.assert_allclose(center, [600, 100])  # right edge aligned
+
+
+def test_fit_ignores_min_zoom():
+    camera = make_camera()
+    camera.min_zoom = 1.0
+    camera.fit(0, 0, 8000, 6000, margin=1.0)
+    assert camera.zoom == 0.1
 
 
 def test_instance_layout_is_packed():

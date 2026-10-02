@@ -4,7 +4,11 @@ Each curve maps progress t in [0, 1] to [0, 1] and accepts scalars or arrays,
 so a whole set of tiles can be eased in one call.
 """
 
+from collections.abc import Callable
+
 import numpy as np
+
+Easing = Callable[[float], float]
 
 
 def progress(t, start, duration):
