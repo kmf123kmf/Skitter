@@ -202,14 +202,18 @@ class MosaicCanvas(QOpenGLWidget):
         else:
             cam.center = self._clamped(cam.center, cam.zoom)
         self.view_changed.emit()
+        self.update()
 
     def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
+        # Before the base class: it recreates the framebuffer and paints right
+        # away, which must already use the new viewport. (A single resize, like
+        # snapping the window, otherwise left a stretched frame on screen.)
         self._sync_viewport()
+        super().resizeEvent(event)
 
     def showEvent(self, event) -> None:
-        super().showEvent(event)
         self._sync_viewport()
+        super().showEvent(event)
 
     # OpenGL
 
