@@ -62,9 +62,6 @@ class SpriteLayer:
 
     line_alpha scales the opacity of the line and its dark band.
 
-    shadow_px > 0 adds a soft shadow of that many screen pixels around each
-    sprite, at most shadow_alpha opaque.
-
     texture_from: use another layer's GPU texture instead of uploading this
     layer's own (for example, an overlay sampling the image layer). That
     layer must be drawn earlier in the same canvas.
@@ -79,8 +76,6 @@ class SpriteLayer:
         edge_px: float = 0.0,
         fill_alpha: float = 0.0,
         line_alpha: float = 1.0,
-        shadow_px: float = 0.0,
-        shadow_alpha: float = 0.0,
         project_texture: bool = False,
         texture_size: tuple[float, float] = (1.0, 1.0),
         texture_from: "SpriteLayer | None" = None,
@@ -96,8 +91,6 @@ class SpriteLayer:
         self.edge_px = edge_px
         self.fill_alpha = fill_alpha
         self.line_alpha = line_alpha
-        self.shadow_px = shadow_px
-        self.shadow_alpha = shadow_alpha
         self.project_texture = project_texture
         self.texture_size = texture_size
         self.texture_from = texture_from
@@ -211,8 +204,6 @@ class SpriteRenderer:
         program["u_edge_px"] = float(layer.edge_px)
         program["u_fill_alpha"] = float(layer.fill_alpha)
         program["u_line_alpha"] = float(layer.line_alpha)
-        program["u_shadow_px"] = float(layer.shadow_px)
-        program["u_shadow_alpha"] = float(layer.shadow_alpha)
         program["u_project"] = int(layer.project_texture)
         program["u_texture_size"] = tuple(float(v) for v in layer.texture_size)
         gpu.render(len(layer.instances), texture_gpu.texture)

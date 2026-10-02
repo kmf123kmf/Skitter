@@ -94,7 +94,7 @@ Slicing divides the final image into regions for tile matching. The result is al
 - `Subdivider` keeps each parent's place in the stack: a lower photo's pieces stay below everything above it. Pieces stack among themselves by the z values `subdivide` returns.
 - `replace()` keeps z, so moving and resizing operations need do nothing. Operations that create or change overlap set z explicitly.
 - Preview modes (Display group):
-  - **Stacked:** regions draw bottom to top, each filled with the image pixels at its position, so upper regions hide the outlines of lower ones. Optional drop shadows, and dimming of uncovered areas.
+  - **Stacked:** regions draw bottom to top, each filled with the image pixels at its position, so upper regions hide the outlines of lower ones. Optional dimming of uncovered areas.
   - **Outlines:** every region's full extent is visible.
   - **Hidden.**
 - Hovering highlights the topmost region under the cursor (its full extent) and shows its size, rotation and stack layer.
@@ -220,7 +220,7 @@ src/skitter/
     widgets/
       image_viewer.py  canvas + scrollbars + zoom bar + edit transitions
       crop_overlay.py  interactive crop box over a canvas
-      region_overlay.py  stacked GPU preview of a RegionSet (fill, outlines, shadows, hover)
+      region_overlay.py  stacked GPU preview of a RegionSet (fill, outlines, hover)
       param_form.py    settings form generated from Params
     canvas.py       GPU canvas widget: layers, animations, navigation
     icons.py        vector toolbar icons drawn with QPainter

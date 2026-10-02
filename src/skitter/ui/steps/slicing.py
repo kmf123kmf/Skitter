@@ -253,9 +253,6 @@ class SlicingStep(StepPage):
             index = self.display_mode.count() - 1
             self.display_mode.setItemData(index, tip, Qt.ItemDataRole.ToolTipRole)
         self.display_mode.currentIndexChanged.connect(self._apply_display)
-        self.shadows = QCheckBox("Drop shadows")
-        self.shadows.setToolTip("Shadow each region onto the regions below it.")
-        self.shadows.toggled.connect(self._apply_display)
         self.dim_uncovered = QCheckBox("Dim uncovered areas")
         self.dim_uncovered.setToolTip("Darken parts of the image that no region covers.")
         self.dim_uncovered.setChecked(True)
@@ -291,7 +288,6 @@ class SlicingStep(StepPage):
         form.addRow("Regions:", self.display_mode)
         form.addRow("Line color:", self.line_color)
         form.addRow("Line opacity:", opacity_row)
-        form.addRow(self.shadows)
         form.addRow(self.dim_uncovered)
         return group
 
@@ -301,8 +297,6 @@ class SlicingStep(StepPage):
         self.overlay.set_visible(mode != HIDDEN)
         if mode != HIDDEN:
             self.overlay.set_mode(mode)
-        self.overlay.set_shadows(stacked and self.shadows.isChecked())
-        self.shadows.setEnabled(stacked)
         self.dim_uncovered.setEnabled(stacked)
         self.line_color.setEnabled(mode != HIDDEN)
         self.line_opacity.setEnabled(mode != HIDDEN)

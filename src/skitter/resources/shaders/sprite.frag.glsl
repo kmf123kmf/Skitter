@@ -12,10 +12,6 @@ uniform float u_fill_alpha;   // interior opacity when not projecting
 uniform int u_project;        // 1: fill with texture layer 0 at this world position
 uniform vec2 u_texture_size;  // world size the projected texture spans
 
-// Soft shadow outside each sprite (the quad is enlarged in the vertex shader).
-uniform float u_shadow_px;
-uniform float u_shadow_alpha;
-
 in vec2 v_uv;
 in vec2 v_local;
 in vec2 v_half;
@@ -32,17 +28,9 @@ float band(float dist, float width) {
 }
 
 void main() {
-    // Signed distance to the rectangle edge, in screen pixels.
+    // Distance inside the rectangle edge, in screen pixels.
     vec2 q = abs(v_local) - v_half;
-    float outside_px = length(max(q, 0.0)) * u_zoom;
     float inside_px = -max(q.x, q.y) * u_zoom;
-
-    if (outside_px > 0.0) {
-        if (u_shadow_px <= 0.0) discard;
-        float falloff = 1.0 - smoothstep(0.0, u_shadow_px, outside_px);
-        f_color = vec4(0.0, 0.0, 0.0, u_shadow_alpha * falloff * falloff * v_alpha);
-        return;
-    }
 
     vec4 color;
     if (u_outline_px > 0.0) {

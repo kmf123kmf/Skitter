@@ -16,7 +16,6 @@ in vec3 in_offset;    // rgb added after tinting
 uniform vec2 u_center;     // camera center, world units
 uniform float u_zoom;      // screen pixels per world unit
 uniform vec2 u_viewport;   // viewport size, logical pixels
-uniform float u_shadow_px; // grow each quad by this many screen pixels for a shadow
 
 out vec2 v_uv;
 out vec2 v_local;          // offset from the sprite center along its axes, world units
@@ -28,9 +27,7 @@ out vec4 v_tint;
 out vec3 v_offset;
 
 void main() {
-    float margin = u_shadow_px / u_zoom;
-    vec2 extent = in_size + 2.0 * margin * sign(in_size);
-    vec2 local = in_corner * extent;
+    vec2 local = in_corner * in_size;
 
     float c = cos(in_rotation);
     float s = sin(in_rotation);
@@ -40,9 +37,9 @@ void main() {
     vec2 ndc = (world - u_center) * u_zoom / (u_viewport * 0.5);
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
 
-    vec2 unit_uv = in_corner * (extent / in_size) + 0.5;  // 0..1 across the sprite
+    vec2 unit_uv = in_corner + 0.5;  // 0..1 across the sprite
     v_uv = in_uv.xy + unit_uv * (in_uv.zw - in_uv.xy);
-    v_local = abs(in_corner * extent) * sign(in_corner);
+    v_local = abs(local) * sign(in_corner);
     v_half = abs(in_size) * 0.5;
     v_world = world;
     v_alpha = in_alpha;

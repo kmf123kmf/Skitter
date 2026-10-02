@@ -27,8 +27,6 @@ LINE_COLOR = LINE_COLORS[0][2]
 HIGHLIGHT_COLOR = (0.25, 0.85, 1.0)
 LINE_PX = 1.25
 EDGE_PX = 1.5
-SHADOW_PX = 12.0
-SHADOW_ALPHA = 0.5
 
 STACKED, OUTLINES = "stacked", "outlines"
 
@@ -55,7 +53,6 @@ class RegionOverlay:
         self.regions: RegionSet | None = None
         self.highlighted: int | None = None
         self.mode = STACKED
-        self.shadows = False
         self.line_color = LINE_COLOR
         self._layer = SpriteLayer(None, make_instances(0), outline_px=LINE_PX, edge_px=EDGE_PX)
         self._highlight = SpriteLayer(
@@ -106,10 +103,6 @@ class RegionOverlay:
         self.mode = mode
         self._apply_style()
 
-    def set_shadows(self, shadows: bool) -> None:
-        self.shadows = shadows
-        self._apply_style()
-
     @property
     def visible(self) -> bool:
         return self._layer.visible
@@ -124,6 +117,4 @@ class RegionOverlay:
         layer.project_texture = stacked
         # Outlines mode draws lines only: any fill would build up where regions overlap.
         layer.fill_alpha = 0.0
-        layer.shadow_px = SHADOW_PX if self.shadows else 0.0
-        layer.shadow_alpha = SHADOW_ALPHA
         self.canvas.update()
