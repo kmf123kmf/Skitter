@@ -225,6 +225,25 @@ def test_too_many_regions_raises():
         plan.evaluate(blank())
 
 
+def test_too_many_regions_across_parents_fails_before_finishing():
+    calls = []
+
+    class Counting(GridSlicer):
+        def subdivide(self, region, ctx):
+            calls.append(region)
+            return super().subdivide(region, ctx)
+
+    plan = SlicingPlan(
+        [
+            Stage(GridSlicer(mode="count", columns=4, square_cells=False, rows=1)),
+            Stage(Counting(mode="count", columns=400, square_cells=False, rows=400)),
+        ]
+    )
+    with pytest.raises(SlicingError, match=f"{MAX_REGIONS:,}"):
+        plan.evaluate(blank())
+    assert len(calls) == 2  # stopped once the running total passed the limit
+
+
 def test_plan_serialization_roundtrip():
     plan = SlicingPlan(
         [
@@ -373,6 +392,14 @@ def test_pile_is_deterministic_per_seed():
     assert not np.array_equal(a.data, c.data)
 
 
+def test_pile_handles_regions_off_the_top_left():
+    from skitter.core.slicing.operations import PileSlicer
+
+    ctx = tiled(500, 500, tile=50)
+    regions = RegionSet.from_arrays([[-30.0, -40.0], [100.0, 100.0]], (100, 100))
+    assert len(PileSlicer().apply(regions, ctx)) > 2
+
+
 def test_stacking_order_operation():
     from skitter.core.slicing.operations import StackingAdjust
 
@@ -510,6 +537,14 @@ def test_bond_with_zero_shift_is_the_grid_and_random_is_seeded():
     np.testing.assert_array_equal(a.center, b.center)
     assert not np.array_equal(a.center, c.center) or len(a) != len(c)
     assert np.all(cover_counts(a, 100, 65) == 1)
+
+
+def test_random_bond_differs_between_parent_regions():
+    ctx = tiled(400, 400, tile=10)
+    parents = GridSlicer(cell_size=20).apply(ctx.canvas(), ctx)  # 2 x 2 equal parents
+    bond = BondSlicer(bond="random")
+    first, *others = (bond.subdivide(parent, ctx).center for parent in parents)
+    assert not any(np.array_equal(first, other) for other in others)
 
 
 @pytest.mark.parametrize("aspect", [2.0, 1.5, 1.0, 0.5])

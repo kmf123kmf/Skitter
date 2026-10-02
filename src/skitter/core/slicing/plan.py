@@ -3,15 +3,16 @@
 from dataclasses import dataclass
 
 from skitter.core.slicing.base import (
+    MAX_REGIONS,
     SliceContext,
-    SlicingError,
     SlicingOperation,
+    check_region_count,
     operation_from_dict,
 )
 from skitter.core.slicing.operations import GridSlicer
 from skitter.core.slicing.regions import RegionSet
 
-MAX_REGIONS = 250_000
+__all__ = ["MAX_REGIONS", "SlicingPlan", "Stage", "StageResult"]
 
 
 @dataclass
@@ -62,11 +63,7 @@ class SlicingPlan:
                 reusing = False
                 if stage.enabled:
                     regions = stage.operation.apply(regions, ctx)
-                    if len(regions) > MAX_REGIONS:
-                        raise SlicingError(
-                            f"{stage.operation.name} produced {len(regions):,} regions; "
-                            f"the limit is {MAX_REGIONS:,}"
-                        )
+                    check_region_count(len(regions), stage.operation.name)
             results.append(StageResult(key, regions))
         return results
 

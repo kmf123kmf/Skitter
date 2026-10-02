@@ -2,7 +2,12 @@
 
 import math
 
-from skitter.core.slicing.base import SliceContext, Subdivider, register_operation
+from skitter.core.slicing.base import (
+    SliceContext,
+    Subdivider,
+    check_region_count,
+    register_operation,
+)
 from skitter.core.slicing.params import BoolParam, ChoiceParam, IntParam, TileSizeParam
 from skitter.core.slicing.regions import Region, RegionSet
 
@@ -46,10 +51,13 @@ class GridSlicer(Subdivider):
     def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
         w, h = region.width, region.height
         if self.mode == COUNT:
-            return RegionSet.grid(w, h, self.columns, self.rows_for(w, h))
+            rows = self.rows_for(w, h)
+            check_region_count(self.columns * rows, self.name)
+            return RegionSet.grid(w, h, self.columns, rows)
         cell_w, cell_h = (self.cell_size * size for size in ctx.tile_size)
         columns = max(1, math.ceil(w / cell_w - 1e-9))
         rows = max(1, math.ceil(h / cell_h - 1e-9))
+        check_region_count(columns * rows, self.name)
         origin = (0.0, 0.0)
         if self.anchor == "center":
             origin = ((w - columns * cell_w) / 2, (h - rows * cell_h) / 2)

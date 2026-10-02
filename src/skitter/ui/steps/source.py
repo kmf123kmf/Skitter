@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from PIL import Image
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QDragEnterEvent, QDropEvent, QKeySequence
 from PySide6.QtWidgets import (
@@ -259,7 +260,7 @@ class SourceStep(StepPage):
     def load_file(self, path: Path) -> bool:
         try:
             image = load_image(path)
-        except OSError as exc:
+        except (OSError, ValueError, Image.DecompressionBombError) as exc:
             QMessageBox.warning(self, "Skitter", f"Could not open image:\n{exc}")
             return False
         self.session.set_source(path, image)
@@ -352,6 +353,9 @@ class SourceStep(StepPage):
         elif aspect and key == "h":
             w = round(h * aspect)
         w, h = min(max(w, 1), max_w), min(max(h, 1), max_h)
+        if aspect:
+            # Clamping one side can break the ratio; shrink the other side to match.
+            w, h = min(w, max(1, round(h * aspect))), min(h, max(1, round(w / aspect)))
         x, y = min(max(x, 0), max_w - w), min(max(y, 0), max_h - h)
         self.crop_overlay.set_box((x, y, x + w, y + h))
 

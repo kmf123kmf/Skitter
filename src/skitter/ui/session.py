@@ -1,5 +1,6 @@
 """Observable wrapper around the Project shared by all step pages."""
 
+import logging
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,8 @@ from skitter.core.slicing import (
     StageResult,
     summarize,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class Session(QObject):
@@ -121,8 +124,13 @@ class Session(QObject):
                 self._slicing_cache = project.slicing_plan.evaluate(
                     self._slice_context, self._slicing_cache
                 )
-            except SlicingError as exc:
-                self.slicing_error = str(exc)
+            except Exception as exc:
+                # Any failure must reach the UI; otherwise the preview silently goes stale.
+                if isinstance(exc, SlicingError):
+                    self.slicing_error = str(exc)
+                else:
+                    logger.exception("slicing plan failed")
+                    self.slicing_error = f"Slicing failed: {type(exc).__name__}: {exc}"
                 self._slicing_cache = []
                 project.regions = None
             else:

@@ -4,7 +4,7 @@ import math
 
 import numpy as np
 
-from skitter.core.slicing.base import SliceContext, Subdivider, register_operation
+from skitter.core.slicing.base import SliceContext, Subdivider, region_rng, register_operation
 from skitter.core.slicing.params import ChoiceParam, FloatParam, IntParam, TileSizeParam
 from skitter.core.slicing.regions import Region, RegionSet
 
@@ -53,10 +53,14 @@ class BondSlicer(Subdivider):
         help="Where the pattern is pinned; overhang goes to the opposite edges.",
     )  # fmt: skip
 
-    def course_shifts(self, count: int, first: int = 0) -> np.ndarray:
-        """Shift of each of count courses, numbered from first, as a fraction of a brick."""
+    def course_shifts(self, count: int, first: int = 0, region: Region | None = None) -> np.ndarray:
+        """Shift of each of count courses, numbered from first, as a fraction of a brick.
+
+        Random shifts are seeded per region (by position) so neighbors differ.
+        """
         if self.bond == "random":
-            return np.random.default_rng(self.seed).random(count)
+            rng = region_rng(self.seed, region) if region else np.random.default_rng(self.seed)
+            return rng.random(count)
         step = self.step if self.bond == "custom" else BOND_STEPS[self.bond]
         return ((np.arange(count) + first) * step) % 1.0
 
@@ -78,7 +82,7 @@ class BondSlicer(Subdivider):
             first = -(courses // 2)
 
         us, vs = [], []
-        for index, shift in enumerate(self.course_shifts(courses, first)):
+        for index, shift in enumerate(self.course_shifts(courses, first, region)):
             start = origin_u + shift * brick_u
             # Every brick start + [i, i + 1] * brick_u that overlaps (0, span_u).
             i0 = math.floor(-start / brick_u - 1 + 1e-9) + 1

@@ -4,7 +4,13 @@ import math
 
 import numpy as np
 
-from skitter.core.slicing.base import SliceContext, Subdivider, register_operation
+from skitter.core.slicing.base import (
+    SliceContext,
+    Subdivider,
+    check_region_count,
+    region_rng,
+    register_operation,
+)
 from skitter.core.slicing.params import FloatParam, IntParam, TileSizeParam
 from skitter.core.slicing.regions import Region, RegionSet
 
@@ -56,10 +62,11 @@ class PileSlicer(Subdivider):
 
     def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
         # Seed per region (by position) so neighbors don't get identical piles.
-        rng = np.random.default_rng([self.seed, round(region.cx * 64), round(region.cy * 64)])
+        rng = region_rng(self.seed, region)
         spacing = self.spacing(ctx)
         nx = max(1, math.ceil(region.width / spacing))
         ny = max(1, math.ceil(region.height / spacing))
+        check_region_count(nx * ny, self.name)
         cell_w, cell_h = region.width / nx, region.height / ny  # <= spacing: still covered
         cells = RegionSet.grid(region.width, region.height, nx, ny)
         n = len(cells)

@@ -109,6 +109,21 @@ def test_layout_before_commit_is_kept_and_used(session):
     assert len(session.project.regions) == 2  # 2 columns x 1 row of 2 px tiles
 
 
+def test_unexpected_slicing_failure_is_reported(session):
+    session.commit_source()
+    operation = session.project.slicing_plan.stages[0].operation
+
+    def fail(regions, ctx):
+        raise RuntimeError("boom")
+
+    operation.apply = fail
+    operation.cell_size = 2.0  # new key, so the stage re-runs
+    sliced = record(session.slicing_changed)
+    session.slicing_edited()
+    assert session.slicing_error == "Slicing failed: RuntimeError: boom"
+    assert session.project.regions is None and len(sliced) == 1
+
+
 def test_layout_change_reslices_and_announces_new_size(session):
     from skitter.core.slicing import MosaicLayout
 

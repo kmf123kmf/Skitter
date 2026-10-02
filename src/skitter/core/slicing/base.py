@@ -36,9 +36,28 @@ from skitter.core.slicing.regions import Region, RegionSet
 # Menu order for categories; unknown categories sort after these.
 CATEGORIES = ("Subdivide", "Adjust", "Filter", "Other")
 
+MAX_REGIONS = 250_000
+
 
 class SlicingError(Exception):
     """A plan could not be evaluated (for example, it produced too many regions)."""
+
+
+def check_region_count(count: int, name: str) -> None:
+    """Raise SlicingError if an operation would produce more than MAX_REGIONS regions.
+
+    Operations call this before allocating large results, so an oversized
+    plan fails fast instead of exhausting memory.
+    """
+    if count > MAX_REGIONS:
+        raise SlicingError(f"{name} produced {count:,} regions; the limit is {MAX_REGIONS:,}")
+
+
+def region_rng(seed: int, region: Region) -> np.random.Generator:
+    """A random generator for one region, seeded by seed and the region's position."""
+    # SeedSequence entries must be non-negative; wrap coordinates left of or above the canvas.
+    x, y = (round(v * 64) % 2**64 for v in (region.cx, region.cy))
+    return np.random.default_rng([seed, x, y])
 
 
 class SliceContext:
@@ -195,8 +214,11 @@ class Subdivider(SlicingOperation):
     def apply(self, regions: RegionSet, ctx: SliceContext) -> RegionSet:
         parent_rank = regions.stacking_rank()
         parts, parent_keys, part_keys = [], [], []
+        total = 0
         for index, region in enumerate(regions):
             local = self.subdivide(region, ctx)
+            total += len(local)
+            check_region_count(total, self.name)
             parts.append(local.to_world(region))
             parent_keys.append(np.full(len(local), parent_rank[index]))
             part_keys.append(local.stacking_rank())
