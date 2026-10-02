@@ -6,6 +6,7 @@ from skitter.core.slicing.operations.grid import GridSlicer
 from skitter.core.slicing.operations.pattern import PatternSlicer
 from skitter.core.slicing.operations.pile import PileSlicer
 from skitter.core.slicing.operations.quadtree import QuadtreeSlicer
+from skitter.core.slicing.operations.split import SplitSlicer
 
 __all__ = [
     "BondSlicer",
@@ -14,5 +15,6 @@ __all__ = [
     "PatternSlicer",
     "PileSlicer",
     "QuadtreeSlicer",
+    "SplitSlicer",
     "StackingAdjust",
 ]

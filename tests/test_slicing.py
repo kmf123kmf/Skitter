@@ -32,6 +32,7 @@ from skitter.core.slicing.operations import (
     JitterAdjust,
     PatternSlicer,
     QuadtreeSlicer,
+    SplitSlicer,
     StackingAdjust,
 )
 
@@ -191,8 +192,8 @@ def test_empty_plan_yields_whole_image():
 def test_disabled_stage_passes_through():
     plan = SlicingPlan(
         [
-            Stage(GridSlicer(mode="count", columns=4)),
-            Stage(GridSlicer(mode="count", columns=2), enabled=False),
+            Stage(SplitSlicer(across=4)),
+            Stage(SplitSlicer(across=2), enabled=False),
         ]
     )
     assert len(plan.regions(blank(100, 100))) == 16
@@ -201,26 +202,24 @@ def test_disabled_stage_passes_through():
 def test_evaluate_reuses_unchanged_prefix():
     calls = []
 
-    class Counting(GridSlicer):
+    class Counting(SplitSlicer):
         id = "test-counting"
 
         def apply(self, regions, ctx):
-            calls.append(self.columns)
+            calls.append(self.across)
             return super().apply(regions, ctx)
 
-    plan = SlicingPlan(
-        [Stage(Counting(mode="count", columns=2)), Stage(Counting(mode="count", columns=3))]
-    )
+    plan = SlicingPlan([Stage(Counting(across=2)), Stage(Counting(across=3))])
     ctx = blank(60, 60)
     cache = plan.evaluate(ctx)
-    plan.stages[1].operation.columns = 4
+    plan.stages[1].operation.across = 4
     cache = plan.evaluate(ctx, cache)
     assert calls == [2, 3, 4]  # the first stage was not re-run
     assert len(cache[-1].regions) == 4 * 16
 
 
 def test_too_many_regions_raises():
-    grid = GridSlicer(mode="count", columns=1000, square_cells=False, rows=1000)
+    grid = SplitSlicer(across=1000, keep_shape=False, down=1000)
     plan = SlicingPlan([Stage(grid)])
     with pytest.raises(SlicingError, match=f"{MAX_REGIONS:,}"):
         plan.evaluate(blank())
@@ -229,15 +228,15 @@ def test_too_many_regions_raises():
 def test_too_many_regions_across_parents_fails_before_finishing():
     calls = []
 
-    class Counting(GridSlicer):
+    class Counting(SplitSlicer):
         def subdivide(self, region, ctx):
             calls.append(region)
             return super().subdivide(region, ctx)
 
     plan = SlicingPlan(
         [
-            Stage(GridSlicer(mode="count", columns=4, square_cells=False, rows=1)),
-            Stage(Counting(mode="count", columns=400, square_cells=False, rows=400)),
+            Stage(SplitSlicer(across=4, keep_shape=False, down=1)),
+            Stage(Counting(across=400, keep_shape=False, down=400)),
         ]
     )
     with pytest.raises(SlicingError, match=f"{MAX_REGIONS:,}"):
@@ -248,7 +247,7 @@ def test_too_many_regions_across_parents_fails_before_finishing():
 def test_plan_serialization_roundtrip():
     plan = SlicingPlan(
         [
-            Stage(GridSlicer(columns=8)),
+            Stage(GridSlicer(cell_size=2)),
             Stage(JitterAdjust(seed=7), enabled=False),
             Stage(StackingAdjust(order="reverse")),
         ]
@@ -265,17 +264,27 @@ def test_plan_serialization_roundtrip():
 # Built-in operations
 
 
-def test_grid_square_cells_follow_aspect():
-    op = GridSlicer(columns=10)
-    assert op.rows_for(100, 50) == 5
-    op.square_cells = False
-    op.rows = 3
-    assert op.rows_for(100, 50) == 3
+def test_grid_has_only_tile_settings():
+    assert [p.name for p in GridSlicer.params()] == ["cell_size", "anchor"]
 
 
-def test_grid_inside_rotated_region_stays_inside():
+def test_split_keeps_the_tile_shape():
+    op = SplitSlicer(across=10)
+    assert op.down_for(100, 50, tile_aspect=1.0) == 5  # 10 x 10 pieces
+    assert op.down_for(100, 50, tile_aspect=2.0) == 10  # 10 x 5 pieces, 2:1 like the tile
+    assert op.down_for(100, 1, tile_aspect=1.0) == 1  # never fewer than one
+    op.keep_shape = False
+    op.down = 3
+    assert op.down_for(100, 50, tile_aspect=1.0) == 3
+    ctx = tiled(120, 60, tile=30, aspect=1.5)  # 30 x 20 tiles
+    pieces = SplitSlicer(across=4).apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(pieces.size[0], [30, 20])  # exactly the tile shape
+    assert len(pieces) == 4 * 3
+
+
+def test_split_inside_rotated_region_stays_inside():
     parent = RegionSet.from_arrays([[50, 50]], (40, 20), math.pi / 6)
-    grid = GridSlicer(mode="count", columns=4, square_cells=False, rows=2)
+    grid = SplitSlicer(across=4, keep_shape=False, down=2)
     cells = grid.apply(parent, blank())
     assert len(cells) == 8
     for corner in cells.corners().reshape(-1, 2):

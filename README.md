@@ -80,7 +80,8 @@ Slicing divides the final image into regions for tile matching. The result is al
 - `Session` re-evaluates the plan when it, the layout, or the final image changes, reusing cached results for unchanged leading stages.
 - The Slicing tab lists the stages (add from a menu grouped by category, reorder, enable/disable, remove), generates a settings form from the selected operation's parameters, and draws the regions on the GPU.
 - Built-in operations:
-  - **Grid**: base-tile cells with centered overhang, or a fixed count that fits exactly.
+  - **Grid**: cells of the Mosaic tile shape (scaled by Cell size), with centered overhang. Its only sizes are in base tiles, so the Mosaic box alone sets tile size and shape.
+  - **Split**: divides each region into Across x Down equal pieces (counts are per region, e.g. per jittered photo). Keep tile shape picks Down so pieces match the tile aspect.
   - **Brick Bond**: courses of base-tile bricks, each shifted along its length (running, third, quarter, custom or random). Courses run horizontally (rows shift) or vertically (columns shift).
   - **Brick Pattern**: repeating patterns that mix brick directions: herringbone (any tile shape, any rotation; 45° gives diagonal herringbone) and basketweave. Bricks lying the other way are base tiles turned 90°, so regions keep the tile shape.
   - **Quadtree**: splits where the image has detail, down to a minimum in tiles. Use after a Grid.
@@ -216,7 +217,7 @@ src/skitter/
       plan.py       SlicingPlan, stages, cached evaluation
       analysis.py   coverage, density and size summary
       patterns.py   brick pattern framework (repeating units, tiler)
-      operations/   built-ins: grid, bond, pattern, quadtree, pile, jitter, stacking
+      operations/   built-ins: grid, split, bond, pattern, quadtree, pile, jitter, stacking
   ui/
     main_window.py  tabbed window, Back/Next footer, step gating, menus
     session.py      observable Project wrapper shared by steps

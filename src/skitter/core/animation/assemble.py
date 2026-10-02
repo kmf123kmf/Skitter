@@ -29,9 +29,13 @@ ORDERS = (
 class AssembleChoreography(Choreography):
     id = "assemble"
     name = "Assemble"
-    description = "Tiles fly in from all around the mosaic, spinning, and land in place."
+    description = (
+        "Tiles fly in from all around the mosaic, spinning, and land in place."
+    )
 
-    order = ChoiceParam("center", "Order", choices=ORDERS, help="Which tiles land first.")
+    order = ChoiceParam(
+        "center", "Order", choices=ORDERS, help="Which tiles land first."
+    )
     duration = FloatParam(
         8.0, "Duration", min=0.5, max=600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first tile leaving to the last tile landing.",
@@ -50,10 +54,12 @@ class AssembleChoreography(Choreography):
     )  # fmt: skip
     spin = FloatParam(1.0, "Spin", min=0.0, max=20.0, step=0.25, suffix=" turns")
     shrink = FloatParam(
-        0.3, "Start size", min=0.0, max=5.0, step=0.1, suffix=" ×",
+        0.3, "Start size", min=0.0, max=10.0, step=0.1, suffix=" ×",
         help="Size of a tile at the start of its flight, relative to its final size.",
     )  # fmt: skip
-    bounce = BoolParam(False, "Bounce", help="Overshoot slightly and settle when landing.")
+    bounce = BoolParam(
+        False, "Bounce", help="Overshoot slightly and settle when landing."
+    )
     seed = IntParam(1, "Seed", min=0, max=999_999)
 
     def timeline(self, scene: MosaicScene) -> Timeline:
@@ -75,9 +81,11 @@ class AssembleChoreography(Choreography):
         radius = reach * rng.uniform(1.0, 1.6, n)
         final = TileFrame.final(scene)
         start = final.replace(
-            center=middle + radius[:, None] * np.stack([np.cos(angle), np.sin(angle)], axis=1),
+            center=middle
+            + radius[:, None] * np.stack([np.cos(angle), np.sin(angle)], axis=1),
             size=final.size * self.shrink,
-            rotation=final.rotation + rng.uniform(-1.0, 1.0, n) * self.spin * 2 * math.pi,
+            rotation=final.rotation
+            + rng.uniform(-1.0, 1.0, n) * self.spin * 2 * math.pi,
             alpha=np.zeros(n),
         )
         easing = ease_out_back if self.bounce else ease_out_cubic

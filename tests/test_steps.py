@@ -220,23 +220,29 @@ def test_layout_controls_resize_mosaic_and_reslice(slicing, qapp):
 
 
 def test_param_form_edits_recompute_regions(slicing, qapp):
-    columns = slicing.form.editor("columns").widget
-    assert not columns.isEnabled()  # count settings inactive in base-tile mode
-    slicing.form.editor("mode").widget.setCurrentIndex(1)  # fixed count
-    assert columns.isEnabled()
-    assert not slicing.form.editor("cell_size").widget.isEnabled()
-    columns.setValue(4)
-    flush(qapp)
-    assert len(slicing.session.project.regions) == 4 * 3
-    assert slicing._stages.item(0).text() == "Grid — 4 columns, square cells"
+    from skitter.core.slicing.operations import GridSlicer
 
-    rows = slicing.form.editor("rows").widget
-    assert not rows.isEnabled()  # inactive while square cells is on
-    slicing.form.editor("square_cells").widget.setChecked(False)
-    assert rows.isEnabled()
-    rows.setValue(2)
+    # Grid only scales the Mosaic tile: no counts of its own.
+    assert [p.name for p in GridSlicer.params()] == ["cell_size", "anchor"]
+    slicing.form.editor("cell_size").widget.setValue(2.0)
     flush(qapp)
-    assert len(slicing.session.project.regions) == 8
+    assert len(slicing.session.project.regions) == 20 * 15
+    assert slicing._stages.item(0).text() == "Grid — 2× tiles"
+
+    # Split divides each region on its own, keeping the tile shape by default.
+    split = next(a for a in slicing.add_menu.actions() if a.text() == "Split")
+    split.trigger()
+    flush(qapp)
+    assert len(slicing.session.project.regions) == 20 * 15 * 2 * 2
+    assert slicing._stages.item(1).text() == "Split — 2 across, tile shape"
+    down = slicing.form.editor("down").widget
+    assert not down.isEnabled()  # chosen from the tile shape
+    slicing.form.editor("keep_shape").widget.setChecked(False)
+    assert down.isEnabled()
+    down.setValue(1)
+    flush(qapp)
+    assert len(slicing.session.project.regions) == 20 * 15 * 2
+    assert slicing._stages.item(1).text() == "Split — 2 × 1"
 
 
 def test_add_reorder_disable_remove_stages(slicing, qapp):
@@ -266,10 +272,7 @@ def test_add_reorder_disable_remove_stages(slicing, qapp):
 
 
 def test_slicing_error_is_reported(slicing, qapp):
-    slicing.form.editor("mode").widget.setCurrentIndex(1)
-    slicing.form.editor("square_cells").widget.setChecked(False)
-    slicing.form.editor("columns").widget.setValue(1000)
-    slicing.form.editor("rows").widget.setValue(1000)
+    slicing.form.editor("cell_size").widget.setValue(0.05)  # 800 x 600 cells: over the limit
     flush(qapp)
     assert slicing.session.project.regions is None
     assert "limit" in slicing._error.text()
