@@ -25,12 +25,12 @@ set z, for example with RegionSet.restacked.
 import math
 from abc import ABC, abstractmethod
 from functools import cached_property
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import numpy as np
 
 from skitter.core.slicing.layout import MosaicLayout
-from skitter.core.slicing.params import Param
+from skitter.core.slicing.params import Configurable
 from skitter.core.slicing.regions import Region, RegionSet
 
 # Menu order for categories; unknown categories sort after these.
@@ -140,7 +140,7 @@ class SliceContext:
         return image[yi, xi], scale
 
 
-class SlicingOperation(ABC):
+class SlicingOperation(Configurable, ABC):
     """Base class for all slicing operations."""
 
     id: ClassVar[str] = ""  # stable identifier used in saved plans
@@ -148,46 +148,16 @@ class SlicingOperation(ABC):
     category: ClassVar[str] = "Other"
     description: ClassVar[str] = ""
 
-    def __init__(self, **values):
-        self._values: dict[str, Any] = {p.name: p.default for p in self.params()}
-        self.update(**values)
-
-    @classmethod
-    def params(cls) -> list[Param]:
-        """Declared parameters, base classes first, in declaration order."""
-        found: dict[str, Param] = {}
-        for klass in reversed(cls.__mro__):
-            for name, attr in vars(klass).items():
-                if isinstance(attr, Param):
-                    found[name] = attr
-        return list(found.values())
-
-    def update(self, **values) -> None:
-        for name, value in values.items():
-            if name not in self._values:
-                raise KeyError(f"{self.id} has no parameter {name!r}")
-            setattr(self, name, value)
-
-    def values(self) -> dict[str, Any]:
-        return dict(self._values)
-
     def key(self) -> tuple:
         """Identifies this operation's type and settings (for result caching)."""
-        return (self.id, tuple(sorted(self._values.items())))
+        return (self.id, super().key())
 
     def summary(self) -> str:
         """Short description of the current settings for lists; may be empty."""
         return ""
 
-    def copy(self) -> "SlicingOperation":
-        return type(self)(**self._values)
-
     def to_dict(self) -> dict:
         return {"type": self.id, "params": self.values()}
-
-    def __repr__(self) -> str:
-        args = ", ".join(f"{k}={v!r}" for k, v in self._values.items())
-        return f"{type(self).__name__}({args})"
 
     @abstractmethod
     def apply(self, regions: RegionSet, ctx: SliceContext) -> RegionSet:

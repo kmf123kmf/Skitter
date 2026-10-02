@@ -7,6 +7,7 @@ A photo mosaic generator with an animated graphical interface.
 - **numpy** and **Pillow** handle image processing and mosaic algorithms (`skitter.core`)
 - **PySide6 (Qt 6)** provides the application shell: windows, menus, panels, dialogs (`skitter.ui`)
 - **moderngl** drives the canvas. It needs OpenGL 3.3 or newer. All tiles in a layer draw in a single instanced call (`skitter.ui.render`)
+- **faiss-cpu** (nearest-neighbor search), **numba** (inner loops) and **scipy** (blurs) power tile matching (`skitter.core.tiles`, `skitter.core.matching`)
 
 `skitter.core` must not import Qt. That keeps the algorithms testable without a display and lets them run from scripts.
 
@@ -40,7 +41,7 @@ A photo mosaic generator with an animated graphical interface.
 
 ## Workflow tabs
 
-- Each step of mosaic generation is a tab: a `StepPage` subclass listed in order in `skitter/ui/steps/__init__.py`. Currently: Source, then Slicing.
+- Each step of mosaic generation is a tab: a `StepPage` subclass listed in order in `skitter/ui/steps/__init__.py`. Currently: Source, Slicing, Tiles, Matching.
 - All steps share one `Session`, which wraps the `core.project.Project` data and emits signals when it changes.
   - Steps change the project only through `Session` methods, so other steps are notified.
 - The footer has **Back** and **Next: \<step\>** (Ctrl+Enter). Next calls the current step's `advance()`, which commits its work, then opens the next tab.
@@ -124,6 +125,42 @@ class Stripes(Subdivider):
 - **Brick patterns** (`slicing/patterns.py`): a pattern is a repeating unit, a few bricks plus two period vectors, built by a function registered with `@register_pattern(id, name)`; `tile_pattern` fills a region with copies. Describe bricks in landscape terms with `PatternBuilder.add(cx, cy, horizontal)`; it makes each one a region in the base tile's shape (turned for portrait tiles). Pass `length=`/`thickness=` for bricks of other shapes. A pattern that needs settings lists them in `options`, and they become `PatternSlicer` parameters of the same name. Built-in patterns live in `operations/pattern.py`.
 - Optionally override `summary()` for the stage list. Make sure the module is imported (built-ins are imported by `skitter/core/slicing/operations/__init__.py`).
 
+## Tiles
+
+- The **tile library** (`core/tiles/library.py`) is an on-disk cache in its own folder (default `%LOCALAPPDATA%\Skitter\library`):
+  - `library.sqlite`: the folders to scan, plus one row per image (path, size, mtime, upright pixel size, status).
+  - `thumbs.u8`: a memory-mapped array of 32 px analysis thumbnails, about 3 KB per tile (1.5 GB at 500,000 tiles), paged in as needed.
+- **Update** is incremental. It reads only new or changed files, records unreadable ones (not retried until they change) and marks vanished ones missing. `version` changes with each update, so derived data is cached by it.
+- Ingest (`core/tiles/ingest.py`) decodes JPEGs at reduced scale (`Image.draft`) in a process pool. Progress and cancel go through callbacks.
+- Long work runs off the UI thread as a `ui/jobs.Job`, one at a time, started through `Session` (`update_library`, `start_matching`). Its signals arrive on the UI thread.
+
+## Matching
+
+Matching (`core/matching`, Qt-free) gives every visible region a tile crop:
+
+1. **Targets** (`targets.py`): each region is sampled in its own rotated frame and described in OKLab (`core/color.py`):
+   - the mean color;
+   - 2 x 2 and 4 x 4 grids of how each cell differs from that mean;
+   - the lightness spread per 2 x 2 cell (`core/tiles/descriptors.py`).
+
+   A raster of the region stack (`raster.py`) masks the cells hidden under higher regions. Cells too small to carry detail are masked too.
+2. **Candidates** (`core/tiles/crops.py`, `index.py`): regions are grouped into shape (aspect) classes. For each class, each tile gets crop windows chosen by its own aspect: one centered crop if it nearly fits, otherwise up to `crops` crops along its long axis, optionally mirrored. Tiles that are far too long are skipped.
+3. **Search**:
+   - faiss uses an exact index up to 50,000 candidates and IVF-SQ8 beyond that.
+   - The top `candidates` are reranked exactly. The cost is `(1 - t)^2 |mean difference|^2 + |structure difference|^2`, with per-dimension weights, where `t` is the tint strength. A crop penalty favors tiles that keep more of their photo.
+   - Before the full search, a sample of regions is also searched exactly. If the approximate results cost noticeably more (the regret), search effort is raised.
+4. **Assignment** (`assign.py`, numba):
+   - A greedy pass gives each region its cheapest allowed candidate, honoring `max_uses` per image and the minimum spacing between repeats.
+   - A refinement pass then moves and swaps tiles to lower the total cost.
+   - Optional error diffusion passes average-color error on to later regions.
+5. **Quality** (`quality.py`):
+   - A proxy render paints each region's 4 x 4 cells in stacking order and compares the result with the image after blurring over ½, 1 and 2 tiles, giving ΔE scores, lightness SSIM and a per-region error.
+   - Adaptive passes search harder for the worst regions and keep the result only if the score improves.
+
+- Tinting moves only a tile's average color toward its region's (presets None, Subtle and Custom); tiles are never blended with the source.
+- The Matching tab previews the result with thumbnails packed into texture atlases (`ui/render/atlas.py`; each sprite's `uv` selects its cell and its `offset` applies the tint). It also has an error heat map and the statistics above.
+- `scripts/bench_matching.py` benchmarks index build, search accuracy and speed, and assignment at library scale.
+
 ## Layout
 
 ```
@@ -134,7 +171,21 @@ src/skitter/
     easing.py       vectorized easing curves
     edits.py        non-destructive edits: flip, rotate, crop
     geometry.py     rectangle math for interactive tools (crop box)
+    color.py        sRGB <-> OKLab (vectorized and for numba kernels)
     project.py      Project dataclass (state across all steps)
+    tiles/          tile library
+      library.py    on-disk cache: sqlite metadata + memory-mapped thumbnails
+      ingest.py     parallel, reduced-scale thumbnail decoding
+      crops.py      aspect classes and aspect-guided crop windows
+      descriptors.py  OKLab grid-pyramid descriptors of tile crops
+    matching/       region-to-tile matching
+      targets.py    region descriptors with visibility masks
+      raster.py     rasterized region stacks
+      index.py      candidate sets, faiss index, exact rerank and search
+      assign.py     reuse-constrained assignment and refinement
+      quality.py    proxy render and distance-blurred scores
+      matcher.py    the pipeline and its caches
+      settings.py   MatchSettings (Params)
     slicing/        slicing framework
       layout.py     MosaicLayout: base tile, columns, canvas size
       regions.py    Region / RegionSet (rotated rectangles)
@@ -151,6 +202,9 @@ src/skitter/
       base.py       StepPage base class
       source.py     step 1: source image selection and editing
       slicing.py    step 2: slicing plan editor and region preview
+      tiles.py      step 3: tile library folders, update, statistics
+      matching.py   step 4: matching settings, run, mosaic preview, heat map
+    jobs.py         background jobs with progress and cancel
     widgets/
       image_viewer.py  canvas + scrollbars + zoom bar + edit transitions
       crop_overlay.py  interactive crop box over a canvas
@@ -162,6 +216,7 @@ src/skitter/
     render/
       camera.py     2D pan/zoom math
       sprites.py    SpriteLayer data and instanced renderer
+      atlas.py      thumbnail texture atlases
   resources/
     shaders/        GLSL sources
 tests/              pytest suite (headless; Qt widgets run offscreen)
@@ -169,8 +224,10 @@ tests/              pytest suite (headless; Qt widgets run offscreen)
 
 ## Setup
 
+Python 3.11 to 3.13 (moderngl, numba and faiss-cpu have no wheels for 3.14 yet).
+
 ```powershell
-py -3.11 -m venv .venv
+py -3.13 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -e ".[dev]"
 ```
@@ -182,4 +239,5 @@ python -m skitter      # or just: skitter
 python -m skitter --demo 50000
 pytest
 ruff check .
+python scripts/bench_matching.py --candidates 1000000 --regions 50000
 ```

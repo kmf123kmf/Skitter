@@ -21,16 +21,21 @@ INSTANCE_DTYPE = np.dtype(
         ("alpha", "f4"),
         ("layer", "f4"),  # index into the layer's textures
         ("tint", "f4", 4),  # rgb in [0, 1], a = tint strength
+        ("uv", "f4", 4),  # texture rect (u0, v0, u1, v1) the sprite shows, e.g. an atlas cell
+        ("offset", "f4", 3),  # rgb added after tinting (shifts the average color)
     ]
 )
-_INSTANCE_FORMAT = "2f 2f 1f 1f 1f 4f /i"
-_INSTANCE_ATTRIBUTES = ("in_pos", "in_size", "in_rotation", "in_alpha", "in_layer", "in_tint")
+_INSTANCE_FORMAT = "2f 2f 1f 1f 1f 4f 4f 3f /i"
+_INSTANCE_ATTRIBUTES = (
+    "in_pos", "in_size", "in_rotation", "in_alpha", "in_layer", "in_tint", "in_uv", "in_offset",
+)  # fmt: skip
 
 
 def make_instances(count: int) -> np.ndarray:
-    """Zeroed instance array with full opacity."""
+    """Zeroed instance array with full opacity, each showing its whole texture."""
     instances = np.zeros(count, INSTANCE_DTYPE)
     instances["alpha"] = 1.0
+    instances["uv"] = (0.0, 0.0, 1.0, 1.0)
     return instances
 
 

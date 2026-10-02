@@ -22,6 +22,7 @@ in vec2 v_world;
 in float v_alpha;
 flat in float v_layer;
 in vec4 v_tint;
+in vec3 v_offset;
 
 out vec4 f_color;
 
@@ -57,6 +58,7 @@ void main() {
     } else {
         color = texture(u_textures, vec3(v_uv, v_layer));
         color.rgb = mix(color.rgb, v_tint.rgb, v_tint.a);
+        color.rgb = clamp(color.rgb + v_offset, 0.0, 1.0);
     }
     f_color = vec4(color.rgb, color.a * v_alpha);
 }

@@ -7,12 +7,16 @@ name = "skitter"
 version = "0.1.0"
 description = "Photo mosaic generator with an animated graphical interface"
 readme = "README.md"
-requires-python = ">=3.11"
+# Capped until moderngl, numba and faiss-cpu publish wheels for newer Pythons.
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy>=1.26",
     "Pillow>=10.0",
     "PySide6>=6.6",
     "moderngl>=5.10",
+    "faiss-cpu>=1.8",
+    "numba>=0.60",
+    "scipy>=1.11",
 ]
 
 [project.optional-dependencies]
@@ -32,6 +36,10 @@ skitter = ["resources/*", "resources/shaders/*.glsl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# For editors that run Pylint: let it import compiled extensions to see their names.
+[tool.pylint.main]
+extension-pkg-allow-list = ["PySide6", "moderngl", "faiss"]
 
 [tool.ruff]
 line-length = 100

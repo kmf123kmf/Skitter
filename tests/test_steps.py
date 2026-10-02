@@ -37,7 +37,8 @@ def source(window, image_file):
 
 
 def test_tabs_in_workflow_order(window):
-    assert [window.tabs.tabText(i) for i in range(window.tabs.count())] == ["Source", "Slicing"]
+    tabs = [window.tabs.tabText(i) for i in range(window.tabs.count())]
+    assert tabs == ["Source", "Slicing", "Tiles", "Matching"]
 
 
 def test_next_unavailable_until_source_loaded(window, image_file):
@@ -64,7 +65,7 @@ def test_next_commits_source_and_opens_slicing(window, source):
     assert window.tabs.currentWidget() is window.step(SlicingStep)
     assert window.step(SlicingStep).viewer.image is final
     assert window.step(SlicingStep)._mosaic_px.text() == "3,200 × 2,400 px"  # 40 x 80 px tiles
-    assert window.next_button.isHidden()  # last step
+    assert window.next_button.text() == "Next: Tiles"
     assert not window.back_button.isHidden()
 
     window.back_button.click()
@@ -103,7 +104,7 @@ def test_source_panel_shows_image_info(source):
 
 def test_tab_change_calls_enter_and_leave(window, source):
     calls = []
-    first, second = window.steps
+    first, second, *_ = window.steps
     first.on_leave = lambda: calls.append("leave source")
     second.on_enter = lambda: calls.append("enter slicing")
     window.next_button.click()

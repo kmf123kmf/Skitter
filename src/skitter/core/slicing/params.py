@@ -108,6 +108,48 @@ class BoolParam(Param):
         return value
 
 
+class Configurable:
+    """An object whose settings are declared as Param class attributes.
+
+    Holds the current values, validates updates, and identifies the settings
+    for caching. Slicing operations and the matching settings build on this.
+    """
+
+    def __init__(self, **values):
+        self._values: dict[str, Any] = {p.name: p.default for p in self.params()}
+        self.update(**values)
+
+    @classmethod
+    def params(cls) -> list[Param]:
+        """Declared parameters, base classes first, in declaration order."""
+        found: dict[str, Param] = {}
+        for klass in reversed(cls.__mro__):
+            for name, attr in vars(klass).items():
+                if isinstance(attr, Param):
+                    found[name] = attr
+        return list(found.values())
+
+    def update(self, **values) -> None:
+        for name, value in values.items():
+            if name not in self._values:
+                raise KeyError(f"{type(self).__name__} has no parameter {name!r}")
+            setattr(self, name, value)
+
+    def values(self) -> dict[str, Any]:
+        return dict(self._values)
+
+    def key(self) -> tuple:
+        """Identifies the current settings (for result caching)."""
+        return tuple(sorted(self._values.items()))
+
+    def copy(self):
+        return type(self)(**self._values)
+
+    def __repr__(self) -> str:
+        args = ", ".join(f"{k}={v!r}" for k, v in self._values.items())
+        return f"{type(self).__name__}({args})"
+
+
 class ChoiceParam(Param):
     """One of a set of values, each shown with a label.
 

@@ -152,6 +152,11 @@ class MainWindow(QMainWindow):
         self._current_step.on_enter()
         self._update_navigation()
 
+    def closeEvent(self, event) -> None:
+        self.session.cancel_job()  # stop background work before the window goes
+        self.session.wait_for_job(timeout=10)
+        super().closeEvent(event)
+
     def _update_title(self) -> None:
         path = self.session.project.source_path
         self.setWindowTitle(f"Skitter — {path.name}" if path else "Skitter")

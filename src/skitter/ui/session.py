@@ -7,6 +7,7 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from skitter.core.edits import Edit, apply_edits
+from skitter.core.matching.matcher import MatchCancelled, Matcher, MatchResult
 from skitter.core.project import Project
 from skitter.core.slicing import (
     MosaicLayout,
@@ -16,6 +17,8 @@ from skitter.core.slicing import (
     StageResult,
     summarize,
 )
+from skitter.core.tiles.library import TileLibrary, UpdateReport, default_library_folder
+from skitter.ui.jobs import Job
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +35,11 @@ class Session(QObject):
     source_committed = Signal()  # project.source_final changed; later steps must refresh
     layout_changed = Signal()  # project.layout changed (tile size, aspect, columns)
     slicing_changed = Signal()  # project.regions recomputed (see slicing_error, slicing_summary)
+    library_changed = Signal()  # tile library opened, updated, or its folders changed
+    library_progress = Signal(str, float)  # (message, fraction; -1 unknown) while updating
+    matching_changed = Signal()  # project.matches replaced, or matching failed or stopped
+    matching_progress = Signal(str, float)
+    busy_changed = Signal()  # a background job started or stopped
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -43,6 +51,15 @@ class Session(QObject):
         self._slicing_cache: list[StageResult] = []
         self.slicing_error: str | None = None
         self.slicing_summary: SliceSummary | None = None
+
+        self.library: TileLibrary | None = None
+        self.matcher: Matcher | None = None
+        self.library_report: UpdateReport | None = None
+        self.library_error: str | None = None
+        self.match_error: str | None = None
+        self._match_key: tuple | None = None  # inputs project.matches was computed from
+        self._job: Job | None = None
+        self._job_kind: str | None = None
 
     def set_source(self, path: Path, image: np.ndarray) -> None:
         project = self.project
@@ -192,3 +209,124 @@ class Session(QObject):
     def _rebuild_source(self) -> None:
         project = self.project
         project.source_image = apply_edits(project.source_original, project.source_edits)
+
+    # Background jobs (one at a time)
+
+    @property
+    def busy(self) -> str | None:
+        """The running job's kind ("library" or "matching"), else None."""
+        return self._job_kind if self._job is not None and self._job.running else None
+
+    def cancel_job(self) -> None:
+        if self._job is not None:
+            self._job.cancel()
+
+    def wait_for_job(self, timeout: float | None = None) -> None:
+        if self._job is not None:
+            self._job.wait(timeout)
+
+    def _start_job(self, kind: str, work, progress_signal, on_done, cancel_errors=()) -> Job:
+        if self.busy:
+            raise RuntimeError(f"{self.busy} job already running")
+        job = Job(work, cancel_errors, self)
+        job.progress.connect(progress_signal)
+        job.finished.connect(lambda result: on_done(result, None))
+        job.failed.connect(lambda message: on_done(None, message))
+        job.cancelled.connect(lambda: on_done(None, None))
+        job.stopped.connect(self._job_stopped)
+        self._job, self._job_kind = job, kind
+        job.start()
+        self.busy_changed.emit()
+        return job
+
+    def _job_stopped(self) -> None:
+        self._job = self._job_kind = None
+        self.busy_changed.emit()
+
+    # Tile library
+
+    def open_library(self, folder: str | Path | None = None) -> TileLibrary:
+        """Open (or create) the tile library cache; default: the per-user location."""
+        if self.library is not None:
+            self.library.close()
+        self.library = TileLibrary(folder or default_library_folder())
+        self.matcher = Matcher(self.library)
+        self.library_report = self.library_error = None
+        self.library_changed.emit()
+        return self.library
+
+    def set_library_folders(self, folders) -> None:
+        self.library.set_roots(folders)
+        self.library_changed.emit()
+
+    @property
+    def library_ready(self) -> bool:
+        return self.library is not None and len(self.library) > 0 and self.busy != "library"
+
+    def update_library(self, workers: int | None = None) -> Job:
+        """Read new and changed images from the library's folders in the background."""
+        library = self.library
+
+        def work(progress, cancelled):
+            def report(phase, done, total):
+                progress(f"{phase}: {done:,}" + (f" of {total:,}" if total else ""),
+                         done / total if total else None)  # fmt: skip
+
+            return library.update(progress=report, cancelled=cancelled, workers=workers)
+
+        def done(report, error):
+            self.library_report, self.library_error = report, error
+            self.library_changed.emit()
+
+        return self._start_job("library", work, self.library_progress, done)
+
+    # Matching
+
+    def _match_inputs(self) -> tuple:
+        library = self.library
+        return (
+            self.project.regions,
+            self._slice_context,
+            library.version if library is not None else None,
+            self.project.match_settings.key(),
+        )
+
+    @property
+    def matching_is_current(self) -> bool:
+        """Whether project.matches was computed from the current regions, library and settings."""
+        if self.project.matches is None or self._match_key is None:
+            return False
+        now = self._match_inputs()
+        then = self._match_key
+        return now[0] is then[0] and now[1] is then[1] and now[2:] == then[2:]
+
+    @property
+    def can_match(self) -> bool:
+        return (
+            bool(self.project.regions) and self._slice_context is not None and (self.library_ready)
+        )
+
+    def start_matching(self) -> Job:
+        """Match tiles to the current regions in the background."""
+        if not self.can_match:
+            raise RuntimeError("matching needs regions and a tile library")
+        key = self._match_inputs()
+        regions, ctx, _, _ = key
+        settings = self.project.match_settings.copy()
+        matcher = self.matcher
+
+        def work(progress, cancelled):
+            return matcher.run(regions, ctx, settings, progress, cancelled)
+
+        def done(result: MatchResult | None, error: str | None):
+            self.match_error = error
+            if result is not None:
+                self.project.matches, self._match_key = result, key
+            self.matching_changed.emit()
+
+        self.match_error = None
+        return self._start_job("matching", work, self.matching_progress, done, (MatchCancelled,))
+
+    def match_settings_edited(self) -> None:
+        """project.match_settings changed (results become out of date)."""
+        self.matching_changed.emit()
