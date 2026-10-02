@@ -7,6 +7,7 @@ uniform float u_zoom;
 // line in the tint color, a dark band inside it, and an interior fill.
 uniform float u_outline_px;   // line width, screen pixels
 uniform float u_edge_px;      // dark band width inside the line
+uniform float u_line_alpha;   // opacity of the line and its dark band
 uniform float u_fill_alpha;   // interior opacity when not projecting
 uniform int u_project;        // 1: fill with texture layer 0 at this world position
 uniform vec2 u_texture_size;  // world size the projected texture spans
@@ -53,8 +54,9 @@ void main() {
             fill = beyond ? vec4(0.24, 0.24, 0.26, 0.92)
                           : vec4(texture(u_textures, vec3(uv, 0.0)).rgb, 1.0);
         }
-        color = mix(fill, vec4(0.0, 0.0, 0.0, max(fill.a, 0.55)), band(inside_px, u_outline_px + u_edge_px));
-        color = mix(color, vec4(v_tint.rgb, 1.0), band(inside_px, u_outline_px));
+        color = mix(fill, vec4(0.0, 0.0, 0.0, max(fill.a, 0.55)),
+                    band(inside_px, u_outline_px + u_edge_px) * u_line_alpha);
+        color = mix(color, vec4(v_tint.rgb, 1.0), band(inside_px, u_outline_px) * u_line_alpha);
     } else {
         color = texture(u_textures, vec3(v_uv, v_layer));
         color.rgb = mix(color.rgb, v_tint.rgb, v_tint.a);

@@ -14,7 +14,16 @@ from skitter.core.slicing import RegionSet
 from skitter.ui.canvas import MosaicCanvas
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 
-LINE_COLOR = (1.0, 0.78, 0.2)  # amber reads well over most photos
+LINE_COLORS = (  # (id, label, rgb)
+    ("amber", "Amber", (1.0, 0.78, 0.2)),  # reads well over most photos
+    ("white", "White", (1.0, 1.0, 1.0)),
+    ("black", "Black", (0.0, 0.0, 0.0)),
+    ("red", "Red", (0.95, 0.15, 0.15)),
+    ("magenta", "Magenta", (1.0, 0.2, 0.9)),
+    ("lime", "Lime", (0.5, 1.0, 0.2)),
+)
+DEFAULT_LINE_COLOR = "amber"
+LINE_COLOR = LINE_COLORS[0][2]
 HIGHLIGHT_COLOR = (0.25, 0.85, 1.0)
 LINE_PX = 1.25
 EDGE_PX = 1.5
@@ -47,6 +56,7 @@ class RegionOverlay:
         self.highlighted: int | None = None
         self.mode = STACKED
         self.shadows = False
+        self.line_color = LINE_COLOR
         self._layer = SpriteLayer(None, make_instances(0), outline_px=LINE_PX, edge_px=EDGE_PX)
         self._highlight = SpriteLayer(
             None, make_instances(0), outline_px=LINE_PX + 1, edge_px=EDGE_PX
@@ -63,9 +73,24 @@ class RegionOverlay:
 
     def set_regions(self, regions: RegionSet | None) -> None:
         self.regions = regions
-        self._layer.instances = regions_to_instances(regions, LINE_COLOR)
+        self._layer.instances = regions_to_instances(regions, self.line_color)
         self._layer.mark_dirty()
         self.set_highlight(None)
+
+    def set_line_color(self, color) -> None:
+        self.line_color = tuple(color)
+        self._layer.instances["tint"][:, :3] = self.line_color
+        self._layer.mark_dirty()
+        self.canvas.update()
+
+    @property
+    def line_alpha(self) -> float:
+        return self._layer.line_alpha
+
+    def set_line_alpha(self, alpha: float) -> None:
+        """Opacity of the region outlines (the hover highlight stays opaque)."""
+        self._layer.line_alpha = min(max(float(alpha), 0.0), 1.0)
+        self.canvas.update()
 
     def set_highlight(self, index: int | None) -> None:
         """Outline one region's full extent on top of everything (None clears)."""

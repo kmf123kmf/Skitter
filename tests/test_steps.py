@@ -332,3 +332,38 @@ def test_display_modes_control_overlay_and_dimming(slicing):
     assert slicing.viewer.image_layer.instances["tint"][0, 3] == 0
     slicing.display_mode.setCurrentIndex(2)  # hidden
     assert not slicing.overlay.visible
+
+
+def test_line_color_and_opacity_update_overlay_live(slicing, qapp):
+    from skitter.ui.widgets.region_overlay import LINE_COLORS
+
+    overlay = slicing.overlay
+    index = slicing.line_color.findData("red")
+    slicing.line_color.setCurrentIndex(index)
+    red = next(rgb for cid, _, rgb in LINE_COLORS if cid == "red")
+    assert overlay._layer.instances["tint"][:, :3].tolist()[0] == pytest.approx(red)
+
+    slicing.line_opacity.setValue(40)
+    assert overlay.line_alpha == pytest.approx(0.4)
+    assert slicing._line_opacity_label.text() == "40%"
+    assert overlay._highlight.line_alpha == 1.0
+
+    slicing.columns.setValue(10)  # re-slice: new regions keep the chosen color
+    flush(qapp)
+    assert overlay._layer.instances["tint"][0, :3].tolist() == pytest.approx(red)
+
+
+def test_line_style_persists_and_disables_when_hidden(window, slicing):
+    from skitter.ui.steps.slicing import SlicingStep
+
+    slicing.line_color.setCurrentIndex(slicing.line_color.findData("lime"))
+    slicing.line_opacity.setValue(55)
+    other = SlicingStep(slicing.session)
+    assert other.line_color.currentData() == "lime"
+    assert other.line_opacity.value() == 55
+    assert other.overlay.line_alpha == pytest.approx(0.55)
+
+    slicing.display_mode.setCurrentIndex(2)  # hidden
+    assert not slicing.line_color.isEnabled() and not slicing.line_opacity.isEnabled()
+    slicing.display_mode.setCurrentIndex(1)  # outlines
+    assert slicing.line_color.isEnabled() and slicing.line_opacity.isEnabled()

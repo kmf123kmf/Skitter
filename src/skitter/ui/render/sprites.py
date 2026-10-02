@@ -60,6 +60,8 @@ class SpriteLayer:
     (texture_size gives the world size it spans). Sprites draw in instance
     order, so later ones cover earlier ones.
 
+    line_alpha scales the opacity of the line and its dark band.
+
     shadow_px > 0 adds a soft shadow of that many screen pixels around each
     sprite, at most shadow_alpha opaque.
 
@@ -76,6 +78,7 @@ class SpriteLayer:
         outline_px: float = 0.0,
         edge_px: float = 0.0,
         fill_alpha: float = 0.0,
+        line_alpha: float = 1.0,
         shadow_px: float = 0.0,
         shadow_alpha: float = 0.0,
         project_texture: bool = False,
@@ -92,6 +95,7 @@ class SpriteLayer:
         self.outline_px = outline_px
         self.edge_px = edge_px
         self.fill_alpha = fill_alpha
+        self.line_alpha = line_alpha
         self.shadow_px = shadow_px
         self.shadow_alpha = shadow_alpha
         self.project_texture = project_texture
@@ -206,6 +210,7 @@ class SpriteRenderer:
         program["u_outline_px"] = float(layer.outline_px)
         program["u_edge_px"] = float(layer.edge_px)
         program["u_fill_alpha"] = float(layer.fill_alpha)
+        program["u_line_alpha"] = float(layer.line_alpha)
         program["u_shadow_px"] = float(layer.shadow_px)
         program["u_shadow_alpha"] = float(layer.shadow_alpha)
         program["u_project"] = int(layer.project_texture)

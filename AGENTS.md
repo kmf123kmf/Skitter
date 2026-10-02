@@ -14,4 +14,5 @@
 - Settings are declared with `Param`s on a `Configurable` (`core/slicing/params.py`); `ParamForm` builds their UI.
 - numba kernels use `cache=True, nogil=True` (so background jobs don't block the UI thread).
 - Tests must never touch the real tile library: `tests/conftest.py` points `LOCALAPPDATA` at a temp dir; open libraries in `tmp_path`.
+- UI preferences go through `ui/preferences.settings()` (INI); `tests/conftest.py` redirects its path.
 - `TileLibrary` defines `__len__`, so an empty library is falsy: compare with `is None`.

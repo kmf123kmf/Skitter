@@ -11,6 +11,7 @@ draws them in stacking order, so upper regions hide what they cover.
 import math
 
 from PySide6.QtCore import Qt, QTimer
+from PySide6.QtGui import QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMenu,
+    QSlider,
     QSpinBox,
     QStyle,
     QToolButton,
@@ -34,12 +36,20 @@ from skitter.core.slicing import (
     Stage,
     operation_types,
 )
+from skitter.ui import preferences
 from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.widgets.image_viewer import ImageViewer
 from skitter.ui.widgets.param_form import ParamForm
-from skitter.ui.widgets.region_overlay import OUTLINES, STACKED, RegionOverlay
+from skitter.ui.widgets.region_overlay import (
+    DEFAULT_LINE_COLOR,
+    LINE_COLORS,
+    OUTLINES,
+    STACKED,
+    RegionOverlay,
+)
 
 UNCOVERED_DIMMING = 0.6
+MIN_LINE_OPACITY, DEFAULT_LINE_OPACITY = 10, 100  # percent
 MIN_SOURCE_PX_PER_TILE = 2.0  # below this, tile colors come from too few source pixels
 WARNING_STYLE = "color: #c42b1c;"
 HIDDEN = "hidden"
@@ -100,6 +110,7 @@ class SlicingStep(StepPage):
         self.viewer.canvas.cursor_left.connect(lambda: self._on_hover(None, None))
         self._refresh_stages(select=0)
         self._apply_display()
+        self._apply_line_style()
         self._show_layout()
 
     @property
@@ -260,9 +271,36 @@ class SlicingStep(StepPage):
         self.dim_uncovered.setChecked(True)
         self.dim_uncovered.toggled.connect(self._apply_display)
 
+        prefs = preferences.settings()
+        self.line_color = QComboBox()
+        for color_id, label, rgb in LINE_COLORS:
+            swatch = QPixmap(14, 14)
+            swatch.fill(QColor.fromRgbF(*rgb))
+            self.line_color.addItem(QIcon(swatch), label, color_id)
+        index = self.line_color.findData(prefs.value("slicing/overlay_color", DEFAULT_LINE_COLOR))
+        self.line_color.setCurrentIndex(max(index, 0))
+        self.line_color.setToolTip("Color of the region outlines.")
+        self.line_opacity = QSlider(Qt.Orientation.Horizontal)
+        self.line_opacity.setRange(MIN_LINE_OPACITY, 100)
+        try:
+            opacity = int(prefs.value("slicing/overlay_alpha", DEFAULT_LINE_OPACITY))
+        except (TypeError, ValueError):
+            opacity = DEFAULT_LINE_OPACITY
+        self.line_opacity.setValue(min(max(opacity, MIN_LINE_OPACITY), 100))
+        self.line_opacity.setToolTip("Opacity of the region outlines.")
+        self._line_opacity_label = QLabel()
+        self._line_opacity_label.setMinimumWidth(36)
+        opacity_row = QHBoxLayout()
+        opacity_row.addWidget(self.line_opacity, stretch=1)
+        opacity_row.addWidget(self._line_opacity_label)
+        self.line_color.currentIndexChanged.connect(self._apply_line_style)
+        self.line_opacity.valueChanged.connect(self._apply_line_style)
+
         group = QGroupBox("Display")
         form = QFormLayout(group)
         form.addRow("Regions:", self.display_mode)
+        form.addRow("Line color:", self.line_color)
+        form.addRow("Line opacity:", opacity_row)
         form.addRow(self.shadows)
         form.addRow(self.dim_uncovered)
         return group
@@ -276,9 +314,22 @@ class SlicingStep(StepPage):
         self.overlay.set_shadows(stacked and self.shadows.isChecked())
         self.shadows.setEnabled(stacked)
         self.dim_uncovered.setEnabled(stacked)
+        self.line_color.setEnabled(mode != HIDDEN)
+        self.line_opacity.setEnabled(mode != HIDDEN)
         # Dimming only reads correctly when regions repaint the image they cover.
         dim = stacked and self.dim_uncovered.isChecked()
         self.viewer.set_dimming(UNCOVERED_DIMMING if dim else 0.0)
+
+    def _apply_line_style(self) -> None:
+        color_id = self.line_color.currentData()
+        opacity = self.line_opacity.value()
+        rgb = next(rgb for cid, _, rgb in LINE_COLORS if cid == color_id)
+        self.overlay.set_line_color(rgb)
+        self.overlay.set_line_alpha(opacity / 100)
+        self._line_opacity_label.setText(f"{opacity}%")
+        prefs = preferences.settings()
+        prefs.setValue("slicing/overlay_color", color_id)
+        prefs.setValue("slicing/overlay_alpha", opacity)
 
     # Mosaic layout
 

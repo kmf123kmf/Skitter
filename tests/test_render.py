@@ -71,3 +71,7 @@ def test_sprite_layer_promotes_single_rgb_image():
     layer = SpriteLayer(np.zeros((5, 7, 3), np.uint8), make_instances(1))
     assert layer.textures.shape == (1, 5, 7, 4)
     assert (layer.textures[..., 3] == 255).all()
+
+
+def test_sprite_layer_line_alpha_defaults_opaque():
+    assert SpriteLayer(None, make_instances(0)).line_alpha == 1.0
