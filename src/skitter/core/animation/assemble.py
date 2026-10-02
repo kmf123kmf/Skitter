@@ -9,6 +9,7 @@ from skitter.core.animation.base import (
     FlightTimeline,
     TileFrame,
     Timeline,
+    landing_order,
     register_choreography,
 )
 from skitter.core.easing import ease_out_back, ease_out_cubic
@@ -30,12 +31,11 @@ class AssembleChoreography(Choreography):
     id = "assemble"
     name = "Assemble"
     description = (
-        "Tiles fly in from all around the mosaic, spinning, and land in place."
+        "Tiles fly in from all around the mosaic, spinning, and land in place. "
+        "Overlapping tiles always land bottom first."
     )
 
-    order = ChoiceParam(
-        "center", "Order", choices=ORDERS, help="Which tiles land first."
-    )
+    order = ChoiceParam("center", "Order", choices=ORDERS, help="Which tiles land first.")
     duration = FloatParam(
         8.0, "Duration", min=0.5, max=600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first tile leaving to the last tile landing.",
@@ -46,7 +46,7 @@ class AssembleChoreography(Choreography):
     )  # fmt: skip
     spread = FloatParam(
         0.15, "Spread", min=0.0, max=1.0, step=0.05,
-        help="Randomness in when neighboring tiles leave, as a share of the duration.",
+        help="Randomness in the landing order, as a share of the whole sequence.",
     )  # fmt: skip
     distance = FloatParam(
         1.5, "Distance", min=0.0, max=10.0, step=0.25, suffix=" × mosaic",
@@ -57,9 +57,7 @@ class AssembleChoreography(Choreography):
         0.3, "Start size", min=0.0, max=10.0, step=0.1, suffix=" ×",
         help="Size of a tile at the start of its flight, relative to its final size.",
     )  # fmt: skip
-    bounce = BoolParam(
-        False, "Bounce", help="Overshoot slightly and settle when landing."
-    )
+    bounce = BoolParam(False, "Bounce", help="Overshoot slightly and settle when landing.")
     seed = IntParam(1, "Seed", min=0, max=999_999)
 
     def timeline(self, scene: MosaicScene) -> Timeline:
@@ -68,11 +66,14 @@ class AssembleChoreography(Choreography):
         travel = min(self.travel, self.duration)
         window = self.duration - travel
 
+        # Preferred place in the sequence (0..1), loosened by the spread; overlapping
+        # tiles still land bottom first. Landings are evenly paced.
         key = self._order_key(scene, rng)
-        rank = np.empty(n)
-        rank[np.argsort(key, kind="stable")] = np.linspace(0.0, 1.0, n) if n else []
-        jitter = rng.uniform(-1.0, 1.0, n) * self.spread
-        delay = np.clip(rank + jitter, 0.0, 1.0) * window
+        preferred = np.empty(n)
+        preferred[np.argsort(key, kind="stable")] = np.linspace(0.0, 1.0, n) if n else []
+        preferred += rng.uniform(-1.0, 1.0, n) * self.spread
+        order = landing_order(scene, preferred)
+        delay = order / max(n - 1, 1) * window
 
         x0, y0, x1, y1 = scene.bounds
         middle = np.array([(x0 + x1) / 2, (y0 + y1) / 2])
@@ -81,11 +82,9 @@ class AssembleChoreography(Choreography):
         radius = reach * rng.uniform(1.0, 1.6, n)
         final = TileFrame.final(scene)
         start = final.replace(
-            center=middle
-            + radius[:, None] * np.stack([np.cos(angle), np.sin(angle)], axis=1),
+            center=middle + radius[:, None] * np.stack([np.cos(angle), np.sin(angle)], axis=1),
             size=final.size * self.shrink,
-            rotation=final.rotation
-            + rng.uniform(-1.0, 1.0, n) * self.spin * 2 * math.pi,
+            rotation=final.rotation + rng.uniform(-1.0, 1.0, n) * self.spin * 2 * math.pi,
             alpha=np.zeros(n),
         )
         easing = ease_out_back if self.bounce else ease_out_cubic

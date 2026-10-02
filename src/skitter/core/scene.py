@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from functools import cached_property
 
 import numpy as np
+from numba import njit
 
 from skitter.core.color import oklab_to_srgb
 from skitter.core.matching.matcher import MatchResult
@@ -138,3 +139,92 @@ class MosaicScene:
     def lightness(self) -> np.ndarray:
         """(N,) OKLab lightness the tile shows (0 black, 1 white)."""
         return self.tile_color[:, 0].astype(np.float64)
+
+    @cached_property
+    def overlaps(self) -> np.ndarray:
+        """(M, 2) pairs (lower, upper) of tiles whose final rectangles overlap.
+
+        lower < upper (scene order is bottom to top). Tiles that only touch
+        along an edge, like grid neighbors, don't count.
+        """
+        n = len(self)
+        if n < 2:
+            return np.zeros((0, 2), np.int64)
+        corners = self.corners
+        lo, hi = corners.min(axis=1), corners.max(axis=1)
+        # Candidates: tiles sharing a cell of a grid about one typical tile wide.
+        cell = float(np.median((hi - lo).max(axis=1))) or 1.0
+        c0 = np.floor(lo / cell).astype(np.int64)
+        c1 = np.floor(hi / cell).astype(np.int64)
+        candidates = _cell_pairs(c0, c1)
+        if not len(candidates):
+            return candidates
+        a, b = candidates[:, 0], candidates[:, 1]
+        touching = np.all((lo[a] < hi[b]) & (lo[b] < hi[a]), axis=1)
+        a, b = a[touching], b[touching]
+        # Exact test for rotated rectangles: separated along one of their four axes?
+        tol = 1e-6 * min(self.tile_size)
+        d = self.center[b] - self.center[a]
+        half_a, half_b = self.size[a] / 2, self.size[b] / 2
+        axes_a = _axes(self.rotation[a])
+        axes_b = _axes(self.rotation[b])
+        separated = np.zeros(len(a), bool)
+        for axis in (*axes_a, *axes_b):
+            reach = _reach(half_a, axes_a, axis) + _reach(half_b, axes_b, axis)
+            separated |= np.abs(np.sum(d * axis, axis=1)) >= reach - tol
+        return np.stack([a[~separated], b[~separated]], axis=1)
+
+
+def _axes(rotation: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Each rectangle's local x and y axes in the image (rotation clockwise)."""
+    c, s = np.cos(rotation), np.sin(rotation)
+    return np.stack([c, s], axis=1), np.stack([-s, c], axis=1)
+
+
+def _reach(half: np.ndarray, axes, axis: np.ndarray) -> np.ndarray:
+    """How far rectangles (half sizes along their axes) extend along a direction."""
+    return half[:, 0] * np.abs(np.sum(axes[0] * axis, axis=1)) + half[:, 1] * np.abs(
+        np.sum(axes[1] * axis, axis=1)
+    )
+
+
+def _cell_pairs(c0: np.ndarray, c1: np.ndarray) -> np.ndarray:
+    """Unique pairs (i < j) of boxes covering a common grid cell (inclusive cell ranges)."""
+    span = (c1 - c0 + 1).prod(axis=1)
+    tile = np.repeat(np.arange(len(c0)), span)
+    k = np.arange(len(tile)) - np.repeat(np.cumsum(span) - span, span)
+    width = (c1 - c0 + 1)[tile, 0]
+    cx = c0[tile, 0] + k % width
+    cy = c0[tile, 1] + k // width
+    order = np.lexsort((tile, cy, cx))
+    pairs = _group_pairs(cx[order], cy[order], tile[order])
+    if not len(pairs):
+        return pairs
+    key = np.unique(pairs[:, 0] * len(c0) + pairs[:, 1])
+    return np.stack([key // len(c0), key % len(c0)], axis=1)
+
+
+@njit(cache=True, nogil=True)
+def _group_pairs(cx, cy, tile):
+    """All pairs (i < j) of tiles within each run of equal (cx, cy)."""
+    count = 0
+    start = 0
+    n = len(tile)
+    for end in range(1, n + 1):
+        if end == n or cx[end] != cx[start] or cy[end] != cy[start]:
+            k = end - start
+            count += k * (k - 1) // 2
+            start = end
+    out = np.empty((count, 2), np.int64)
+    m = 0
+    start = 0
+    for end in range(1, n + 1):
+        if end == n or cx[end] != cx[start] or cy[end] != cy[start]:
+            for i in range(start, end):
+                for j in range(i + 1, end):
+                    a, b = tile[i], tile[j]
+                    out[m, 0] = min(a, b)
+                    out[m, 1] = max(a, b)
+                    m += 1
+            start = end
+    return out
