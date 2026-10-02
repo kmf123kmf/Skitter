@@ -155,6 +155,9 @@ class ChoiceParam(Param):
 
     choices is a list of (value, label) pairs, or a function returning one,
     for choices drawn from a registry that may grow (like brick patterns).
+    available(obj, value), if given, tells whether a choice may be picked
+    given the object's other settings; the UI greys out the others and
+    falls back to the first available choice when the current one isn't.
     """
 
     def __init__(
@@ -163,10 +166,15 @@ class ChoiceParam(Param):
         label: str = "",
         *,
         choices: Sequence[tuple[Any, str]] | Callable[[], Sequence[tuple[Any, str]]],
+        available: Callable[[Any, Any], bool] | None = None,
         **kwargs,
     ):
         self._choices = choices if callable(choices) else list(choices)
+        self.available = available
         super().__init__(default, label, **kwargs)
+
+    def is_available(self, obj, value) -> bool:
+        return self.available is None or bool(self.available(obj, value))
 
     @property
     def choices(self) -> list[tuple[Any, str]]:

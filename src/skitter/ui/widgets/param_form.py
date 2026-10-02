@@ -38,6 +38,8 @@ class Editor:
     on_change: Callable[[Callable[[object], None]], None]
     # Receives the form's context (e.g. {"tile_size": (w, h)}) when it changes.
     set_context: Callable[[dict], None] | None = None
+    # Receives the target after any edit, to update what the editor offers.
+    refresh: Callable[[object], None] | None = None
 
 
 EditorFactory = Callable[[Param], Editor]
@@ -132,7 +134,12 @@ def _choice_editor(param: ChoiceParam) -> Editor:
     def on_change(callback) -> None:
         combo.currentIndexChanged.connect(lambda _: callback(combo.currentData()))
 
-    return Editor(combo, set_value, on_change)
+    def refresh(target) -> None:
+        model = combo.model()
+        for i in range(combo.count()):
+            model.item(i).setEnabled(param.is_available(target, combo.itemData(i)))
+
+    return Editor(combo, set_value, on_change, refresh=refresh)
 
 
 class ParamForm(QWidget):
@@ -189,7 +196,20 @@ class ParamForm(QWidget):
         self.changed.emit(param.name)
 
     def _update_active(self) -> None:
+        target = self._target
         for param, editor, label in self._rows:
-            active = param.is_active(self._target)
+            active = param.is_active(target)
             editor.widget.setEnabled(active)
             label.setEnabled(active)
+            if editor.refresh is not None:
+                editor.refresh(target)
+        for param, editor, _ in self._rows:
+            if isinstance(param, ChoiceParam) and not param.is_available(
+                target, getattr(target, param.name)
+            ):
+                fallback = next(
+                    (v for v, _ in param.choices if param.is_available(target, v)), None
+                )
+                if fallback is not None:
+                    editor.set_value(fallback)  # the editor reports it back through _on_edit
+                    return

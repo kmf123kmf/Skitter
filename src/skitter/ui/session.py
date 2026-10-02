@@ -1,11 +1,20 @@
 """Observable wrapper around the Project shared by all step pages."""
 
 import logging
+import os
 from pathlib import Path
 
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
+from skitter.core.assembly import (
+    ExportCancelled,
+    ExportReport,
+    ExportSettings,
+    TileFiles,
+    render_mosaic,
+    save_mosaic,
+)
 from skitter.core.edits import Edit, apply_edits
 from skitter.core.matching.matcher import MatchCancelled, Matcher, MatchResult
 from skitter.core.project import Project
@@ -17,7 +26,7 @@ from skitter.core.slicing import (
     StageResult,
     summarize,
 )
-from skitter.core.tiles.library import TileLibrary, UpdateReport, default_library_folder
+from skitter.core.tiles.library import OK, TileLibrary, UpdateReport, default_library_folder
 from skitter.ui.jobs import Job
 
 logger = logging.getLogger(__name__)
@@ -39,6 +48,10 @@ class Session(QObject):
     library_progress = Signal(str, float)  # (message, fraction; -1 unknown) while updating
     matching_changed = Signal()  # project.matches replaced, or matching failed or stopped
     matching_progress = Signal(str, float)
+    export_progress = Signal(str, float)
+    export_finished = Signal(
+        str, object, object
+    )  # (path, ExportReport, error); cancelled: both None
     busy_changed = Signal()  # a background job started or stopped
 
     def __init__(self, parent=None):
@@ -58,6 +71,7 @@ class Session(QObject):
         self.library_error: str | None = None
         self.match_error: str | None = None
         self._match_key: tuple | None = None  # inputs project.matches was computed from
+        self._match_tiles: tuple | None = None  # the library tiles it uses (see mosaic_is_valid)
         self._job: Job | None = None
         self._job_kind: str | None = None
 
@@ -158,6 +172,7 @@ class Session(QObject):
                 )
                 if project.regions:
                     self.slicing_summary = summarize(project.regions, ctx)
+        self._drop_stale_matches()
         self.slicing_changed.emit()
 
     # Source edits
@@ -214,7 +229,7 @@ class Session(QObject):
 
     @property
     def busy(self) -> str | None:
-        """The running job's kind ("library" or "matching"), else None."""
+        """The running job's kind ("library", "matching" or "export"), else None."""
         return self._job_kind if self._job is not None and self._job.running else None
 
     def cancel_job(self) -> None:
@@ -249,6 +264,9 @@ class Session(QObject):
         """Open (or create) the tile library cache; default: the per-user location."""
         if self.library is not None:
             self.library.close()
+        if self.project.matches is not None:  # its tiles refer to the old library
+            self.project.matches = self._match_key = self._match_tiles = None
+            self.matching_changed.emit()
         self.library = TileLibrary(folder or default_library_folder())
         self.matcher = Matcher(self.library)
         self.library_report = self.library_error = None
@@ -298,7 +316,20 @@ class Session(QObject):
             return False
         now = self._match_inputs()
         then = self._match_key
-        return now[0] is then[0] and now[1] is then[1] and now[2:] == then[2:]
+        return self._same_regions(then) and now[2:] == then[2:]
+
+    def _same_regions(self, key: tuple) -> bool:
+        """Whether key (from _match_inputs) has the current regions and slice context."""
+        return key[0] is self.project.regions and key[1] is self._slice_context
+
+    def _drop_stale_matches(self) -> None:
+        """Forget matches made for other regions: they no longer fit the mosaic.
+
+        (A library or settings change only makes them out of date.)
+        """
+        if self.project.matches is not None and not self._same_regions(self._match_key):
+            self.project.matches = self._match_key = self._match_tiles = None
+            self.matching_changed.emit()
 
     @property
     def can_match(self) -> bool:
@@ -320,8 +351,9 @@ class Session(QObject):
 
         def done(result: MatchResult | None, error: str | None):
             self.match_error = error
-            if result is not None:
+            if result is not None and self._same_regions(key):  # else re-sliced meanwhile
                 self.project.matches, self._match_key = result, key
+                self._match_tiles = self._tile_snapshot(result.tile)
             self.matching_changed.emit()
 
         self.match_error = None
@@ -330,3 +362,73 @@ class Session(QObject):
     def match_settings_edited(self) -> None:
         """project.match_settings changed (results become out of date)."""
         self.matching_changed.emit()
+
+    # Export
+
+    def _tile_snapshot(self, tiles) -> tuple:
+        """The library and the state of the tiles a mosaic uses."""
+        library = self.library
+        slots = np.unique(tiles[tiles >= 0])
+        return library, slots, library.paths(slots), library.width[slots], library.height[slots]
+
+    @property
+    def mosaic_is_valid(self) -> bool:
+        """Whether project.matches still fits the committed source, the regions and the tiles.
+
+        Unlike matching_is_current, changed match settings or new library
+        photos don't matter; a used tile that changed, vanished or failed does.
+        """
+        if (
+            self.project.matches is None
+            or self._match_key is None
+            or not self._same_regions(self._match_key)
+            or not self.source_is_committed
+            or self._match_tiles is None
+        ):
+            return False
+        library, slots, paths, width, height = self._match_tiles
+        if library is not self.library:
+            return False
+        return (
+            bool(np.all(library.status[slots] == OK))
+            and library.paths(slots) == paths
+            and np.array_equal(library.width[slots], width)
+            and np.array_equal(library.height[slots], height)
+        )
+
+    @property
+    def can_export(self) -> bool:
+        """Whether there is a valid mosaic to export (and the library is not being updated)."""
+        return self.busy != "library" and self.mosaic_is_valid
+
+    def export_signals(self) -> tuple:
+        """Signals after which can_export may have changed."""
+        return (
+            self.source_changed, self.source_edited, self.source_committed, self.slicing_changed,
+            self.library_changed, self.matching_changed, self.busy_changed,
+        )  # fmt: skip
+
+    def start_export(self, path: str | Path, settings: ExportSettings) -> Job:
+        """Render the current mosaic at full detail and save it, in the background."""
+        if not self.can_export:
+            raise RuntimeError("export needs a matched mosaic")
+        path = Path(path)
+        result, ctx = self.project.matches, self._slice_context
+        files = TileFiles.read(self.library, result.tile)  # here: the library isn't threadsafe
+        settings = settings.copy()
+
+        def work(progress, cancelled) -> ExportReport:
+            image, report = render_mosaic(result, ctx, files, settings, progress, cancelled)
+            progress(f"Saving {path.name}…", None)
+            part = path.with_name(path.name + ".part")  # never leave a half-written image
+            try:
+                save_mosaic(image, part, settings)
+                os.replace(part, path)
+            finally:
+                part.unlink(missing_ok=True)
+            return report
+
+        def done(report: ExportReport | None, error: str | None):
+            self.export_finished.emit(str(path), report, error)
+
+        return self._start_job("export", work, self.export_progress, done, (ExportCancelled,))

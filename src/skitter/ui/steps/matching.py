@@ -11,7 +11,6 @@ mosaic differs most from the image as seen from a distance.
 from dataclasses import dataclass
 
 import numpy as np
-from PIL import Image
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -24,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from skitter.core.matching.matcher import MatchResult
-from skitter.core.tiles.render import cut, render_crops
+from skitter.core.tiles.render import render_crops_or_thumbs
 from skitter.ui.jobs import Job, JobCancelled
 from skitter.ui.render.atlas import PackedAtlas, build_atlas, pack_images
 from skitter.ui.render.sprites import SpriteLayer, make_instances
@@ -74,15 +73,12 @@ def build_detail(paths, rects, sizes, thumbs, thumb_size, progress, cancelled) -
     def report(done, total):
         progress(f"Loading full-size tiles: {done:,} of {total:,} files", done / max(total, 1))
 
-    images = render_crops(paths, rects, pixels, progress=report, cancelled=cancelled)
-    if images is None:
+    rendered = render_crops_or_thumbs(
+        paths, rects, pixels, thumbs, thumb_size, progress=report, cancelled=cancelled
+    )
+    if rendered is None:
         raise JobCancelled
-    failed = set()
-    for i, image in enumerate(images):
-        if isinstance(image, str):
-            failed.add(paths[i])
-            tw, th = thumb_size[i]
-            images[i] = cut(Image.fromarray(thumbs[i, :th, :tw]), rects[i], pixels[i])
+    images, failed = rendered
     progress("Packing tiles…", None)
     return TileDetail(pack_images(images, DETAIL_PAGE), scale, len(failed))
 

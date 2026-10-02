@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
+from skitter.core.assembly import ExportSettings
 from skitter.core.edits import Edit
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.matching.settings import MatchSettings
@@ -26,7 +27,9 @@ class Project:
     regions: RegionSet | None = None  # slicing_plan evaluated on source_final, mosaic px
 
     match_settings: MatchSettings = field(default_factory=MatchSettings)
-    matches: MatchResult | None = None  # a tile for each region (may be for older regions)
+    matches: MatchResult | None = None  # a tile for each region (None after re-slicing)
+
+    export_settings: ExportSettings = field(default_factory=ExportSettings)
 
     @property
     def has_source(self) -> bool:

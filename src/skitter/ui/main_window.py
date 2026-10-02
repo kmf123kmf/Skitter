@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
 )
 
 from skitter.ui.demo import DemoWindow
+from skitter.ui.export_dialog import ExportDialog
 from skitter.ui.session import Session
 from skitter.ui.steps import STEPS, StepPage
 from skitter.ui.steps.source import SourceStep
@@ -50,6 +51,7 @@ class MainWindow(QMainWindow):
         self.session.source_changed.connect(self._update_title)
 
         self._demo_windows: list[DemoWindow] = []
+        self.export_dialog: ExportDialog | None = None
         self._build_menus()
         self._update_navigation()
         self.statusBar().showMessage("Choose a source image to begin")
@@ -72,6 +74,17 @@ class MainWindow(QMainWindow):
         quit_action.triggered.connect(self.close)
         file_menu.addAction(quit_action)
 
+        mosaic_menu = self.menuBar().addMenu("&Mosaic")
+        self.export_action = QAction("&Export Image...", self)
+        self.export_action.setShortcut(QKeySequence("Ctrl+E"))
+        self.export_action.triggered.connect(self.open_export)
+        mosaic_menu.addAction(self.export_action)
+        session = self.session
+        for signal in session.export_signals():
+            signal.connect(self._update_actions)
+        session.export_finished.connect(self._on_exported)
+        self._update_actions()
+
         demo_menu = self.menuBar().addMenu("&Demo")
         for count in DEMO_COUNTS:
             action = QAction(f"Flying Tiles ({count:,})", self)
@@ -82,6 +95,21 @@ class MainWindow(QMainWindow):
         source = self.step(SourceStep)
         self.tabs.setCurrentWidget(source)
         source.open_dialog()
+
+    def open_export(self) -> ExportDialog:
+        if self.export_dialog is None:
+            self.export_dialog = ExportDialog(self.session, self)
+        self.export_dialog.show()
+        self.export_dialog.raise_()
+        self.export_dialog.activateWindow()
+        return self.export_dialog
+
+    def _update_actions(self) -> None:
+        self.export_action.setEnabled(self.session.can_export)
+
+    def _on_exported(self, path: str, report, error) -> None:
+        if report is not None:
+            self.statusBar().showMessage(f"Exported {path}", 10_000)
 
     def open_demo(self, count: int) -> DemoWindow:
         window = DemoWindow(count)

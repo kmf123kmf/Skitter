@@ -94,3 +94,25 @@ def render_crops(
         finally:
             pool.shutdown(wait=True, cancel_futures=True)
     return out
+
+
+def render_crops_or_thumbs(
+    paths: Sequence[str], rects, sizes, thumbs, thumb_size, **kwargs
+) -> tuple[list[np.ndarray], set[str]] | None:
+    """Like render_crops, but crops of unreadable files are cut from their thumbnails.
+
+    thumbs (N, T, T, 3) and thumb_size (N, 2) are each crop's library
+    thumbnail. Returns (images, paths that could not be read), or None if
+    cancelled.
+    """
+    sizes = np.maximum(1, np.asarray(sizes, dtype=np.int64).reshape(-1, 2))
+    images = render_crops(paths, rects, sizes, **kwargs)
+    if images is None:
+        return None
+    failed = set()
+    for i, image in enumerate(images):
+        if isinstance(image, str):
+            failed.add(paths[i])
+            tw, th = thumb_size[i]
+            images[i] = cut(Image.fromarray(thumbs[i][:th, :tw]), rects[i], sizes[i])
+    return images, failed
