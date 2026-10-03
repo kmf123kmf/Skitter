@@ -4,7 +4,7 @@ A photo mosaic generator with an animated graphical interface.
 
 ## Stack
 
-- **numpy** and **Pillow** handle image processing and mosaic algorithms (`skitter.core`)
+- **numpy** and **Pillow** handle image processing and mosaic algorithms (`skitter.core`). **pillow-heif** adds HEIC / HEIF photos (iPhone); readable types are listed in `core/imaging.py` (`IMAGE_EXTENSIONS`)
 - **PySide6 (Qt 6)** provides the application shell: windows, menus, panels, dialogs (`skitter.ui`)
 - **moderngl** drives the canvas. It needs OpenGL 3.3 or newer. All tiles in a layer draw in a single instanced call (`skitter.ui.render`)
 - **faiss-cpu** (nearest-neighbor search), **numba** (inner loops) and **scipy** (blurs) power tile matching (`skitter.core.tiles`, `skitter.core.matching`)
@@ -132,7 +132,7 @@ class Stripes(Subdivider):
   - `library.sqlite`: the folders to scan, plus one row per image (path, size, mtime, upright pixel size, status).
   - `thumbs.u8`: a memory-mapped array of 32 px analysis thumbnails, about 3 KB per tile (1.5 GB at 500,000 tiles), paged in as needed.
 - **Update** is incremental. It reads only new or changed files, records unreadable ones (not retried until they change) and marks vanished ones missing. `version` changes with each update, so derived data is cached by it.
-- Ingest (`core/tiles/ingest.py`) decodes JPEGs at reduced scale (`Image.draft`) in a process pool. Progress and cancel go through callbacks.
+- Ingest (`core/tiles/ingest.py`) decodes JPEGs at reduced scale and HEIC photos from their embedded preview (`Image.draft`; about 7 ms per 12 MP iPhone photo, or about 350 ms if a HEIC has no preview) in a process pool. Progress and cancel go through callbacks.
 - Long work runs off the UI thread as a `ui/jobs.Job`, one at a time, started through `Session` (`update_library`, `start_matching`). Its signals arrive on the UI thread.
 
 ## Matching

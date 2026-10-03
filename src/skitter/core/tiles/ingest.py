@@ -1,8 +1,9 @@
 """Reading tile images quickly: small thumbnails, in parallel worker processes.
 
 Decoding is the slow part of building a large library. JPEGs are decoded at
-reduced scale (`Image.draft`, which lets libjpeg skip most of the work), and
-images are read by a pool of processes.
+reduced scale (`Image.draft`, which lets libjpeg skip most of the work), HEIC
+photos from their embedded thumbnail when it is large enough, and images are
+read by a pool of processes.
 """
 
 import os
@@ -33,7 +34,7 @@ def load_thumbnail(path: str | Path, size: int = THUMB) -> Thumbnail:
         width, height = img.size
         if img.getexif().get(_ORIENTATION, 1) in _TURNED:
             width, height = height, width
-        img.draft("RGB", (2 * size, 2 * size))  # JPEG: decode at reduced scale
+        img.draft("RGB", (2 * size, 2 * size))  # JPEG: reduced scale; HEIC: a thumbnail
         img = ImageOps.exif_transpose(img).convert("RGB")
         img.thumbnail((size, size), Image.Resampling.BOX)
         return Thumbnail(width, height, np.asarray(img, dtype=np.uint8))
