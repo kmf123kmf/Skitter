@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from skitter.ui.build_preview import BuildPreviewWindow
 from skitter.ui.demo import DemoWindow
 from skitter.ui.export_dialog import ExportDialog
 from skitter.ui.session import Session
@@ -53,7 +52,6 @@ class MainWindow(QMainWindow):
 
         self._demo_windows: list[DemoWindow] = []
         self.export_dialog: ExportDialog | None = None
-        self.build_preview: BuildPreviewWindow | None = None
         self._build_menus()
         self._update_navigation()
         self.statusBar().showMessage("Choose a source image to begin")
@@ -91,10 +89,6 @@ class MainWindow(QMainWindow):
             action = QAction(f"Flying Tiles ({count:,})", self)
             action.triggered.connect(lambda _=False, n=count: self.open_demo(n))
             demo_menu.addAction(action)
-        demo_menu.addSeparator()
-        self.build_preview_action = QAction("&Build Animation Preview...", self)
-        self.build_preview_action.triggered.connect(self.open_build_preview)
-        demo_menu.addAction(self.build_preview_action)
         self._update_actions()
 
     def open_source_image(self) -> None:
@@ -110,19 +104,8 @@ class MainWindow(QMainWindow):
         self.export_dialog.activateWindow()
         return self.export_dialog
 
-    def open_build_preview(self) -> BuildPreviewWindow:
-        if self.build_preview is None:
-            self.build_preview = BuildPreviewWindow(self.session, self)
-            self.build_preview.setWindowFlag(Qt.WindowType.Window)
-        self.build_preview.show()
-        self.build_preview.raise_()
-        self.build_preview.activateWindow()
-        return self.build_preview
-
     def _update_actions(self) -> None:
         self.export_action.setEnabled(self.session.can_export)
-        scene = self.session.scene
-        self.build_preview_action.setEnabled(scene is not None and len(scene) > 0)
 
     def _on_exported(self, path: str, report, error) -> None:
         if report is not None:

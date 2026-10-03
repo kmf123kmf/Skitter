@@ -264,48 +264,61 @@ def test_export_needs_a_valid_mosaic(sliced, photos, tmp_path):
     assert session.project.matches is None and not action.isEnabled()
 
 
-def test_build_animation_preview_plays_the_scene(sliced, photos, qapp):
+def test_animate_tab_plays_the_scene(sliced, photos, qapp):
+    from skitter.ui.steps.animate import AnimateStep
+
     window = sliced
     session = window.session
-    assert not window.build_preview_action.isEnabled()
+    animate = window.step(AnimateStep)
+    index = window.tabs.indexOf(animate)
+    assert window.tabs.tabText(index) == "Animate" and index == len(window.steps) - 1
+    assert not window.tabs.isTabEnabled(index) and "match tiles" in animate.status.text()
     build_library(window, photos)
     session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
     session.wait_for_job()
-    assert window.build_preview_action.isEnabled()
+    assert window.tabs.isTabEnabled(index)
 
-    preview = window.open_build_preview()
-    scene, player = session.scene, preview.player
-    assert preview.scene is scene and player.timeline is not None
-    assert player.time == 0 and np.all(player.layer.instances["alpha"] == 0)
+    window.tabs.setCurrentWidget(matching_step(window))
+    assert window.next_button.text() == "Next: Animate"
+    window.next_button.click()
+    assert window.tabs.currentWidget() is animate and window.next_button.isHidden()
+    scene, player = session.scene, animate.player
+    assert animate.scene is scene and player.timeline is not None
 
-    # The last moment is the finished mosaic, exactly as the Matching preview draws it.
-    player.seek(player.duration)
+    # It opens on the finished mosaic, exactly as the Matching preview draws it.
+    assert player.time == pytest.approx(player.duration) and animate.slider.value() == 1000
     final = session.textures.instances()
     for field in ("pos", "size", "rotation", "layer", "uv", "offset"):
         np.testing.assert_allclose(player.layer.instances[field], final[field], atol=1e-5)
     assert np.all(player.layer.instances["alpha"] == 1)
-    assert preview.slider.value() == 1000
+
+    # Play starts from the beginning: nothing has landed yet.
+    animate.toggle_play()
+    assert player.playing and animate.play_button.text() == "Pause"
+    assert player.time == 0 and np.all(player.layer.instances["alpha"] == 0)
 
     # Scrubbing pauses; settings changes replan and keep the moment.
-    player.play()
-    assert player.playing and preview.play_button.text() == "Pause"
-    preview._on_slider(500)
+    animate._on_slider(500)
     assert not player.playing and player.time == pytest.approx(4.0)  # half of 8 s
-    preview.form.editor("duration").widget.setValue(20)
+    animate.form.editor("duration").widget.setValue(20)
     assert player.duration == pytest.approx(20) and player.time == pytest.approx(4.0)
+
+    # Leaving the tab pauses playback.
+    animate.toggle_play()
+    window.go_back()
+    assert not player.playing
 
     # Full-size textures arrive: the layer swaps to them.
     session.textures.wait()
     qapp.processEvents()
     assert player.layer.textures.shape[1] == session.textures.pages.shape[1]
 
-    # Re-slicing drops the mosaic.
+    # Re-slicing drops the mosaic and locks the tab.
     layout = session.project.layout
     session.set_layout(replace(layout, columns=layout.columns + 1))
-    assert preview.scene is None and player.layer is None
-    assert not window.build_preview_action.isEnabled()
-    preview.close()
+    assert animate.scene is None and player.layer is None
+    assert not window.tabs.isTabEnabled(index)
 
 
 def test_matching_can_be_cancelled(sliced, photos):

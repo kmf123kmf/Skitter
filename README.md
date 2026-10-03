@@ -41,7 +41,7 @@ A photo mosaic generator with an animated graphical interface.
 
 ## Workflow tabs
 
-- Each step of mosaic generation is a tab: a `StepPage` subclass listed in order in `skitter/ui/steps/__init__.py`. Currently: Source, Slicing, Tiles, Matching.
+- Each step of mosaic generation is a tab: a `StepPage` subclass listed in order in `skitter/ui/steps/__init__.py`. Currently: Source, Slicing, Tiles, Matching, Animate.
 - All steps share one `Session`, which wraps the `core.project.Project` data and emits signals when it changes.
   - Steps change the project only through `Session` methods, so other steps are notified.
 - The footer has **Back** and **Next: \<step\>** (Ctrl+Enter). Next calls the current step's `advance()`, which commits its work, then opens the next tab.
@@ -179,7 +179,7 @@ Groundwork for animating the tiles into the finished mosaic (`core/animation/`):
 - A **choreography** is a configurable recipe (settings as `Param`s, registered with `@register_choreography`) that plans a **timeline** for a scene. `timeline.frame(t)` gives every tile's center, size, rotation, alpha, tint and draw order at time t: a pure function of time, so it can be played, paused, scrubbed or rendered frame by frame. `frame(duration)` must be exactly the finished mosaic (`TileFrame.final`), which a test checks for every registered choreography.
 - `FlightTimeline` covers tiles travelling from a start state to their final state with per-tile delays and easing; tiles are hidden until they set off, opaque in flight, and draw above landed ones. The built-in **Assemble** flies tiles in from all around (order by distance, reading order, lightness or random).
 - **Overlapping tiles land bottom first.** `scene.overlaps` lists every overlapping pair (rotated rectangles, exact), and `landing_order` turns each tile's preferred place in the sequence into a landing order in which a tile never lands before the tiles it lies on (a prioritized topological sort), so nothing pops under its neighbors on landing. Assemble then spaces landings evenly, so piles and grids build at the same steady pace (adjustable pacing is a possible later setting). A test checks every registered choreography against a real Photo Pile: an overlapping lower tile is never drawn above the tile that covers it.
-- `ui/render/player.py` plays a timeline on a canvas (`TimelinePlayer`, `seek`/`play`/`pause`). **Demo > Build Animation Preview** is a temporary window for trying choreographies until the feature gets its own step. Updating every tile each frame with numpy costs about 0.25 µs per tile (15,000 tiles run at over 100 fps).
+- `ui/render/player.py` plays a timeline on a canvas (`TimelinePlayer`, `seek`/`play`/`pause`). The **Animate** tab (unlocked once matching is current) picks a choreography, generates its settings form, and plays or scrubs it; it opens on the finished mosaic, Play runs from the start, and leaving the tab pauses. Updating every tile each frame with numpy costs about 0.25 µs per tile (15,000 tiles run at over 100 fps).
 
 ## Layout
 
@@ -223,13 +223,13 @@ src/skitter/
     main_window.py  tabbed window, Back/Next footer, step gating, menus
     session.py      observable Project wrapper shared by steps
     export_dialog.py  Export Image window
-    build_preview.py  Build Animation Preview window (temporary, Demo menu)
     steps/
       base.py       StepPage base class
       source.py     step 1: source image selection and editing
       slicing.py    step 2: slicing plan editor and region preview
       tiles.py      step 3: tile library folders, update, statistics
       matching.py   step 4: matching settings, run, mosaic preview, heat map
+      animate.py    step 5: choreography settings, playback and scrubbing of the build animation
     jobs.py         background jobs with progress and cancel
     widgets/
       image_viewer.py  canvas + scrollbars + zoom bar + edit transitions

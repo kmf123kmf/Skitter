@@ -37,7 +37,7 @@ def source(window, image_file):
 
 def test_tabs_in_workflow_order(window):
     tabs = [window.tabs.tabText(i) for i in range(window.tabs.count())]
-    assert tabs == ["Source", "Slicing", "Tiles", "Matching"]
+    assert tabs == ["Source", "Slicing", "Tiles", "Matching", "Animate"]
 
 
 def test_next_unavailable_until_source_loaded(window, image_file):

@@ -77,7 +77,7 @@ class TimelinePlayer(QObject):
         if self.timeline is None or self.playing:
             return
         if self.time >= self.duration:
-            self.time = 0.0
+            self.seek(0.0)  # draw the first frame now, not the finished one
         run = self._run = object()
         start = self.time
 
