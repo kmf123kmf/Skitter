@@ -13,6 +13,7 @@ dependencies = [
     "numpy>=1.26",
     "Pillow>=11.1",
     "pillow-heif>=1.0",  # HEIC / HEIF photos (iPhone)
+    "av>=14",  # video export (PyAV: FFmpeg with x264, x265, VP9, AV1, ProRes, WebP, GIF)
     "PySide6>=6.6",
     "moderngl>=5.10",
     "faiss-cpu>=1.8",

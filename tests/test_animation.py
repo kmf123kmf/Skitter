@@ -54,7 +54,6 @@ def test_scene_lists_placed_tiles_bottom_to_top():
     np.testing.assert_allclose(scene.center[:, 0], [35, 15, 5])
     np.testing.assert_allclose(scene.error, [4, 2, 1])
     np.testing.assert_allclose(scene.tint_shift, [[0.05, 0, 0]] * 3, atol=1e-6)
-    np.testing.assert_allclose(scene.tint_offset, scene.result.tint_offset()[scene.region])
     assert scene.bounds == (0.0, 0.0, 40.0, 10.0)
     assert scene.canvas == (60.0, 40.0) and scene.tile_size == (10.0, 10.0)
 

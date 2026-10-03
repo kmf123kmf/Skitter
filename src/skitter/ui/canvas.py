@@ -19,6 +19,25 @@ Animation = Callable[[float], bool]
 
 VIEW_ANIMATION_S = 0.2
 WHEEL_ZOOM_STEP = 1.15
+CHECKER_PX = 8  # checkerboard square size, logical pixels (transparent backgrounds)
+
+_CHECKER_VERTEX = """
+#version 330
+void main() {
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+}
+"""
+_CHECKER_FRAGMENT = """
+#version 330
+uniform float u_square;
+out vec4 f_color;
+void main() {
+    vec2 cell = floor(gl_FragCoord.xy / u_square);
+    float light = mod(cell.x + cell.y, 2.0);
+    f_color = vec4(vec3(mix(0.36, 0.46, light)), 1.0);
+}
+"""
 
 
 def configure_opengl() -> None:
@@ -57,6 +76,8 @@ class MosaicCanvas(QOpenGLWidget):
         super().__init__(parent)
         self.camera = Camera2D()
         self.background = (0.12, 0.12, 0.12)
+        self.checkerboard = False  # draw a checkerboard instead (shows transparency)
+        self._checker = None
         self.layers: list[SpriteLayer] = []
         self.ctx: moderngl.Context | None = None
         self.renderer: SpriteRenderer | None = None
@@ -233,6 +254,16 @@ class MosaicCanvas(QOpenGLWidget):
         ratio = self.devicePixelRatioF()
         self.ctx.viewport = (0, 0, round(self.width() * ratio), round(self.height() * ratio))
         self.ctx.clear(*self.background, 1.0)
+        if self.checkerboard:
+            if self._checker is None:
+                program = self.ctx.program(
+                    vertex_shader=_CHECKER_VERTEX, fragment_shader=_CHECKER_FRAGMENT
+                )
+                self._checker = (program, self.ctx.vertex_array(program, []))
+            program, vao = self._checker
+            program["u_square"] = CHECKER_PX * ratio
+            self.ctx.disable(moderngl.BLEND)
+            vao.render(moderngl.TRIANGLES, vertices=3)
         self.ctx.enable(moderngl.BLEND)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
 

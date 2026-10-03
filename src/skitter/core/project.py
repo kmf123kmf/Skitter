@@ -5,6 +5,8 @@ from pathlib import Path
 
 import numpy as np
 
+from skitter.core.animation import Choreography, choreography_types
+from skitter.core.animation.video import AnimationLook, VideoSettings
 from skitter.core.assembly import ExportSettings
 from skitter.core.edits import Edit
 from skitter.core.matching.matcher import MatchResult
@@ -30,6 +32,18 @@ class Project:
     matches: MatchResult | None = None  # a tile for each region (None after re-slicing)
 
     export_settings: ExportSettings = field(default_factory=ExportSettings)
+
+    # Animate step: one settings object per choreography, the chosen one, the look.
+    choreographies: dict[str, Choreography] = field(
+        default_factory=lambda: {cls.id: cls() for cls in choreography_types()}
+    )
+    choreography_id: str = "assemble"
+    animation_look: AnimationLook = field(default_factory=AnimationLook)
+    video_settings: VideoSettings = field(default_factory=VideoSettings)
+
+    @property
+    def choreography(self) -> Choreography:
+        return self.choreographies[self.choreography_id]
 
     @property
     def has_source(self) -> bool:

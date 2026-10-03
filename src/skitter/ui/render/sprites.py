@@ -22,7 +22,7 @@ INSTANCE_DTYPE = np.dtype(
         ("layer", "f4"),  # index into the layer's textures
         ("tint", "f4", 4),  # rgb in [0, 1], a = tint strength
         ("uv", "f4", 4),  # texture rect (u0, v0, u1, v1) the sprite shows, e.g. an atlas cell
-        ("offset", "f4", 3),  # rgb added after tinting (shifts the average color)
+        ("offset", "f4", 3),  # OKLab shift of every texel (matching's tint), before `tint`
     ]
 )
 _INSTANCE_FORMAT = "2f 2f 1f 1f 1f 4f 4f 3f /i"
@@ -178,6 +178,8 @@ class SpriteRenderer:
         corners = np.array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5], dtype="f4")
         self.quad = ctx.buffer(corners.tobytes())
         self._layers: dict[SpriteLayer, _GpuLayer] = {}
+        # Output linear light instead of sRGB (offscreen rendering into float buffers).
+        self.linear_output = False
 
     def set_camera(self, camera: Camera2D) -> None:
         self.program["u_center"] = tuple(camera.center)
@@ -206,6 +208,7 @@ class SpriteRenderer:
         program["u_line_alpha"] = float(layer.line_alpha)
         program["u_project"] = int(layer.project_texture)
         program["u_texture_size"] = tuple(float(v) for v in layer.texture_size)
+        program["u_linear"] = int(self.linear_output)
         gpu.render(len(layer.instances), texture_gpu.texture)
 
     def release(self, layer: SpriteLayer) -> None:

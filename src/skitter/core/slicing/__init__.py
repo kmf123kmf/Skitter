@@ -22,6 +22,7 @@ from skitter.core.slicing.layout import TILE_ASPECTS, TILE_UNIT, MosaicLayout
 from skitter.core.slicing.params import (
     BoolParam,
     ChoiceParam,
+    ColorParam,
     Configurable,
     FloatParam,
     IntParam,
@@ -49,6 +50,7 @@ __all__ = [
     "BoolParam",
     "BrickPattern",
     "ChoiceParam",
+    "ColorParam",
     "Configurable",
     "FloatParam",
     "IntParam",

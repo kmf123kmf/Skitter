@@ -7,6 +7,7 @@ A photo mosaic generator with an animated graphical interface.
 - **numpy** and **Pillow** handle image processing and mosaic algorithms (`skitter.core`). **pillow-heif** adds HEIC / HEIF photos (iPhone); readable types are listed in `core/imaging.py` (`IMAGE_EXTENSIONS`)
 - **PySide6 (Qt 6)** provides the application shell: windows, menus, panels, dialogs (`skitter.ui`)
 - **moderngl** drives the canvas. It needs OpenGL 3.3 or newer. All tiles in a layer draw in a single instanced call (`skitter.ui.render`)
+- **PyAV** (FFmpeg) encodes animation videos (`core/animation/encode.py`). Note: its bundled x264/x265, like pillow-heif's x265, are GPL; distributing Skitter with them means GPLv3
 - **faiss-cpu** (nearest-neighbor search), **numba** (inner loops) and **scipy** (blurs) power tile matching (`skitter.core.tiles`, `skitter.core.matching`)
 
 `skitter.core` must not import Qt. That keeps the algorithms testable without a display and lets them run from scripts.
@@ -179,7 +180,17 @@ Groundwork for animating the tiles into the finished mosaic (`core/animation/`):
 - A **choreography** is a configurable recipe (settings as `Param`s, registered with `@register_choreography`) that plans a **timeline** for a scene. `timeline.frame(t)` gives every tile's center, size, rotation, alpha, tint and draw order at time t: a pure function of time, so it can be played, paused, scrubbed or rendered frame by frame. `frame(duration)` must be exactly the finished mosaic (`TileFrame.final`), which a test checks for every registered choreography.
 - `FlightTimeline` covers tiles travelling from a start state to their final state with per-tile delays and easing; tiles are hidden until they set off, opaque in flight, and draw above landed ones. The built-in **Assemble** flies tiles in from all around (order by distance, reading order, lightness or random).
 - **Overlapping tiles land bottom first.** `scene.overlaps` lists every overlapping pair (rotated rectangles, exact), and `landing_order` turns each tile's preferred place in the sequence into a landing order in which a tile never lands before the tiles it lies on (a prioritized topological sort), so nothing pops under its neighbors on landing. Assemble then spaces landings evenly, so piles and grids build at the same steady pace (adjustable pacing is a possible later setting). A test checks every registered choreography against a real Photo Pile: an overlapping lower tile is never drawn above the tile that covers it.
-- `ui/render/player.py` plays a timeline on a canvas (`TimelinePlayer`, `seek`/`play`/`pause`). The **Animate** tab (unlocked once matching is current) picks a choreography, generates its settings form, and plays or scrubs it; it opens on the finished mosaic, Play runs from the start, and leaving the tab pauses. Updating every tile each frame with numpy costs about 0.25 µs per tile (15,000 tiles run at over 100 fps).
+- `ui/render/player.py` plays a timeline on a canvas (`TimelinePlayer`, `seek`/`play`/`pause`). The **Animate** tab (unlocked while a valid mosaic exists, even if matching settings changed since it was made) picks a choreography, generates its settings form, and plays or scrubs it; it opens on the finished mosaic, Play runs from the start, and leaving the tab pauses. Updating every tile each frame with numpy costs about 0.25 µs per tile (15,000 tiles run at over 100 fps).
+
+## Animation export
+
+**Mosaic → Export Animation** (Ctrl+Shift+E, or the Animate tab's button) renders the current choreography to a file in the background.
+
+- **Formats** (`core/animation/video.py`): MP4 (H.264, H.265, AV1), WebM (VP9), animated WebP, GIF, MOV (ProRes 4444 with alpha, else 422 HQ) and PNG sequences. Transparency (Animate tab background: Transparent) is offered only by WebM, WebP, ProRes and PNG; other formats refuse it with an explanation.
+- **Settings**: resolution presets (720p to 4K, square, 4:5, 9:16, mosaic shape, custom up to 4K), frame rate (24 to 60 or custom; 29.97 means 30000/1001), Fit or Fill framing with margin, holds at start and end, loop (GIF/WebP), quality and encoding speed, supersampling and motion blur (samples, shutter angle).
+- **Rendering** (`ui/render/video_renderer.py`): an offscreen OpenGL context on the worker thread, the same sprite shader as the preview (so the video matches the Animate tab), 8x multisampling times supersampling² samples per pixel (no seams between tiles), linear-light premultiplied blending in float buffers, motion blur from several moments per frame, and sections of at most 2048 px so GPU memory stays bounded. Tile textures are cut from the original photos at output resolution. The last frame is exactly the finished mosaic and matches the still export.
+- **Encoding** (`core/animation/encode.py`): frames stream into PyAV, BT.709 conversion and tags, MP4 fast start, a two-pass optimized palette for GIF. Output goes to a `.part` file (or folder) renamed only on success; cancel or failure deletes it.
+- **Animate tab**: Background (color or transparent, previewed as a checkerboard); a **Video** group with the settings that decide what the video shows (resolution, width, height, framing, margin) and **Show export frame**, which outlines that area and dims the rest. The tab and the Export Animation window edit the same `project.video_settings`, refresh each other (`ParamForm.refresh`), and the window opens with whatever the tab shows.
 
 ## Layout
 
@@ -195,7 +206,7 @@ src/skitter/
     project.py      Project dataclass (state across all steps)
     scene.py        MosaicScene: the finished mosaic's tiles in their final state
     assembly.py     full-detail mosaic rendering and export settings
-    animation/      choreographies, timelines, tile frames (animated construction)
+    animation/      choreographies, timelines, tile frames; video settings and encoding
     tiles/          tile library
       library.py    on-disk cache: sqlite metadata + memory-mapped thumbnails
       ingest.py     parallel, reduced-scale thumbnail decoding
@@ -223,6 +234,7 @@ src/skitter/
     main_window.py  tabbed window, Back/Next footer, step gating, menus
     session.py      observable Project wrapper shared by steps
     export_dialog.py  Export Image window
+    video_dialog.py   Export Animation window
     steps/
       base.py       StepPage base class
       source.py     step 1: source image selection and editing
@@ -245,6 +257,8 @@ src/skitter/
       atlas.py      texture atlases: thumbnail cells, packed full-detail crops
       tile_textures.py  a scene's tile textures, shared by views (full detail in background)
       player.py     plays an animation timeline on a sprite layer
+      video_renderer.py  offscreen GPU frames for video export (supersampling, motion blur)
+      video_export.py    the video export job (textures, frames, encoding)
   resources/
     shaders/        GLSL sources
 tests/              pytest suite (headless; Qt widgets run offscreen)

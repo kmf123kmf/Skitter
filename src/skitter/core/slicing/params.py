@@ -108,6 +108,40 @@ class BoolParam(Param):
         return value
 
 
+class ColorParam(Param):
+    """A color as "#rrggbb", or ColorParam.TRANSPARENT when allow_transparent."""
+
+    TRANSPARENT = "transparent"
+
+    def __init__(self, default: str, label: str = "", *, allow_transparent: bool = False,
+                 **kwargs):  # fmt: skip
+        self.allow_transparent = allow_transparent
+        super().__init__(default, label, **kwargs)
+
+    def validate(self, value) -> str:
+        if not isinstance(value, str):
+            raise self._error(f"expected a color, got {value!r}")
+        value = value.strip().lower()
+        if value == self.TRANSPARENT:
+            if not self.allow_transparent:
+                raise self._error("transparent is not allowed here")
+            return value
+        if len(value) != 7 or value[0] != "#":
+            raise self._error(f"expected #rrggbb, got {value!r}")
+        try:
+            int(value[1:], 16)
+        except ValueError:
+            raise self._error(f"expected #rrggbb, got {value!r}") from None
+        return value
+
+    @staticmethod
+    def rgb(value: str) -> tuple[float, float, float] | None:
+        """(r, g, b) in 0..1, or None for transparent."""
+        if value == ColorParam.TRANSPARENT:
+            return None
+        return tuple(int(value[i : i + 2], 16) / 255 for i in (1, 3, 5))
+
+
 class Configurable:
     """An object whose settings are declared as Param class attributes.
 

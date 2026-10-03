@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
+from skitter.core.animation.video import check_video, plan_video, sync_size
 from skitter.core.assembly import (
     ExportCancelled,
     ExportReport,
@@ -29,7 +30,8 @@ from skitter.core.slicing import (
 )
 from skitter.core.tiles.library import OK, TileLibrary, UpdateReport, default_library_folder
 from skitter.ui.jobs import Job
-from skitter.ui.render.tile_textures import TileTextures
+from skitter.ui.render.tile_textures import DetailRequest, TileTextures
+from skitter.ui.render.video_export import VideoJob, run_video_job
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,9 @@ class Session(QObject):
         str, object, object
     )  # (path, ExportReport, error); cancelled: both None
     busy_changed = Signal()  # a background job started or stopped
+    animation_changed = Signal()  # choreography, look or video settings edited
+    video_progress = Signal(str, float)
+    video_finished = Signal(str, object, object)  # (path, VideoReport, error); cancelled: both None
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -234,7 +239,7 @@ class Session(QObject):
 
     @property
     def busy(self) -> str | None:
-        """The running job's kind ("library", "matching" or "export"), else None."""
+        """The running job's kind ("library", "matching", "export" or "video"), else None."""
         return self._job_kind if self._job is not None and self._job.running else None
 
     def cancel_job(self) -> None:
@@ -424,6 +429,49 @@ class Session(QObject):
     def can_export(self) -> bool:
         """Whether there is a valid mosaic to export (and the library is not being updated)."""
         return self.busy != "library" and self.mosaic_is_valid
+
+    # Animation
+
+    def animation_edited(self) -> None:
+        """The choreography, its settings, the look or the video settings changed."""
+        sync_size(self.project.video_settings, self.scene)
+        self.animation_changed.emit()
+
+    def video_problems(self, path: str | Path | None = None) -> list[str]:
+        """Why a video export can't start now (empty: it can)."""
+        problems = []
+        if not self.can_export:
+            problems.append("Match tiles first: there is no up-to-date mosaic to animate.")
+            return problems
+        project = self.project
+        return check_video(self.scene, project.video_settings, project.animation_look.background,
+                           None if path is None else Path(path))  # fmt: skip
+
+    def start_video_export(self, path: str | Path) -> Job:
+        """Render the current animation to a video file, in the background."""
+        problems = self.video_problems(path)
+        if problems:
+            raise RuntimeError(problems[0])
+        project, scene = self.project, self.scene
+        choreography = project.choreography.copy()
+        settings = project.video_settings.copy()
+        background = project.animation_look.background
+        plan = plan_video(scene, choreography.timeline(scene).duration, settings, background)
+        job = VideoJob(
+            path=Path(path), scene=scene, choreography=choreography, settings=settings,
+            background=background, plan=plan,
+            # Read here: the library isn't threadsafe.
+            request=DetailRequest.for_scene(scene, TileFiles.read(self.library, scene.slot),
+                                            plan.scale),
+        )  # fmt: skip
+
+        def work(progress, cancelled):
+            return run_video_job(job, progress, cancelled)
+
+        def done(report, error):
+            self.video_finished.emit(str(path), report, error)
+
+        return self._start_job("video", work, self.video_progress, done)
 
     def export_signals(self) -> tuple:
         """Signals after which can_export may have changed."""

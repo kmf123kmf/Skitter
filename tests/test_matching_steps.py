@@ -137,10 +137,13 @@ def test_matching_step_runs_and_shows_mosaic(sliced, photos, qapp):
     step.viewer.canvas.cursor_moved.emit(float(center[0]), float(center[1]))
     assert "ΔE" in step._hover.text()
 
-    # Changing a setting makes the result out of date until matching runs again.
+    # Changing a setting makes the result out of date until matching runs again, but
+    # the mosaic stays valid: Animate stays open and Next still leads there.
     step.form.editor("max_uses").widget.setValue(1)
     assert not window.session.matching_is_current
     assert "Out of date" in step.status.text()
+    assert step.is_complete() and window.next_button.isEnabled()
+    assert window.tabs.isTabEnabled(window.tabs.count() - 1)
 
 
 def test_reslicing_clears_the_mosaic(sliced, photos):
@@ -319,6 +322,199 @@ def test_animate_tab_plays_the_scene(sliced, photos, qapp):
     session.set_layout(replace(layout, columns=layout.columns + 1))
     assert animate.scene is None and player.layer is None
     assert not window.tabs.isTabEnabled(index)
+
+
+def test_export_animation_from_the_animate_tab(sliced, photos, tmp_path, qapp):
+    import av
+
+    from skitter.ui.steps.animate import AnimateStep
+
+    window = sliced
+    session = window.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.start_matching()
+    session.wait_for_job()
+    animate = window.step(AnimateStep)
+    assert window.video_action.isEnabled() and animate.export_button.isEnabled()
+
+    # Background: a color, or transparent (shown as a checkerboard).
+    look = animate.look_form.editor("background")
+    look.set_value("transparent")
+    animate.project.animation_look.background = "transparent"
+    session.animation_edited()
+    assert animate.canvas.checkerboard
+
+    # The export frame outlines what the video shows.
+    animate.show_frame.setChecked(True)
+    assert len(animate._shade.instances) == 4 and len(animate._frame_line.instances) == 1
+    assert frame_aspect(animate) == pytest.approx(1920 / 1080)
+
+    animate.export_button.click()
+    dialog = window.video_dialog
+    assert dialog is not None and dialog.isVisible()
+    form = dialog.form
+    form.editor("resolution").widget.setCurrentIndex(
+        form.editor("resolution").widget.findData("custom")
+    )
+    form.editor("width").widget.setValue(160)
+    form.editor("height").widget.setValue(120)
+    assert frame_aspect(animate) == pytest.approx(160 / 120)  # the frame follows the settings
+    form.editor("frame_rate").widget.setCurrentIndex(
+        form.editor("frame_rate").widget.findData("custom")
+    )
+    form.editor("custom_fps").widget.setValue(10)
+    form.editor("motion_blur").widget.setCurrentIndex(0)
+    session.project.choreography.update(duration=1.0, travel=0.5)
+    session.animation_edited()
+
+    # MP4 can't keep transparency: Export stays off and says why.
+    target = tmp_path / "build.mp4"
+    dialog.path.setText(str(target))
+    dialog._refresh()
+    assert not dialog.export_button.isEnabled() and "transparent" in dialog.problems.text()
+
+    # WebM keeps it.
+    form.editor("format").widget.setCurrentIndex(form.editor("format").widget.findData("webm"))
+    assert dialog.path.text().endswith("build.webm")
+    dialog._refresh()
+    assert dialog.export_button.isEnabled(), dialog.problems.text()
+    dialog.export()
+    session.wait_for_job()
+    out = tmp_path / "build.webm"
+    assert out.exists() and not (tmp_path / "build.webm.part").exists()
+    assert "Saved build.webm" in dialog.status.text()
+    with av.open(str(out)) as container:
+        stream = container.streams.video[0]
+        frames = list(container.decode(stream))
+        assert (stream.width, stream.height) == (160, 120) and stream.average_rate == 10
+        assert len(frames) == 1 * 10 + 2 * 10 + 1  # animation + 2 s hold at the end
+
+    # Cancelling leaves nothing behind (a long export, so it can't finish first).
+    session.project.video_settings.update(resolution="1080p", hold_end=60.0, motion_blur=16)
+    dialog.path.setText(str(tmp_path / "cancelled.webm"))
+    dialog._refresh()
+    job = session.start_video_export(tmp_path / "cancelled.webm")
+    session.cancel_job()
+    session.wait_for_job()
+    assert not job.running and "cancelled" in dialog.status.text().lower()
+    assert not any(p.name.startswith("cancelled") for p in tmp_path.iterdir())
+
+
+def test_animate_tab_and_export_window_share_video_framing(sliced, photos):
+    from skitter.ui.steps.animate import FRAME_SETTINGS, AnimateStep
+
+    window = sliced
+    session = window.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.start_matching()
+    session.wait_for_job()
+    animate = window.step(AnimateStep)
+    tab = animate.video_form
+    assert [p.name for p, _, _ in tab._rows] == list(FRAME_SETTINGS)
+    animate.show_frame.setChecked(True)
+
+    # Edited on the tab: the export frame follows, and the window opens with it.
+    choose(tab.editor("resolution").widget, "vertical")
+    assert frame_aspect(animate) == pytest.approx(1080 / 1920)
+    shade_before = animate._shade.instances.copy()
+    tab.editor("margin").widget.setValue(20.0)
+    assert not np.array_equal(animate._shade.instances, shade_before)
+    dialog = window.open_video_export()
+    assert dialog.form.editor("resolution").widget.currentData() == "vertical"
+    assert dialog.form.editor("margin").widget.value() == 20.0
+    width, height = dialog.form.editor("width").widget, dialog.form.editor("height").widget
+    assert not width.isEnabled() and (width.value(), height.value()) == (1080, 1920)
+    assert dialog.size_label.text().startswith("1,080 × 1,920")
+
+    # Edited in the window: the tab shows it too.
+    choose(dialog.form.editor("resolution").widget, "custom")
+    dialog.form.editor("width").widget.setValue(800)
+    dialog.form.editor("height").widget.setValue(800)
+    choose(dialog.form.editor("framing").widget, "fill")
+    assert tab.editor("resolution").widget.currentData() == "custom"
+    assert tab.editor("width").widget.isEnabled() and tab.editor("width").widget.value() == 800
+    assert tab.editor("framing").widget.currentData() == "fill"
+    assert frame_aspect(animate) == pytest.approx(1.0)
+    # Settings only the window has stay out of the tab.
+    choose(dialog.form.editor("format").widget, "webm")
+    assert "format" not in [p.name for p, _, _ in tab._rows]
+
+
+def test_back_from_animate_and_next_again(sliced, photos, qapp):
+    from skitter.ui.steps.animate import AnimateStep
+
+    window = sliced
+    session = window.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.start_matching()
+    session.wait_for_job()
+    matching, animate = matching_step(window), window.step(AnimateStep)
+    window.tabs.setCurrentWidget(matching)
+    assert window.next_button.isEnabled()
+    window.next_button.click()
+    assert window.tabs.currentWidget() is animate
+    qapp.processEvents()
+
+    window.go_back()  # nothing changed
+    qapp.processEvents()
+    assert window.tabs.currentWidget() is matching
+    assert session.matching_is_current, "matching became out of date"
+    assert matching.is_complete() and window.next_button.isEnabled()
+    assert window.tabs.isTabEnabled(window.tabs.indexOf(animate))
+    window.next_button.click()
+    assert window.tabs.currentWidget() is animate
+
+
+def test_wheel_never_changes_an_unfocused_setting(sliced, photos, qapp):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
+    def wheel(widget):
+        center = QPointF(widget.width() / 2, widget.height() / 2)
+        qapp.sendEvent(widget, QWheelEvent(
+            center, widget.mapToGlobal(center), QPoint(), QPoint(0, -120),
+            Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+            Qt.ScrollPhase.NoScrollPhase, False,
+        ))  # fmt: skip
+        qapp.processEvents()
+
+    window = sliced
+    session = window.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.start_matching()
+    session.wait_for_job()
+    step = matching_step(window)
+    window.tabs.setCurrentWidget(step)
+    window.show()
+    qapp.processEvents()
+    settings = session.project.match_settings
+    # Scrolling over the panel's controls (as when scrolling the panel) changes nothing.
+    for name in ("max_uses", "tint", "candidates", "crops"):
+        before = getattr(settings, name)
+        wheel(step.form.editor(name).widget)
+        assert getattr(settings, name) == before, name
+    assert session.matching_is_current and window.tabs.isTabEnabled(4)
+    # Once the user clicks into a control, the wheel adjusts it as usual.
+    spin = step.form.editor("max_uses").widget
+    spin.setFocus()
+    qapp.processEvents()
+    if spin.hasFocus():  # focus needs an active window, which offscreen runs may lack
+        wheel(spin)
+        assert settings.max_uses == 2
+
+
+def frame_aspect(animate) -> float:
+    """Width / height of the export frame outlined on the Animate tab."""
+    w, h = animate._frame_line.instances["size"][0]
+    return float(w / h)
+
+
+def choose(combo, value) -> None:
+    combo.setCurrentIndex(combo.findData(value))
 
 
 def test_matching_can_be_cancelled(sliced, photos):

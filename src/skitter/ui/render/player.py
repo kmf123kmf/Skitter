@@ -52,8 +52,11 @@ class TimelinePlayer(QObject):
         return self._run is not None
 
     def set_content(self, pages: np.ndarray | None, base: np.ndarray | None) -> None:
-        """Textures and per-tile instance data (see TileTextures.instances); None clears."""
-        index = None
+        """Textures and per-tile instance data (see TileTextures.instances); None clears.
+
+        The tile layer draws first on the canvas, below any overlays added later.
+        """
+        index = 0
         if self.layer is not None:
             index = self.canvas.layers.index(self.layer)
             self.canvas.remove_layer(self.layer)

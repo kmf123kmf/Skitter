@@ -18,7 +18,6 @@ from functools import cached_property
 import numpy as np
 from numba import njit
 
-from skitter.core.color import oklab_to_srgb
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.slicing import SliceContext
 
@@ -72,12 +71,6 @@ class MosaicScene:
         return len(self.region)
 
     # Display
-
-    @cached_property
-    def tint_offset(self) -> np.ndarray:
-        """(N, 3) sRGB shift of each tile's average color: the GPU preview's tint."""
-        before = oklab_to_srgb(self.tile_color - self.tint_shift)
-        return (oklab_to_srgb(self.tile_color) - before).astype(np.float32)
 
     @cached_property
     def corners(self) -> np.ndarray:

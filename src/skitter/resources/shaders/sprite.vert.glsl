@@ -11,7 +11,7 @@ in float in_alpha;
 in float in_layer;    // texture array layer index
 in vec4 in_tint;      // rgb tint color, a = tint strength
 in vec4 in_uv;        // texture rect shown: (u0, v0, u1, v1); u1 < u0 mirrors
-in vec3 in_offset;    // rgb added after tinting
+in vec3 in_offset;    // OKLab shift of every texel (matching's tint)
 
 uniform vec2 u_center;     // camera center, world units
 uniform float u_zoom;      // screen pixels per world unit

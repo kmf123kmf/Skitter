@@ -167,7 +167,9 @@ class MatchingStep(StepPage):
             self.session.start_matching()
 
     def is_complete(self) -> bool:
-        return self.session.matching_is_current
+        """A valid mosaic exists: it may be out of date (settings changed since it was
+        made) but still fits the regions and tiles, so it can be animated and exported."""
+        return self.session.mosaic_is_valid
 
     def on_enter(self) -> None:
         self._sync_image()
@@ -213,7 +215,10 @@ class MatchingStep(StepPage):
             elif session.project.matches is None:
                 self.status.setText("Press Match Tiles to build the mosaic.")
             elif not session.matching_is_current:
-                self.status.setText("Out of date: the regions, library or settings changed.")
+                self.status.setText(
+                    "Out of date: settings or the library changed. Press Match Tiles to "
+                    "update; until then later steps use the mosaic shown."
+                )
             else:
                 self.status.setText("Up to date.")
         if session.scene is not self._shown and not matching:

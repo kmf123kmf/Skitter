@@ -8,24 +8,33 @@ their own factory use their base class's.
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox,
+    QColorDialog,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QLabel,
+    QMenu,
     QSpinBox,
+    QToolButton,
     QWidget,
 )
 
 from skitter.core.slicing import (
     BoolParam,
     ChoiceParam,
+    ColorParam,
     FloatParam,
     IntParam,
     Param,
 )
+
+COLOR_PRESETS = (
+    ("#000000", "Black"), ("#1e1e1e", "Dark gray"), ("#808080", "Gray"), ("#ffffff", "White"),
+)  # fmt: skip
 
 
 @dataclass
@@ -78,6 +87,66 @@ def _float_editor(param: FloatParam) -> Editor:
     return Editor(spin, spin.setValue, spin.valueChanged.connect)
 
 
+def color_swatch(value: str, size: int = 16) -> QIcon:
+    """A square of the color, or a checkerboard for transparent."""
+    pixmap = QPixmap(size, size)
+    if value == ColorParam.TRANSPARENT:
+        pixmap.fill(QColor("#ffffff"))
+        painter = QPainter(pixmap)
+        half = size // 2
+        painter.fillRect(0, 0, half, half, QColor("#bdbdbd"))
+        painter.fillRect(half, half, size - half, size - half, QColor("#bdbdbd"))
+        painter.end()
+    else:
+        pixmap.fill(QColor(value))
+    return QIcon(pixmap)
+
+
+def color_name(value: str) -> str:
+    if value == ColorParam.TRANSPARENT:
+        return "Transparent"
+    return dict(COLOR_PRESETS).get(value, value.upper())
+
+
+@register_editor(ColorParam)
+def _color_editor(param: ColorParam) -> Editor:
+    """One button showing the color; its menu offers presets, Transparent and Custom."""
+    button = QToolButton()
+    button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+    menu = QMenu(button)
+    button.setMenu(menu)
+    callbacks = []
+    state = {"value": param.default}
+
+    def set_value(value) -> None:
+        state["value"] = value
+        button.setIcon(color_swatch(value))
+        button.setText(color_name(value))
+
+    def choose(value) -> None:
+        if value != state["value"]:
+            set_value(value)
+            for callback in callbacks:
+                callback(value)
+
+    def custom() -> None:
+        start = QColor(state["value"]) if state["value"] != ColorParam.TRANSPARENT else QColor()
+        color = QColorDialog.getColor(start, button, param.label or "Color")
+        if color.isValid():
+            choose(color.name().lower())
+
+    for value, name in COLOR_PRESETS:
+        menu.addAction(color_swatch(value), name, lambda v=value: choose(v))
+    if param.allow_transparent:
+        menu.addAction(color_swatch(ColorParam.TRANSPARENT), "Transparent",
+                       lambda: choose(ColorParam.TRANSPARENT))  # fmt: skip
+    menu.addSeparator()
+    menu.addAction("Custom…", custom)
+    set_value(param.default)
+    return Editor(button, set_value, callbacks.append)
+
+
 @register_editor(BoolParam)
 def _bool_editor(param: BoolParam) -> Editor:
     check = QCheckBox()
@@ -108,7 +177,8 @@ class ParamForm(QWidget):
     """Edits the parameters of one object that declares Params (an operation).
 
     Edits are written straight to the object; `changed` then reports the
-    parameter name.
+    parameter name. Several forms may edit one object (each showing some of
+    its parameters); call `refresh()` on the others after it changes.
     """
 
     changed = Signal(str)
@@ -120,8 +190,11 @@ class ParamForm(QWidget):
         self._target = None
         self._rows: list[tuple[Param, Editor, QLabel]] = []
 
-    def set_target(self, target) -> None:
-        """Show editors for target's parameters (None clears the form)."""
+    def set_target(self, target, only=None) -> None:
+        """Show editors for target's parameters (None clears the form).
+
+        only: names of the parameters to show (default: all), in declaration order.
+        """
         while self._layout.rowCount():
             self._layout.removeRow(0)
         self._rows.clear()
@@ -129,6 +202,8 @@ class ParamForm(QWidget):
         if target is None:
             return
         for param in target.params():
+            if only is not None and param.name not in only:
+                continue
             editor = create_editor(param)
             editor.set_value(getattr(target, param.name))
             editor.widget.setToolTip(param.help)
@@ -137,6 +212,16 @@ class ParamForm(QWidget):
             label.setToolTip(param.help)
             self._layout.addRow(label, editor.widget)
             self._rows.append((param, editor, label))
+        self._update_active()
+
+    def refresh(self) -> None:
+        """Show the target's current values (it was edited elsewhere), without reporting edits."""
+        for param, editor, _ in self._rows:
+            editor.widget.blockSignals(True)
+            try:
+                editor.set_value(getattr(self._target, param.name))
+            finally:
+                editor.widget.blockSignals(False)
         self._update_active()
 
     def editor(self, name: str) -> Editor:

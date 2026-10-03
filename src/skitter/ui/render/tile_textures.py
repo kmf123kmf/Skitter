@@ -13,6 +13,7 @@ from dataclasses import dataclass
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
+from skitter.core.assembly import TileFiles
 from skitter.core.scene import MosaicScene
 from skitter.core.tiles.library import TileLibrary
 from skitter.core.tiles.render import render_crops_or_thumbs
@@ -46,13 +47,15 @@ def detail_sizes(sizes, budget: int = DETAIL_TEXELS, page: int = DETAIL_PAGE):
     return np.clip(np.ceil(scaled - 1e-6), 1, page).astype(np.int64), scale
 
 
-def build_detail(paths, rects, sizes, thumbs, thumb_size, progress, cancelled) -> TileDetail:
+def build_detail(
+    paths, rects, sizes, thumbs, thumb_size, progress, cancelled, budget: int = DETAIL_TEXELS
+) -> TileDetail:
     """Read and pack full-detail crops (runs in a background job).
 
     paths, rects, sizes describe each distinct crop; thumbs / thumb_size are
     each crop's library thumbnail, shown instead when its file can't be read.
     """
-    pixels, scale = detail_sizes(sizes)
+    pixels, scale = detail_sizes(sizes, budget)
 
     def report(done, total):
         progress(f"Loading full-size tiles: {done:,} of {total:,} files", done / max(total, 1))
@@ -65,6 +68,57 @@ def build_detail(paths, rects, sizes, thumbs, thumb_size, progress, cancelled) -
     images, failed = rendered
     progress("Packing tiles…", None)
     return TileDetail(pack_images(images, DETAIL_PAGE), scale, len(failed))
+
+
+@dataclass(frozen=True)
+class DetailRequest:
+    """The distinct crops a scene shows, with what reading them needs.
+
+    Made on the library's thread (it isn't threadsafe); `build` may then run
+    in a background job.
+    """
+
+    image: np.ndarray  # (N,) which crop each tile shows
+    paths: list[str]
+    rects: np.ndarray  # (C, 4)
+    sizes: np.ndarray  # (C, 2) wanted size, texels
+    thumbs: np.ndarray
+    thumb_size: np.ndarray
+
+    @classmethod
+    def for_scene(cls, scene: MosaicScene, files: TileFiles, scale: float = 1.0):
+        """Crops at `scale` texels per mosaic unit; tiles showing the same crop at the
+        same size share one image."""
+        size = np.ceil(scene.size * scale - 1e-6)
+        keys, image = np.unique(
+            np.column_stack([scene.slot, scene.rect.astype(np.float64), size]),
+            axis=0,
+            return_inverse=True,
+        )
+        index = files.index(keys[:, 0].astype(np.int64))
+        return cls(
+            image=image.reshape(-1),
+            paths=[files.paths[i] for i in index],
+            rects=keys[:, 1:5],
+            sizes=keys[:, 5:7],
+            thumbs=files.thumbs[index],
+            thumb_size=files.thumb_size[index],
+        )
+
+    def build(self, progress, cancelled, budget: int = DETAIL_TEXELS) -> TileDetail:
+        return build_detail(self.paths, self.rects, self.sizes, self.thumbs, self.thumb_size,
+                            progress, cancelled, budget)  # fmt: skip
+
+
+def scene_instances(scene: MosaicScene, layer: np.ndarray, uv: np.ndarray) -> np.ndarray:
+    """Sprite instances showing the finished mosaic, in stacking order."""
+    tiles = make_instances(len(scene))
+    tiles["pos"] = scene.center
+    tiles["size"] = scene.size
+    tiles["rotation"] = scene.rotation
+    tiles["layer"], tiles["uv"] = layer, uv
+    tiles["offset"] = scene.tint_shift
+    return tiles
 
 
 class TileTextures(QObject):
@@ -94,14 +148,7 @@ class TileTextures(QObject):
 
     def instances(self) -> np.ndarray:
         """Sprite instances showing the finished mosaic, in stacking order."""
-        scene = self.scene
-        tiles = make_instances(len(scene))
-        tiles["pos"] = scene.center
-        tiles["size"] = scene.size
-        tiles["rotation"] = scene.rotation
-        tiles["layer"], tiles["uv"] = self.layer, self.uv
-        tiles["offset"] = scene.tint_offset
-        return tiles
+        return scene_instances(self.scene, self.layer, self.uv)
 
     def cancel(self) -> None:
         if self._job is not None:
@@ -117,27 +164,10 @@ class TileTextures(QObject):
         self.status_changed.emit(text)
 
     def _load_detail(self, library: TileLibrary) -> None:
-        scene = self.scene
-        size = np.ceil(scene.size - 1e-6)
-        # Tiles showing the same crop at the same size share one image.
-        keys, image = np.unique(
-            np.column_stack([scene.slot, scene.rect.astype(np.float64), size]),
-            axis=0,
-            return_inverse=True,
-        )
-        image = image.reshape(-1)
-        crop_slot = keys[:, 0].astype(np.int64)
-        paths = library.paths(crop_slot)
-        thumbs = np.asarray(library.thumbs[crop_slot])  # read here: the library isn't threadsafe
-        thumb_size = library.thumb_size[crop_slot]
-
-        def work(progress, cancelled):
-            return build_detail(paths, keys[:, 1:5], keys[:, 5:7], thumbs, thumb_size,
-                                progress, cancelled)  # fmt: skip
-
-        job = Job(work, parent=self)
+        request = DetailRequest.for_scene(self.scene, TileFiles.read(library, self.scene.slot))
+        job = Job(request.build, parent=self)
         job.progress.connect(lambda message, _: self._set_status(message))
-        job.finished.connect(lambda detail: self._show_detail(detail, image))
+        job.finished.connect(lambda detail: self._show_detail(detail, request.image))
         job.failed.connect(lambda message: self._set_status(f"Thumbnails ({message})"))
         job.cancelled.connect(lambda: self._set_status("Thumbnails"))
         job.stopped.connect(self._job_stopped)

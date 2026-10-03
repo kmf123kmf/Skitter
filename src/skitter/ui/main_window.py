@@ -17,7 +17,10 @@ from skitter.ui.demo import DemoWindow
 from skitter.ui.export_dialog import ExportDialog
 from skitter.ui.session import Session
 from skitter.ui.steps import STEPS, StepPage
+from skitter.ui.steps.animate import AnimateStep
 from skitter.ui.steps.source import SourceStep
+from skitter.ui.video_dialog import VideoExportDialog
+from skitter.ui.widgets.wheel_guard import install_wheel_guard
 
 DEMO_COUNTS = (1_000, 10_000, 50_000)
 
@@ -25,6 +28,7 @@ DEMO_COUNTS = (1_000, 10_000, 50_000)
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        install_wheel_guard()  # the wheel never changes a setting by accident
         self.setWindowTitle("Skitter")
         self.resize(1280, 800)
 
@@ -52,6 +56,7 @@ class MainWindow(QMainWindow):
 
         self._demo_windows: list[DemoWindow] = []
         self.export_dialog: ExportDialog | None = None
+        self.video_dialog: VideoExportDialog | None = None
         self._build_menus()
         self._update_navigation()
         self.statusBar().showMessage("Choose a source image to begin")
@@ -79,6 +84,11 @@ class MainWindow(QMainWindow):
         self.export_action.setShortcut(QKeySequence("Ctrl+E"))
         self.export_action.triggered.connect(self.open_export)
         mosaic_menu.addAction(self.export_action)
+        self.video_action = QAction("Export &Animation...", self)
+        self.video_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
+        self.video_action.triggered.connect(self.open_video_export)
+        mosaic_menu.addAction(self.video_action)
+        self.step(AnimateStep).export_requested.connect(self.open_video_export)
         session = self.session
         for signal in session.export_signals():
             signal.connect(self._update_actions)
@@ -104,8 +114,20 @@ class MainWindow(QMainWindow):
         self.export_dialog.activateWindow()
         return self.export_dialog
 
+    def open_video_export(self) -> VideoExportDialog:
+        if self.video_dialog is None:
+            self.video_dialog = VideoExportDialog(self.session, self)
+        self.video_dialog.show()
+        self.video_dialog.raise_()
+        self.video_dialog.activateWindow()
+        return self.video_dialog
+
     def _update_actions(self) -> None:
         self.export_action.setEnabled(self.session.can_export)
+        scene = self.session.scene
+        self.video_action.setEnabled(
+            self.session.can_export and scene is not None and len(scene) > 0
+        )
 
     def _on_exported(self, path: str, report, error) -> None:
         if report is not None:
