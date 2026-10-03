@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from skitter.core.animation.look import TableCamera
 from skitter.core.animation.video import output_size, view_rect
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import ColorParam
@@ -207,6 +208,7 @@ class AnimateStep(StepPage):
         self.status.setText(self.textures.status)
         timeline = self.choreography.timeline(scene)
         self.player.set_timeline(timeline, time=timeline.duration)  # open on the finished mosaic
+        self.player.set_camera(TableCamera.for_scene(scene, self.project.animation_look))
         self.player.set_content(self.textures.pages, self.textures.instances())
         self._show_export_frame()
         self._fit()
@@ -245,7 +247,10 @@ class AnimateStep(StepPage):
     # Look and export frame
 
     def _apply_look(self) -> None:
-        background = self.project.animation_look.background
+        look = self.project.animation_look
+        if self.scene is not None:
+            self.player.set_camera(TableCamera.for_scene(self.scene, look))
+        background = look.background
         rgb = ColorParam.rgb(background)
         self.canvas.checkerboard = rgb is None
         if rgb is not None:

@@ -61,7 +61,7 @@ def test_fit_ignores_min_zoom():
 
 
 def test_instance_layout_is_packed():
-    assert INSTANCE_DTYPE.itemsize == 18 * 4
+    assert INSTANCE_DTYPE.itemsize == 19 * 4
     instances = make_instances(3)
     assert (instances["alpha"] == 1).all()
     assert (instances["uv"] == (0, 0, 1, 1)).all() and (instances["offset"] == 0).all()

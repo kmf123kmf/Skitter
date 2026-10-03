@@ -8,8 +8,10 @@ from skitter.core.animation import assemble  # registers the built-in choreograp
 from skitter.core.animation.base import (
     Choreography,
     FlightTimeline,
+    Flips,
     TileFrame,
     Timeline,
+    TossTimeline,
     choreography_types,
     get_choreography,
     landing_order,
@@ -19,7 +21,9 @@ from skitter.core.animation.base import (
 __all__ = [
     "Choreography",
     "FlightTimeline",
+    "Flips",
     "Timeline",
+    "TossTimeline",
     "TileFrame",
     "assemble",
     "choreography_types",

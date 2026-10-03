@@ -144,16 +144,6 @@ SUPERSAMPLING = ((1, "Off"), (2, "2 × 2"), (3, "3 × 3"), (4, "4 × 4"))
 MOTION_BLUR = ((0, "Off"), (4, "4 samples"), (8, "8 samples"), (16, "16 samples"))
 
 
-class AnimationLook(Configurable):
-    """How animations look in the Animate tab and in exported videos."""
-
-    background = ColorParam(
-        "#1e1e1e", "Background", allow_transparent=True,
-        help="Behind the tiles. Transparent needs a video format that keeps it "
-             "(WebM, WebP, ProRes, PNG sequence).",
-    )  # fmt: skip
-
-
 class VideoSettings(Configurable):
     format = ChoiceParam(
         "mp4", "Format", choices=[(f.id, f.name) for f in FORMATS.values()],

@@ -282,3 +282,43 @@ def test_motion_blur_only_blurs_motion(tmp_path, gpu):
     finally:
         sharp.release()
         blur.release()
+
+
+def test_tossed_tiles_draw_in_three_groups_with_shadows():
+    from test_animation import pile_scene
+
+    from skitter.core.animation.look import AnimationLook, TableCamera
+    from skitter.ui.render.player import frame_layers
+    from skitter.ui.render.sprites import make_instances
+
+    scene = pile_scene()
+    timeline = AssembleChoreography(duration=4.0, travel=1.0).timeline(scene)  # Toss
+    camera = TableCamera.for_scene(scene, AnimationLook(shadow_strength=0.6))
+    base = make_instances(len(scene))
+    ground, shadows, air = frame_layers(base, timeline.frame(2.0), camera)
+    assert len(ground) + len(air) == len(scene)
+    assert len(air) and len(shadows)  # some tiles in the air cast shadows
+    assert shadows["blur"].min() > 0 and shadows["alpha"].max() <= 0.6
+    final = frame_layers(base, timeline.frame(timeline.duration), camera)
+    assert len(final[0]) == len(scene) and len(final[1]) == len(final[2]) == 0
+
+
+def test_gpu_draws_soft_shadows_under_tossed_tiles(tmp_path, gpu):
+    from skitter.core.animation.look import AnimationLook, TableCamera
+    from skitter.ui.render.video_renderer import VideoRenderer
+
+    scene, _, plan, _, pages, base = render_setup(tmp_path, "#ffffff", motion_blur=0)
+    timeline = AssembleChoreography(duration=1.0, travel=0.8, arc=0.6, distance=0.3).timeline(scene)
+    assert timeline.duration == pytest.approx(plan.duration)  # fits the requested duration
+    frames = {}
+    for strength in (0.0, 0.8):
+        camera = TableCamera.for_scene(scene, AnimationLook(shadow_strength=strength))
+        renderer = VideoRenderer(plan, pages, base, (1.0, 1.0, 1.0), 1, camera)
+        try:
+            frames[strength] = renderer.render(timeline, plan.frames // 3)
+            frames["final", strength] = renderer.render(timeline, plan.frames - 1)
+        finally:
+            renderer.release()
+    darker = frames[0.0][..., :3].astype(int) - frames[0.8][..., :3].astype(int)
+    assert darker.max() > 40 and darker.min() >= -2  # shadows only darken
+    assert np.array_equal(frames["final", 0.0], frames["final", 0.8])  # at rest: no shadows

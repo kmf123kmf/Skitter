@@ -459,7 +459,7 @@ class Session(QObject):
         plan = plan_video(scene, choreography.timeline(scene).duration, settings, background)
         job = VideoJob(
             path=Path(path), scene=scene, choreography=choreography, settings=settings,
-            background=background, plan=plan,
+            background=background, look=project.animation_look.copy(), plan=plan,
             # Read here: the library isn't threadsafe.
             request=DetailRequest.for_scene(scene, TileFiles.read(self.library, scene.slot),
                                             plan.scale),

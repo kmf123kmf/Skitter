@@ -21,6 +21,7 @@ in float v_alpha;
 flat in float v_layer;
 in vec4 v_tint;
 in vec3 v_offset;
+in float v_blur;
 
 out vec4 f_color;
 
@@ -69,7 +70,12 @@ void main() {
     float inside_px = -max(q.x, q.y) * u_zoom;
 
     vec4 color;
-    if (u_outline_px > 0.0) {
+    if (v_blur > 0.0) {
+        // Soft shadow: coverage of the rectangle blurred by v_blur (world units).
+        float outside = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0);
+        float cover = 1.0 - smoothstep(-v_blur, v_blur, outside);
+        color = vec4(v_tint.rgb, cover);
+    } else if (u_outline_px > 0.0) {
         vec2 uv = v_world / u_texture_size;
         bool beyond = any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)));
         vec4 fill = vec4(v_tint.rgb, u_fill_alpha);

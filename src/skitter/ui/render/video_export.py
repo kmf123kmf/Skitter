@@ -13,6 +13,7 @@ from pathlib import Path
 
 from skitter.core.animation import Choreography
 from skitter.core.animation.encode import VideoWriter
+from skitter.core.animation.look import AnimationLook, TableCamera
 from skitter.core.animation.video import VideoPlan, VideoSettings
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import ColorParam
@@ -30,6 +31,7 @@ class VideoJob:
     choreography: Choreography  # a copy
     settings: VideoSettings  # a copy
     background: str  # "#rrggbb" or "transparent"
+    look: AnimationLook  # a copy: camera height, light and shadows
     plan: VideoPlan
     request: DetailRequest  # tile crops at the plan's scale
 
@@ -65,7 +67,7 @@ def run_video_job(job: VideoJob, progress, cancelled) -> VideoReport:
     renderer = VideoRenderer(
         plan, detail.atlas.pages, scene_instances(job.scene, layer, uv),
         ColorParam.rgb(job.background) if job.background != ColorParam.TRANSPARENT else None,
-        settings.supersampling,
+        settings.supersampling, TableCamera.for_scene(job.scene, job.look),
     )  # fmt: skip
     passes = 2 if fmt.id == "gif" else 1
     clock = {"start": time.perf_counter(), "done": 0}

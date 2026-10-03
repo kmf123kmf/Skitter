@@ -6,7 +6,8 @@ from pathlib import Path
 import numpy as np
 
 from skitter.core.animation import Choreography, choreography_types
-from skitter.core.animation.video import AnimationLook, VideoSettings
+from skitter.core.animation.look import AnimationLook
+from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
 from skitter.core.edits import Edit
 from skitter.core.matching.matcher import MatchResult

@@ -21,10 +21,11 @@ import moderngl
 import numpy as np
 
 from skitter.core.animation import Timeline
+from skitter.core.animation.look import TableCamera
 from skitter.core.animation.video import VideoPlan
 from skitter.ui.render.camera import Camera2D
-from skitter.ui.render.player import frame_instances
-from skitter.ui.render.sprites import SpriteLayer, SpriteRenderer
+from skitter.ui.render.player import frame_layers
+from skitter.ui.render.sprites import SpriteLayer, SpriteRenderer, make_instances
 
 RENDER_TILE = 2048  # largest render pass, supersampled pixels per side
 MSAA = 8
@@ -98,6 +99,7 @@ class VideoRenderer:
         base: np.ndarray,
         background: tuple[float, float, float] | None,
         supersampling: int,
+        camera: TableCamera | None = None,
     ):
         try:
             self.ctx = moderngl.create_standalone_context(require=330)
@@ -115,7 +117,11 @@ class VideoRenderer:
         try:
             self.sprites = SpriteRenderer(ctx)
             self.sprites.linear_output = True
-            self.layer = SpriteLayer(pages, base.copy())
+            # Tiles at rest, the shadows of tiles in the air, then the tiles in the air.
+            self.layer = SpriteLayer(pages, base[:0].copy())
+            self.shadow_layer = SpriteLayer(None, make_instances(0))
+            self.air_layer = SpriteLayer(None, base[:0].copy(), texture_from=self.layer)
+            self.table_camera = camera  # looks down at the table: perspective, shadows
             samples = min(MSAA, ctx.info["GL_MAX_SAMPLES"])
             self.msaa = ctx.framebuffer(
                 ctx.renderbuffer((side, side), 4, samples=samples, dtype="f2")
@@ -149,8 +155,10 @@ class VideoRenderer:
         self.accum.clear(0.0, 0.0, 0.0, 0.0)
         weight = 1.0 / len(moments)
         for t in moments:
-            self.layer.instances = frame_instances(self.base, timeline.frame(float(t)))
-            self.layer.mark_dirty()
+            layers = frame_layers(self.base, timeline.frame(float(t)), self.table_camera)
+            for layer, instances in zip(self._layers(), layers, strict=True):
+                layer.instances = instances
+                layer.mark_dirty()
             for section in self.passes:
                 self._render_pass(section, weight)
         # Lay over the background (or keep alpha) and convert to sRGB.
@@ -184,7 +192,8 @@ class VideoRenderer:
         ctx.blend_func = (moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA,
                           moderngl.ONE, moderngl.ONE_MINUS_SRC_ALPHA)  # fmt: skip
         self.sprites.set_camera(cam)
-        self.sprites.render(self.layer)
+        for layer in self._layers():
+            self.sprites.render(layer)
         ctx.copy_framebuffer(self.resolved, self.msaa)
 
         # Average the supersampled pixels into this section of the frame.
@@ -198,6 +207,9 @@ class VideoRenderer:
         self.downsample["u_origin"] = (x, top)
         self.downsample["u_weight"] = weight
         self.downsample_vao.render(moderngl.TRIANGLES, vertices=3)
+
+    def _layers(self) -> tuple[SpriteLayer, SpriteLayer, SpriteLayer]:
+        return self.layer, self.shadow_layer, self.air_layer
 
     def release(self) -> None:
         try:

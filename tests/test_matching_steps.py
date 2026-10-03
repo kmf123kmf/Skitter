@@ -338,6 +338,18 @@ def test_export_animation_from_the_animate_tab(sliced, photos, tmp_path, qapp):
     animate = window.step(AnimateStep)
     assert window.video_action.isEnabled() and animate.export_button.isEnabled()
 
+    # The look: camera and light settings reach the player (it draws shadows mid-toss).
+    look_names = [p.name for p, _, _ in animate.look_form._rows]
+    assert {"camera_height", "light_direction", "shadow_strength"} <= set(look_names)
+    animate.look_form.editor("camera_height").widget.setValue(3.0)
+    assert animate.player.camera.height == pytest.approx(3.0 * max(
+        session.scene.bounds[2] - session.scene.bounds[0],
+        session.scene.bounds[3] - session.scene.bounds[1]))  # fmt: skip
+    animate.player.seek(animate.player.duration * 0.4)
+    assert len(animate.player.shadow_layer.instances) > 0
+    animate.player.seek(animate.player.duration)
+    assert len(animate.player.shadow_layer.instances) == 0
+
     # Background: a color, or transparent (shown as a checkerboard).
     look = animate.look_form.editor("background")
     look.set_value("transparent")
