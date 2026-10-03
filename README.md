@@ -196,7 +196,7 @@ Groundwork for animating the tiles into the finished mosaic (`core/animation/`):
 
 ```
 src/skitter/
-  app.py            entry point (--demo N runs the flying-tiles demo)
+  app.py            entry point
   core/             numpy-only image processing and mosaic logic
     imaging.py      load/save/resize/crop helpers
     easing.py       vectorized easing curves
@@ -250,7 +250,6 @@ src/skitter/
       param_form.py    settings form generated from Params
     canvas.py       GPU canvas widget: layers, animations, navigation
     icons.py        vector toolbar icons drawn with QPainter
-    demo.py         flying-tiles stress demo window
     render/
       camera.py     2D pan/zoom math
       sprites.py    SpriteLayer data and instanced renderer
@@ -278,7 +277,6 @@ pip install -e ".[dev]"
 
 ```powershell
 python -m skitter      # or just: skitter
-python -m skitter --demo 50000
 pytest
 ruff check .
 python scripts/bench_matching.py --candidates 1000000 --regions 50000

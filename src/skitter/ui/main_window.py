@@ -13,7 +13,6 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from skitter.ui.demo import DemoWindow
 from skitter.ui.export_dialog import ExportDialog
 from skitter.ui.session import Session
 from skitter.ui.steps import STEPS, StepPage
@@ -21,8 +20,6 @@ from skitter.ui.steps.animate import AnimateStep
 from skitter.ui.steps.source import SourceStep
 from skitter.ui.video_dialog import VideoExportDialog
 from skitter.ui.widgets.wheel_guard import install_wheel_guard
-
-DEMO_COUNTS = (1_000, 10_000, 50_000)
 
 
 class MainWindow(QMainWindow):
@@ -54,7 +51,6 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(self._on_tab_changed)
         self.session.source_changed.connect(self._update_title)
 
-        self._demo_windows: list[DemoWindow] = []
         self.export_dialog: ExportDialog | None = None
         self.video_dialog: VideoExportDialog | None = None
         self._build_menus()
@@ -94,11 +90,6 @@ class MainWindow(QMainWindow):
             signal.connect(self._update_actions)
         session.export_finished.connect(self._on_exported)
 
-        demo_menu = self.menuBar().addMenu("&Demo")
-        for count in DEMO_COUNTS:
-            action = QAction(f"Flying Tiles ({count:,})", self)
-            action.triggered.connect(lambda _=False, n=count: self.open_demo(n))
-            demo_menu.addAction(action)
         self._update_actions()
 
     def open_source_image(self) -> None:
@@ -132,15 +123,6 @@ class MainWindow(QMainWindow):
     def _on_exported(self, path: str, report, error) -> None:
         if report is not None:
             self.statusBar().showMessage(f"Exported {path}", 10_000)
-
-    def open_demo(self, count: int) -> DemoWindow:
-        window = DemoWindow(count)
-        window.destroyed.connect(lambda: self._demo_windows.remove(window))
-        self._demo_windows.append(window)
-        window.show()
-        return window
-
-    # Step navigation
 
     def _build_footer(self) -> QWidget:
         style = self.style()
