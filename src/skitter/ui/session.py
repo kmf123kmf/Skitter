@@ -58,7 +58,7 @@ class Session(QObject):
     # A look at the run in progress (core.matching.matcher.MatchPreview), from the worker
     # thread (queued); a few may still arrive just after the run ends.
     matching_preview = Signal(object)
-    # Progress within a long matching step (indexing tiles): (message, fraction 0..1).
+    # Progress within a long matching step (indexing, searching, widening): (message, 0..1).
     matching_detail = Signal(str, float)
     # Manual picks changed tiles of these regions (np.ndarray); project.matches, scene and
     # textures were updated in place of a full replacement (matching_changed isn't emitted).

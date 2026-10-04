@@ -12,10 +12,9 @@ from skitter.core.animation.base import (
     Timeline,
     TossTimeline,
     cover_after_impact,
-    landing_order,
-    random_landing_order,
     register_choreography,
 )
+from skitter.core.animation.landing import landing_order, random_landing_order
 from skitter.core.animation.look import NEAR, AnimationLook, clear_of_axis, scene_extent
 from skitter.core.easing import ease_out_back, ease_out_cubic
 from skitter.core.scene import MosaicScene
@@ -24,7 +23,7 @@ from skitter.core.slicing.params import BoolParam, ChoiceParam, FloatParam, IntP
 TOSS_LIMIT = 0.8  # throws peak at most this share of the camera height (5x size)
 
 # Orders without a direction: they land in a uniformly random bottom-first order
-# (random_landing_order), never through landing_order (see base.py). A new
+# (random_landing_order), never through landing_order (see landing.py). A new
 # ordering must be listed here if it is random; tests hold both kinds to account.
 RANDOM_ORDERS = frozenset({"random"})
 

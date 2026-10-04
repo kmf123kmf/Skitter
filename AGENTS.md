@@ -1,7 +1,7 @@
 # Agent notes
 
 ## Environment
-- Python 3.11–3.13 only (moderngl, numba, faiss-cpu lack 3.14 wheels). The venv is `.venv` (Python 3.13).
+- Python 3.11–3.13 only (moderngl, numba, faiss-cpu lack 3.14 wheels). The venv is `.venv` (Python 3.11).
 - PowerShell: run tools from the venv directly, e.g. `.venv\Scripts\python.exe -m pytest -q`.
 
 ## Verify

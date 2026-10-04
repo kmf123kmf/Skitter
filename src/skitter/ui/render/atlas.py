@@ -6,7 +6,9 @@ the tiles of a large mosaic, so tile thumbnails are packed into square pages
 Cells shrink when many tiles are used, to keep GPU memory bounded (each page
 is about 16 MB on the GPU).
 
-`pack_images` packs images of any sizes instead (full-detail tile crops).
+`GrowingAtlas` packs thumbnails as they are first needed, into fixed pages
+(a matching run's previews). `pack_images` packs images of any sizes instead
+(full-detail tile crops).
 """
 
 from dataclasses import dataclass
@@ -101,6 +103,20 @@ def pack_images(images, max_page: int = 4096) -> PackedAtlas:
     return PackedAtlas(pages, page, origin, size)
 
 
+def shrink(thumbs: np.ndarray, cell: int) -> np.ndarray:
+    """(N, S, S, 3) thumbnails averaged down to (N, cell, cell, 3) (cell divides S)."""
+    factor = thumbs.shape[1] // cell
+    if factor == 1:
+        return thumbs
+    n = len(thumbs)
+    return thumbs.reshape(n, cell, factor, cell, factor, 3).mean(axis=(2, 4)).astype(np.uint8)
+
+
+def cell_texels(thumb_size, full: int, cell: int) -> np.ndarray:
+    """(N, 2) texels each thumbnail fills in its cell (its (w, h) at full size shrunk)."""
+    return np.maximum(1, -(-np.asarray(thumb_size) // (full // cell)))
+
+
 def cell_size(count: int) -> int:
     return next((cell for limit, cell in CELL_LIMITS if count <= limit), 8)
 
@@ -111,7 +127,6 @@ def build_atlas(thumbs, thumb_size, slots, chunk: int = 8192) -> Atlas:
     n = len(slots)
     full = thumbs.shape[1]
     cell = min(cell_size(n), full)
-    factor = full // cell
     per_row = PAGE // cell
     per_page = per_row * per_row
     pages = np.zeros((max(1, -(-n // per_page)), PAGE, PAGE, 3), np.uint8)
@@ -119,14 +134,87 @@ def build_atlas(thumbs, thumb_size, slots, chunk: int = 8192) -> Atlas:
     page = index // per_page
     within = index % per_page
     origin = np.stack([within % per_row, within // per_row], axis=1) * cell
-    size = np.maximum(1, -(-np.asarray(thumb_size)[slots] // factor))
+    size = cell_texels(np.asarray(thumb_size)[slots], full, cell)
     for lo in range(0, n, chunk):
         hi = min(lo + chunk, n)
-        block = np.asarray(thumbs[slots[lo:hi]])
-        if factor > 1:
-            block = block.reshape(hi - lo, cell, factor, cell, factor, 3).mean(axis=(2, 4))
-            block = block.astype(np.uint8)
+        block = shrink(np.asarray(thumbs[slots[lo:hi]]), cell)
         for j in range(hi - lo):
             x, y = origin[lo + j]
             pages[page[lo + j], y : y + cell, x : x + cell] = block[j]
     return Atlas(pages, cell, slots, page, origin, size)
+
+
+class GrowingAtlas:
+    """Library thumbnails packed into fixed RGBA pages as they are first needed (cells
+    are never reused or moved), for views whose tiles change a few at a time.
+
+    `add` reports the texels it wrote, so a GPU texture needs only those uploaded.
+    When the pages are full, the caller starts a new atlas.
+    """
+
+    def __init__(self, library, capacity: int):
+        self.library = library
+        thumbs = library.thumbs
+        self.cell = min(cell_size(capacity), thumbs.shape[1])
+        self.per_row = PAGE // self.cell
+        self.per_page = self.per_row * self.per_row
+        pages = max(1, -(-capacity // self.per_page))
+        self.capacity = pages * self.per_page
+        self.pages = np.zeros((pages, PAGE, PAGE, 4), np.uint8)
+        self.pages[..., 3] = 255
+        self.cell_of = np.full(len(library.thumb_size), -1, np.int64)  # slot -> cell
+        self.count = 0
+
+    def add(self, slots) -> list[tuple] | None:
+        """Pack the slots not packed yet. Returns the texels written, as (page, x, y, w,
+        h) rects, or None if they don't fit (nothing is written then)."""
+        new = np.unique(np.asarray(slots, dtype=np.int64))
+        new = new[self.cell_of[new] < 0]
+        start = self.count
+        if start + len(new) > self.capacity:
+            return None
+        self.cell_of[new] = np.arange(start, start + len(new))
+        self.count += len(new)
+        for lo in range(0, len(new), 8192):
+            block = shrink(np.asarray(self.library.thumbs[new[lo : lo + 8192]]), self.cell)
+            for i, image in enumerate(block):
+                page, x, y = self._place(start + lo + i)
+                self.pages[page, y : y + self.cell, x : x + self.cell, :3] = image
+        return self._rects(start, self.count)
+
+    def locate(self, slots, rects, mirrored=None) -> tuple[np.ndarray, np.ndarray]:
+        """Texture layer and (u0, v0, u1, v1) of each crop rect of each (packed) slot."""
+        slots = np.asarray(slots, dtype=np.int64)
+        page, within = np.divmod(self.cell_of[slots], self.per_page)
+        corner = np.stack([within % self.per_row, within // self.per_row], axis=1) * self.cell
+        size = cell_texels(self.library.thumb_size[slots], self.library.thumbs.shape[1],
+                           self.cell).astype(np.float64)  # fmt: skip
+        rects = np.asarray(rects, dtype=np.float64)
+        origin = corner + rects[:, :2] * size
+        return page.astype(np.float32), _uv(origin, (rects[:, 2:] - rects[:, :2]) * size,
+                                            PAGE, mirrored)  # fmt: skip
+
+    def _place(self, cell: int) -> tuple[int, int, int]:
+        page, within = divmod(cell, self.per_page)
+        return page, (within % self.per_row) * self.cell, (within // self.per_row) * self.cell
+
+    def _rects(self, start: int, end: int) -> list[tuple]:
+        """Cells [start, end) as a few rects: per page, a partial first row, whole rows,
+        and a partial last row."""
+        rects, c, row = [], self.cell, self.per_row
+        while start < end:
+            page, within = divmod(start, self.per_page)
+            stop = min(end, (page + 1) * self.per_page) - page * self.per_page  # in this page
+            first_row, col = divmod(within, row)
+            if col:  # the rest of a started row
+                n = min(row - col, stop - within)
+                rects.append((page, col * c, first_row * c, n * c, c))
+                within += n
+            whole = (stop - within) // row
+            if whole:
+                rects.append((page, 0, (within // row) * c, row * c, whole * c))
+                within += whole * row
+            if within < stop:  # the start of a last row
+                rects.append((page, 0, (within // row) * c, (stop - within) * c, c))
+            start = page * self.per_page + stop
+        return rects

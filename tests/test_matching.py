@@ -174,7 +174,8 @@ def test_matcher_reports_indexing_and_cancels_within_it(library):
 @pytest.mark.parametrize("exact", [True, False])
 def test_batched_search_matches_one_big_batch(monkeypatch, exact):
     import skitter.core.matching.index as index_module
-    import skitter.core.matching.matcher as matcher_module
+    import skitter.core.matching.run as run_module
+    from skitter.core.matching.run import batched_search
 
     if not exact:
         monkeypatch.setattr(index_module, "EXACT_LIMIT", 1000)
@@ -191,12 +192,12 @@ def test_batched_search_matches_one_big_batch(monkeypatch, exact):
     big_w[regs] = weights
     settings = MatchSettings()
 
-    one = Matcher._search(cands, index, regs, big_desc, big_w, settings, 20, 8)  # one batch
-    monkeypatch.setattr(matcher_module, "FIRST_BATCH", 37)  # many small ones
-    monkeypatch.setattr(matcher_module, "MIN_BATCH", 37)
-    monkeypatch.setattr(matcher_module, "MAX_BATCH", 37)
+    one = batched_search(cands, index, regs, big_desc, big_w, settings, 20, 8)  # one batch
+    monkeypatch.setattr(run_module, "FIRST_BATCH", 37)  # many small ones
+    monkeypatch.setattr(run_module, "MIN_BATCH", 37)
+    monkeypatch.setattr(run_module, "MAX_BATCH", 37)
     batches = []
-    many = Matcher._search(cands, index, regs, big_desc, big_w, settings, 20, 8,
+    many = batched_search(cands, index, regs, big_desc, big_w, settings, 20, 8,
                            lambda rows, ids, cs: batches.append((rows, ids, cs)))  # fmt: skip
     np.testing.assert_array_equal(many[0], one[0])
     np.testing.assert_array_equal(many[1], one[1])
@@ -427,8 +428,8 @@ def test_matcher_end_to_end(library):
                                                               max_uses=4, min_spacing=2.0,
                                                               refine_seconds=1.0))  # fmt: skip
     assert tinted.quality.score < result.quality.score
-    offset = tinted.tint_offset()
-    assert offset.shape == (len(regions), 3) and np.abs(offset).max() > 0
+    shift = tinted.tinted_mean() - tinted.tile_mean
+    assert shift.shape == (len(regions), 3) and np.abs(shift).max() > 0
 
 
 def test_matcher_previews_the_run_without_changing_it(library):

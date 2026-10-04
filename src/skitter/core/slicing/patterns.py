@@ -92,13 +92,12 @@ class PatternBuilder:
         period = np.array([a, b], dtype=float)
         if abs(np.linalg.det(period)) < 1e-9:
             raise ValueError("pattern period vectors must not be parallel")
-        bounds = bricks.bounds()
-        lo, hi = bounds[:, :2].min(axis=0), bounds[:, 2:].max(axis=0)
+        x, y, w, h = bricks.extent()
         return PatternUnit(
             bricks,
             period,
-            np.asarray((lo + hi) / 2 if center is None else center, dtype=float),
-            np.asarray(lo if corner is None else corner, dtype=float),
+            np.asarray((x + w / 2, y + h / 2) if center is None else center, dtype=float),
+            np.asarray((x, y) if corner is None else corner, dtype=float),
         )
 
 

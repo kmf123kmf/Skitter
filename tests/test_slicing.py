@@ -79,6 +79,7 @@ def test_corners_bounds_and_hit_test():
     regions = RegionSet.from_arrays([[10, 10], [12, 10]], (4, 2), [0, math.pi / 2])
     np.testing.assert_allclose(regions.corners()[0], [[8, 9], [12, 9], [12, 11], [8, 11]])
     np.testing.assert_allclose(regions.bounds()[1], [11, 8, 13, 12])
+    assert regions.extent() == (8, 8, 5, 4)  # around both, the rotated one included
     assert regions.hit_test(12, 11.5) == 1  # only the rotated (tall) region reaches here
     assert regions.hit_test(11.5, 10) == 1  # both contain it; the last one is on top
     assert regions.hit_test(0, 0) == -1

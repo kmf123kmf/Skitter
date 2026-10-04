@@ -16,7 +16,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
-    QProgressBar,
     QPushButton,
     QStackedWidget,
     QVBoxLayout,
@@ -26,6 +25,7 @@ from skitter.ui.canvas import MosaicCanvas
 from skitter.ui.render.atlas import build_atlas
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.steps.base import StepPage, side_panel
+from skitter.ui.style import muted, progress_bar, show_progress
 
 SAMPLE_TILES = 2500
 SAMPLE_CELL = 64.0  # world units per sample tile
@@ -37,12 +37,6 @@ def _format_bytes(n: float) -> str:
             return f"{n:,.0f} {unit}" if unit == "bytes" else f"{n:,.1f} {unit}"
         n /= 1024
     raise AssertionError("unreachable")
-
-
-def _muted(label: QLabel) -> QLabel:
-    label.setWordWrap(True)
-    label.setStyleSheet("color: palette(placeholder-text);")
-    return label
 
 
 class TilesStep(StepPage):
@@ -94,7 +88,7 @@ class TilesStep(StepPage):
         layout = QVBoxLayout(group)
         layout.addWidget(self.folders)
         layout.addLayout(buttons)
-        layout.addWidget(_muted(QLabel("Images in these folders and their subfolders are tiles.")))
+        layout.addWidget(muted(QLabel("Images in these folders and their subfolders are tiles.")))
         return group
 
     def _build_update_group(self) -> QGroupBox:
@@ -106,9 +100,8 @@ class TilesStep(StepPage):
         buttons = QHBoxLayout()
         buttons.addWidget(self.update_button)
         buttons.addWidget(self.cancel_button)
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.status = _muted(QLabel())
+        self.progress = progress_bar()
+        self.status = muted(QLabel())
         group = QGroupBox("Library")
         layout = QVBoxLayout(group)
         layout.addLayout(buttons)
@@ -121,7 +114,7 @@ class TilesStep(StepPage):
         self._failed = QLabel("—")
         self._missing = QLabel("—")
         self._disk = QLabel("—")
-        self._location = _muted(QLabel("—"))
+        self._location = muted(QLabel("—"))
         self._location.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         group = QGroupBox("Contents")
         form = QFormLayout(group)
@@ -179,11 +172,7 @@ class TilesStep(StepPage):
 
     def _on_progress(self, message: str, fraction: float) -> None:
         self.status.setText(message)
-        if fraction < 0:
-            self.progress.setRange(0, 0)
-        else:
-            self.progress.setRange(0, 1000)
-            self.progress.setValue(round(fraction * 1000))
+        show_progress(self.progress, fraction)
 
     def _refresh(self) -> None:
         session = self.session

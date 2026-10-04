@@ -9,7 +9,10 @@ The pipeline (see matcher.py):
 3. Search every region's top candidates, then rerank them exactly with the
    current tint and weights.
 4. `assign`: choose among those candidates under the reuse rules (how often a
-   tile may repeat and how far apart repeats must be), then refine.
+   tile may repeat and how far apart repeats must be). Regions left without an
+   allowed candidate are searched again, grouped by the photo they compete for
+   (widening, matcher.py); any still left break the rules as little as
+   possible (spread over the least-used photos). Then refine.
 5. `quality`: render a coarse proxy of the mosaic and score it against the
    image as seen from a distance; spend more search effort where it is worst.
 

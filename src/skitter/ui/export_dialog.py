@@ -14,7 +14,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QVBoxLayout,
 )
@@ -29,9 +28,9 @@ from skitter.core.assembly import (
     export_frame,
 )
 from skitter.ui import preferences
+from skitter.ui.style import WARNING_STYLE, progress_bar, show_progress
 from skitter.ui.widgets.param_form import ParamForm
 
-WARNING_STYLE = "color: #c42b1c;"
 FILTERS = {"png": "PNG image (*.png)", "jpeg": "JPEG image (*.jpg *.jpeg)"}
 SUFFIX_FORMATS = {".png": "png", ".jpg": "jpeg", ".jpeg": "jpeg"}
 ENLARGED = 1.05  # a tile shown this much larger than its photo's pixels counts as enlarged
@@ -90,8 +89,7 @@ class ExportDialog(QDialog):
         options_layout.addLayout(info)
         options_layout.addWidget(self.warning)
 
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
+        self.progress = progress_bar()
         self.status = QLabel()
         self.status.setWordWrap(True)
 
@@ -281,11 +279,7 @@ class ExportDialog(QDialog):
 
     def _on_progress(self, message: str, fraction: float) -> None:
         self.status.setText(message)
-        if fraction < 0:
-            self.progress.setRange(0, 0)
-        else:
-            self.progress.setRange(0, 1000)
-            self.progress.setValue(round(fraction * 1000))
+        show_progress(self.progress, fraction)
 
     def _on_finished(self, path: str, report: ExportReport | None, error: str | None) -> None:
         if error:

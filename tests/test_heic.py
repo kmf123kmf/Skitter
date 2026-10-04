@@ -1,14 +1,16 @@
 """HEIC / HEIF photos (pillow-heif): sources, tile library, full-detail crops."""
 
 import multiprocessing
+import os
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
 import pytest
 from PIL import Image
 
-from skitter.core.imaging import IMAGE_EXTENSIONS, find_images, load_image
+from skitter.core.imaging import IMAGE_EXTENSIONS, load_image
 from skitter.core.tiles.ingest import load_thumbnail
+from skitter.core.tiles.library import walk_images
 from skitter.core.tiles.render import _render_file, render_crops
 
 
@@ -40,7 +42,8 @@ def heic(tmp_path, request):
 
 def test_heic_is_a_known_image_type(tmp_path, heic):
     assert {".heic", ".heif"} <= IMAGE_EXTENSIONS
-    assert find_images(tmp_path) == [heic]  # upper-case extension too
+    found = [path for path, _, _ in walk_images(tmp_path)]
+    assert found == [os.path.normcase(str(heic))]  # upper-case extension too
 
 
 def test_heic_source_loads_upright(heic):

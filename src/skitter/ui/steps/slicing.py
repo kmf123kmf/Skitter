@@ -38,6 +38,7 @@ from skitter.core.slicing import (
 )
 from skitter.ui import preferences
 from skitter.ui.steps.base import StepPage, side_panel
+from skitter.ui.style import WARNING_STYLE, muted
 from skitter.ui.widgets.image_viewer import ImageViewer
 from skitter.ui.widgets.param_form import ParamForm
 from skitter.ui.widgets.region_overlay import (
@@ -51,7 +52,6 @@ from skitter.ui.widgets.region_overlay import (
 UNCOVERED_DIMMING = 0.6
 MIN_LINE_OPACITY, DEFAULT_LINE_OPACITY = 10, 100  # percent
 MIN_SOURCE_PX_PER_TILE = 2.0  # below this, tile colors come from too few source pixels
-WARNING_STYLE = "color: #c42b1c;"
 HIDDEN = "hidden"
 DISPLAY_MODES = (
     (STACKED, "Stacked", "Regions show the image; upper regions hide what they cover."),
@@ -63,12 +63,6 @@ DISPLAY_MODES = (
 def _stage_text(stage: Stage) -> str:
     summary = stage.operation.summary()
     return f"{stage.operation.name} — {summary}" if summary else stage.operation.name
-
-
-def _muted(label: QLabel) -> QLabel:
-    label.setWordWrap(True)
-    label.setStyleSheet("color: palette(placeholder-text);")
-    return label
 
 
 class SlicingStep(StepPage):
@@ -137,7 +131,7 @@ class SlicingStep(StepPage):
             "Source image pixels across one base tile: how much of the image "
             "each tile's color is judged from."
         )
-        hint = _muted(QLabel("Pixel sizes are chosen when you export the mosaic."))
+        hint = muted(QLabel("Pixel sizes are chosen when you export the mosaic."))
 
         group = QGroupBox("Mosaic")
         form = QFormLayout(group)
@@ -189,7 +183,7 @@ class SlicingStep(StepPage):
         for button in (self._up_button, self._down_button, self._remove_button):
             buttons.addWidget(button)
 
-        hint = _muted(QLabel("Stages run top to bottom, starting from the whole mosaic."))
+        hint = muted(QLabel("Stages run top to bottom, starting from the whole mosaic."))
         group = QGroupBox("Slicing Plan")
         layout = QVBoxLayout(group)
         layout.addWidget(self._stages)
@@ -206,7 +200,7 @@ class SlicingStep(StepPage):
         return button
 
     def _build_settings_group(self) -> QGroupBox:
-        self._description = _muted(QLabel())
+        self._description = muted(QLabel())
         self.form = ParamForm()
         self.form.changed.connect(self._on_param_changed)
         self._settings_group = QGroupBox("Settings")
@@ -446,10 +440,7 @@ class SlicingStep(StepPage):
         self.overlay.set_image(self.viewer.image_layer, *size)
         regions = self.session.project.regions
         if regions:
-            bounds = regions.bounds()
-            x0, y0 = bounds[:, :2].min(axis=0)
-            x1, y1 = bounds[:, 2:].max(axis=0)
-            self.viewer.set_content_bounds((x0, y0, x1 - x0, y1 - y0))
+            self.viewer.set_content_bounds(regions.extent())
         else:  # no regions (a slicing error): just the image, not the last slicing's area
             self.viewer.set_content_bounds(None)
 

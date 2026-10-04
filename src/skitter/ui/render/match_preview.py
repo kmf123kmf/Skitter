@@ -8,10 +8,10 @@ background, newest first: a preview arriving while another builds waits,
 replacing any that already waited, and builds start at most every
 MIN_INTERVAL seconds.
 
-Thumbnails go into a GrowingAtlas: frames of a run mostly show tiles earlier
-frames showed, so each frame packs only the new ones into free cells and the
-GPU uploads just those (patches), not every page again. Only when the pages
-are full does a frame start a new atlas (and a new layer).
+Thumbnails go into a GrowingAtlas (atlas.py): frames of a run mostly show
+tiles earlier frames showed, so each frame packs only the new ones and the GPU
+uploads just those (patches), not every page again. Only when the pages are
+full does a frame start a new atlas (and a new layer).
 """
 
 import logging
@@ -24,7 +24,7 @@ from PySide6.QtCore import QCoreApplication, QObject, Signal
 
 from skitter.core.matching.matcher import MatchPreview, PreviewStage
 from skitter.core.scene import MosaicScene
-from skitter.ui.render.atlas import PAGE, _uv, cell_size
+from skitter.ui.render.atlas import GrowingAtlas
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import scene_instances
 
@@ -32,83 +32,6 @@ logger = logging.getLogger(__name__)
 
 MIN_INTERVAL = 0.2  # seconds between the starts of two builds
 ROOM = 2.0  # a new atlas has cells for this many times the regions that need a tile
-
-
-class GrowingAtlas:
-    """Library thumbnails packed into fixed RGBA pages as they are first needed (cells
-    are never reused or moved)."""
-
-    def __init__(self, library, capacity: int):
-        self.library = library
-        thumbs = library.thumbs
-        self.cell = min(cell_size(capacity), thumbs.shape[1])
-        self.per_row = PAGE // self.cell
-        self.per_page = self.per_row * self.per_row
-        pages = max(1, -(-capacity // self.per_page))
-        self.capacity = pages * self.per_page
-        self.pages = np.zeros((pages, PAGE, PAGE, 4), np.uint8)
-        self.pages[..., 3] = 255
-        self.cell_of = np.full(len(library.thumb_size), -1, np.int64)  # slot -> cell
-        self.count = 0
-
-    def add(self, slots) -> list[tuple] | None:
-        """Pack the slots not packed yet. Returns the texels written, as (page, x, y, w,
-        h) rects, or None if they don't fit (nothing is written then)."""
-        new = np.unique(np.asarray(slots, dtype=np.int64))
-        new = new[self.cell_of[new] < 0]
-        start = self.count
-        if start + len(new) > self.capacity:
-            return None
-        self.cell_of[new] = np.arange(start, start + len(new))
-        self.count += len(new)
-        thumbs = self.library.thumbs
-        factor = thumbs.shape[1] // self.cell
-        for lo in range(0, len(new), 8192):
-            block = np.asarray(thumbs[new[lo : lo + 8192]])
-            if factor > 1:
-                size = len(block), self.cell, factor, self.cell, factor, 3
-                block = block.reshape(size).mean(axis=(2, 4)).astype(np.uint8)
-            for i, image in enumerate(block):
-                page, x, y = self._place(start + lo + i)
-                self.pages[page, y : y + self.cell, x : x + self.cell, :3] = image
-        return self._rects(start, self.count)
-
-    def locate(self, slots, rects, mirrored=None) -> tuple[np.ndarray, np.ndarray]:
-        """Texture layer and (u0, v0, u1, v1) of each crop rect of each (packed) slot."""
-        slots = np.asarray(slots, dtype=np.int64)
-        page, within = np.divmod(self.cell_of[slots], self.per_page)
-        corner = np.stack([within % self.per_row, within // self.per_row], axis=1) * self.cell
-        factor = self.library.thumbs.shape[1] // self.cell
-        size = np.maximum(1, -(-self.library.thumb_size[slots] // factor)).astype(np.float64)
-        rects = np.asarray(rects, dtype=np.float64)
-        origin = corner + rects[:, :2] * size
-        return page.astype(np.float32), _uv(origin, (rects[:, 2:] - rects[:, :2]) * size,
-                                            PAGE, mirrored)  # fmt: skip
-
-    def _place(self, cell: int) -> tuple[int, int, int]:
-        page, within = divmod(cell, self.per_page)
-        return page, (within % self.per_row) * self.cell, (within // self.per_row) * self.cell
-
-    def _rects(self, start: int, end: int) -> list[tuple]:
-        """Cells [start, end) as a few rects: per page, a partial first row, whole rows,
-        and a partial last row."""
-        rects, c, row = [], self.cell, self.per_row
-        while start < end:
-            page, within = divmod(start, self.per_page)
-            stop = min(end, (page + 1) * self.per_page) - page * self.per_page  # in this page
-            first_row, col = divmod(within, row)
-            if col:  # the rest of a started row
-                n = min(row - col, stop - within)
-                rects.append((page, col * c, first_row * c, n * c, c))
-                within += n
-            whole = (stop - within) // row
-            if whole:
-                rects.append((page, 0, (within // row) * c, row * c, whole * c))
-                within += whole * row
-            if within < stop:  # the start of a last row
-                rects.append((page, 0, (within // row) * c, (stop - within) * c, c))
-            start = page * self.per_page + stop
-        return rects
 
 
 @dataclass

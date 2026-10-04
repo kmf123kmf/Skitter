@@ -32,12 +32,6 @@ def frame_layers(
     return _tiles(base, seen, seen.ground), _shadows(seen), _tiles(base, seen, seen.air)
 
 
-def frame_instances(base: np.ndarray, frame: TileFrame) -> np.ndarray:
-    """All tiles of a frame in one array, in draw order (no camera, no shadows)."""
-    seen = project_flat(frame)
-    return _tiles(base, seen, np.concatenate([seen.ground, seen.air]))
-
-
 def _tiles(base: np.ndarray, seen: Projected, index: np.ndarray) -> np.ndarray:
     tiles = base[index]
     tiles["pos"] = seen.center[index]

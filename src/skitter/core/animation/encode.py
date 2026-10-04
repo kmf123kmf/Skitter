@@ -43,10 +43,6 @@ PNG_LEVEL = {"slow": 9, "medium": 6, "fast": 1}
 CONTAINER = {".mp4": "mp4", ".webm": "webm", ".mov": "mov", ".webp": "webp", ".gif": "gif"}
 
 
-def available_encoders() -> set[str]:
-    return set(av.codecs_available)
-
-
 class VideoWriter:
     """Streams RGBA frames into a video file (or a folder of PNGs)."""
 

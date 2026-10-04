@@ -15,10 +15,9 @@ from skitter.core.animation.base import (
     choreography_types,
     cover_after_impact,
     get_choreography,
-    landing_order,
-    random_landing_order,
     register_choreography,
 )
+from skitter.core.animation.landing import landing_order, random_landing_order
 
 __all__ = [
     "Choreography",

@@ -33,6 +33,7 @@ from skitter.ui.render.player import TimelinePlayer
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import TileTextures
 from skitter.ui.steps.base import StepPage, side_panel
+from skitter.ui.style import muted
 from skitter.ui.widgets.param_form import ParamForm
 
 SLIDER_STEPS = 1000
@@ -40,12 +41,6 @@ MARGIN = 0.05  # view margin around the mosaic, share of its size
 FRAME_DIM = 0.6  # opacity of the shade outside the export frame
 FAR = 1e7  # mosaic units: "everywhere" for the shade
 FRAME_SETTINGS = ("resolution", "width", "height", "framing", "margin")  # what the video shows
-
-
-def _muted(label: QLabel) -> QLabel:
-    label.setWordWrap(True)
-    label.setStyleSheet("color: palette(placeholder-text);")
-    return label
 
 
 class AnimateStep(StepPage):
@@ -107,11 +102,11 @@ class AnimateStep(StepPage):
         self.slider.setRange(0, SLIDER_STEPS)
         self.slider.sliderMoved.connect(self._on_slider)
         self.time_label = QLabel("—")
-        self.fps_label = _muted(QLabel())
+        self.fps_label = muted(QLabel())
         self.canvas.fps_changed.connect(
             lambda fps: self.fps_label.setText(f"{fps:.0f} fps" if fps else "")
         )
-        self.status = _muted(QLabel("No mosaic: match tiles first."))
+        self.status = muted(QLabel("No mosaic: match tiles first."))
         group = QGroupBox("Playback")
         layout = QVBoxLayout(group)
         layout.addLayout(buttons)
@@ -138,7 +133,7 @@ class AnimateStep(StepPage):
             self.choreography_box.findData(self.project.choreography_id)
         )
         self.choreography_box.currentIndexChanged.connect(self._on_choreography)
-        self.description = _muted(QLabel())
+        self.description = muted(QLabel())
         self.form = ParamForm()
         self.form.changed.connect(lambda _: self.session.animation_edited())
         group = QGroupBox("Animation")

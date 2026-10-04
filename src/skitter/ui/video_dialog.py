@@ -20,7 +20,6 @@ from PySide6.QtWidgets import (
     QLabel,
     QLineEdit,
     QMessageBox,
-    QProgressBar,
     QPushButton,
     QVBoxLayout,
 )
@@ -34,9 +33,9 @@ from skitter.core.animation.video import (
 from skitter.ui import preferences
 from skitter.ui.render.tile_textures import detail_sizes
 from skitter.ui.render.video_export import VideoReport
+from skitter.ui.style import WARNING_STYLE, muted, progress_bar, show_progress
 from skitter.ui.widgets.param_form import ParamForm
 
-WARNING_STYLE = "color: #c42b1c;"
 VIDEO_EXTENSIONS = {f.extension for f in FORMATS.values() if f.extension}
 
 
@@ -45,12 +44,6 @@ def _bytes(n: float) -> str:
         if n >= size:
             return f"{n / size:,.1f} {unit}"
     return f"{n / 2**10:,.0f} KB"
-
-
-def _muted(label: QLabel) -> QLabel:
-    label.setWordWrap(True)
-    label.setStyleSheet("color: palette(placeholder-text);")
-    return label
 
 
 class VideoExportDialog(QDialog):
@@ -73,7 +66,7 @@ class VideoExportDialog(QDialog):
         self.form = ParamForm()
         self.form.set_target(self.settings)
         self.form.changed.connect(self._on_setting_changed)
-        self.format_note = _muted(QLabel())
+        self.format_note = muted(QLabel())
         self.size_label = QLabel()
         self.length_label = QLabel()
         self.detail_label = QLabel()
@@ -96,8 +89,7 @@ class VideoExportDialog(QDialog):
         options_layout.addLayout(info)
         options_layout.addWidget(self.problems)
 
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
+        self.progress = progress_bar()
         self.status = QLabel()
         self.status.setWordWrap(True)
 
@@ -278,11 +270,7 @@ class VideoExportDialog(QDialog):
 
     def _on_progress(self, message: str, fraction: float) -> None:
         self.status.setText(message)
-        if fraction < 0:
-            self.progress.setRange(0, 0)
-        else:
-            self.progress.setRange(0, 1000)
-            self.progress.setValue(round(fraction * 1000))
+        show_progress(self.progress, fraction)
 
     def _on_finished(self, path: str, report: VideoReport | None, error: str | None) -> None:
         if error:

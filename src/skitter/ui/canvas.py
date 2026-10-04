@@ -119,16 +119,9 @@ class MosaicCanvas(QOpenGLWidget):
         self._released.append(layer)  # GPU resources freed on next paint
         self.update()
 
-    def clear_layers(self) -> None:
-        for layer in list(self.layers):
-            self.remove_layer(layer)
-
     def add_animation(self, animation: Animation) -> None:
         self._animations.append((animation, None))
         self.update()
-
-    def clear_animations(self) -> None:
-        self._animations.clear()
 
     # View
 

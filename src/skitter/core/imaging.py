@@ -31,27 +31,3 @@ def load_image(path: str | Path) -> np.ndarray:
 
 def save_image(array: np.ndarray, path: str | Path) -> None:
     Image.fromarray(array).save(path)
-
-
-def find_images(folder: str | Path) -> list[Path]:
-    """Recursively list image files under a folder, sorted for stable ordering."""
-    return sorted(
-        p for p in Path(folder).rglob("*") if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS
-    )
-
-
-def resize(array: np.ndarray, size: tuple[int, int]) -> np.ndarray:
-    """Resize to (width, height)."""
-    return np.asarray(Image.fromarray(array).resize(size, Image.Resampling.LANCZOS))
-
-
-def center_crop_square(array: np.ndarray) -> np.ndarray:
-    h, w = array.shape[:2]
-    side = min(h, w)
-    top, left = (h - side) // 2, (w - side) // 2
-    return array[top : top + side, left : left + side]
-
-
-def average_color(array: np.ndarray) -> np.ndarray:
-    """Mean RGB of an image as a float array of shape (3,)."""
-    return array.reshape(-1, array.shape[-1]).mean(axis=0)

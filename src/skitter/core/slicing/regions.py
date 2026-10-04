@@ -242,6 +242,12 @@ class RegionSet:
         corners = self.corners()
         return np.concatenate([corners.min(axis=1), corners.max(axis=1)], axis=1)
 
+    def extent(self) -> tuple[float, float, float, float]:
+        """(x, y, width, height) of the box around all regions (rotation included)."""
+        bounds = self.bounds()
+        (x0, y0), (x1, y1) = bounds[:, :2].min(axis=0), bounds[:, 2:].max(axis=0)
+        return float(x0), float(y0), float(x1 - x0), float(y1 - y0)
+
     def area(self) -> np.ndarray:
         return self.size[:, 0] * self.size[:, 1]
 
