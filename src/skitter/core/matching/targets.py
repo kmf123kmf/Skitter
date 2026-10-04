@@ -42,10 +42,18 @@ class Targets:
 
 
 def target_descriptors(
-    regions: RegionSet, ctx: SliceContext, raster: Raster | None = None, chunk: int = 2048
+    regions: RegionSet,
+    ctx: SliceContext,
+    raster: Raster | None = None,
+    chunk: int = 2048,
+    indices: np.ndarray | None = None,
 ) -> Targets:
-    """Describe every region of the final image (raster: visibility, None = all visible)."""
-    n = len(regions)
+    """Describe every region of the final image (raster: visibility, None = all visible).
+
+    indices: describe only these regions (rows of the result, in this order).
+    """
+    which = np.arange(len(regions)) if indices is None else np.asarray(indices, np.int64)
+    n = len(which)
     desc = np.zeros((n, DIM), np.float32)
     mask = np.zeros((n, DIM), np.float32)
     visible = np.zeros(n, np.float32)
@@ -55,7 +63,8 @@ def target_descriptors(
 
     for lo in range(0, n, chunk):
         hi = min(lo + chunk, n)
-        center, size, rot = regions.center[lo:hi], regions.size[lo:hi], regions.rotation[lo:hi]
+        rows = which[lo:hi]
+        center, size, rot = regions.center[rows], regions.size[rows], regions.rotation[rows]
         m = hi - lo
         # Sample points in each region's frame, centered on the region.
         lx = (u[None, None, :] - 0.5) * size[:, 0, None, None]
@@ -74,7 +83,7 @@ def target_descriptors(
         if raster is None:
             seen = np.ones((m, side, side), np.float32)
         else:
-            seen = (raster.lookup(world) == np.arange(lo, hi)[:, None, None]).astype(np.float32)
+            seen = (raster.lookup(world) == rows[:, None, None]).astype(np.float32)
 
         # Visibility-weighted cell means.
         cells = (m, GRID, SAMPLES, GRID, SAMPLES)

@@ -218,7 +218,7 @@ class VideoExportDialog(QDialog):
 
     def _show_plan(self, scene) -> None:
         project = self.session.project
-        duration = project.choreography.timeline(scene).duration
+        duration = project.choreography.timeline(scene, project.animation_look).duration
         plan = plan_video(scene, duration, self.settings, project.animation_look.background)
         fps = float(plan.fps)
         self.size_label.setText(f"{plan.width:,} × {plan.height:,} px at {fps:g} fps")

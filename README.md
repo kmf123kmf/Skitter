@@ -34,7 +34,7 @@ A photo mosaic generator with an animated graphical interface.
 - `ImageViewer` (`ui/widgets/image_viewer.py`) is the reusable viewer. It has:
   - fit by default, scrollbars only when the image overflows
   - a bottom bar with the cursor's pixel and RGB value, zoom out, an editable zoom %, zoom in, Fit (Ctrl+0) and 1:1 (Ctrl+1)
-  - wheel zoom about the cursor, drag to pan, double-click to toggle fit/100%
+  - wheel zoom about the cursor, drag to pan, double-click to toggle fit/100% (on the Matching tab, double-click edits a tile instead)
   - sharp pixels at 400% and above
   - animated transitions for flip, rotate and crop
 - `CropOverlay` is a transparent child widget of the canvas that draws the crop box. Left drags edit the box; wheel and middle-drag fall through to the canvas.
@@ -165,6 +165,16 @@ Matching (`core/matching`, Qt-free) gives every visible region a tile crop:
   - A background job then reads each used tile from its original file and cuts its crop at one texel per mosaic unit (`core/tiles/render.py`, process pool, JPEGs decoded at reduced scale). The crops are shelf-packed into atlas pages (`pack_images`) and replace the thumbnails. Regions showing the same crop at the same size share one image. If the total would exceed `DETAIL_TEXELS` (about 400 MB of GPU memory), every crop is scaled down by the same factor. Unreadable files fall back to their thumbnails.
 - `scripts/bench_matching.py` benchmarks index build, search accuracy and speed, and assignment at library scale.
 
+### Picking tiles by hand
+
+The result remembers each region's 32 best candidates (`candidates.py`; indices into the candidate sets matching already holds, about 8 bytes each: 15 MB for 60,000 regions). On the Matching tab, double-clicking a tile (or **Edit Tiles**, E) enters edit mode (`ui/steps/tile_picker.py`):
+
+- Hovering a tile outlines it; clicking selects it. The rest of the mosaic dims, and so do tiles lying on it, so only its visible part stands out.
+- The side panel shows the part of the image the region covers and a grid of its candidates (`ui/widgets/candidate_grid.py`), best first, tinted as they would show: the tile shown now is framed, the matcher's choice has a star, and candidates that would break a reuse rule have a warning (the tooltip says which). Crops show from thumbnails at once and from their files moments later.
+- Hovering a candidate, or moving to it with the arrow keys, previews it in place; a click or Enter picks it, and a double-click picks it and leaves edit mode. **Find More** searches every tile exactly for that region and lists the next 32 (`index.exact_top`). **Revert Tile** and **Revert All** restore the matcher's choice; picks can be undone and redone (Ctrl+Z, Ctrl+Y). Esc stops previewing, deselects, then leaves edit mode. Hand-picked tiles are marked in a corner.
+- Picks may break the reuse rules (they count as rule breaks). Each pick makes a new result (`core/matching/edit.py`; the old one is untouched, so exports in progress are unaffected) and rescores only around the region (`quality.rescore`: exact, a few tens of milliseconds), so the score and heat map stay current. The scene keeps its cached geometry, and the textures put the new crop in free space of the existing pages, patched on the GPU in place (`TileTextures.set_scene`, `SpriteLayer.patch_texture`); the Animate tab and exports use the edited mosaic.
+- **Match Tiles** with picks present asks whether to keep them. Kept picks are **pins**: the matcher places them first, counts them toward the reuse rules, never moves them, and fits everything else around them (even with other crop settings: missing crops are added to the candidate set). Picks whose photos left the library are dropped, and the status says how many.
+
 ## Export
 
 **Mosaic → Export Image** (enabled only while the mosaic is valid: matched for the current regions, committed source and unchanged tiles) renders the mosaic at full detail in the background (`core/assembly.py`, `ui/export_dialog.py`).
@@ -178,9 +188,9 @@ Matching (`core/matching`, Qt-free) gives every visible region a tile crop:
 Groundwork for animating the tiles into the finished mosaic (`core/animation/`):
 
 - A **choreography** is a configurable recipe (settings as `Param`s, registered with `@register_choreography`) that plans a **timeline** for a scene. `timeline.frame(t)` gives every tile's center, size, rotation, alpha, tint and draw order at time t: a pure function of time, so it can be played, paused, scrubbed or rendered frame by frame. `frame(duration)` must be exactly the finished mosaic (`TileFrame.final`), which a test checks for every registered choreography.
-- `FlightTimeline` covers tiles travelling from a start state to their final state with per-tile delays and easing; tiles are hidden until they set off, opaque in flight, and draw above landed ones. `TossTimeline` throws tiles onto the table under gravity: steady sideways speed, an exact parabolic arc in height (gravity = 8 x arc / flight time²), constant spin that stops on impact, bounces that each keep a share of the speed, and a damped settling wobble, all closed form. A tile counts as at rest (and joins the bottom-first landing order and even pacing) only once settled. The built-in **Assemble** offers Toss (default) or Glide, ordered by distance, reading order, lightness or random. **Flips** (`Flips`) turn tiles over in flight a whole number of times about one of their own edges, so each lands face up and unmirrored; seen from above a flipping tile foreshortens, shows the Photo backs color while back up, and darkens edge-on.
-- **Camera and light** (`core/animation/look.py`, Animate tab): a camera looks straight down at the table from Camera height, so tiles in the air look larger (H / (H - h)) and further from the middle; a distant light casts each airborne tile's soft shadow on the table, offset away from the light, blurred and faded with height. Tiles draw in three groups: at rest, shadows, in the air. Preview and video use the same camera.
-- **Overlapping tiles land bottom first.** `scene.overlaps` lists every overlapping pair (rotated rectangles, exact), and `landing_order` turns each tile's preferred place in the sequence into a landing order in which a tile never lands before the tiles it lies on (a prioritized topological sort), so nothing pops under its neighbors on landing. Assemble then spaces landings evenly, so piles and grids build at the same steady pace (adjustable pacing is a possible later setting). A test checks every registered choreography against a real Photo Pile: an overlapping lower tile is never drawn above the tile that covers it.
+- `FlightTimeline` covers tiles travelling from a start state to their final state with per-tile delays and easing; tiles are hidden until they set off, opaque in flight, and draw above landed ones. `TossTimeline` throws tiles onto the table under gravity: steady sideways speed, an exact parabolic arc in height (gravity = 8 x arc / flight time²), constant spin that stops on impact, bounces that each keep a share of the speed, and a damped settling wobble, all closed form. A tile counts as at rest (and joins the bottom-first landing order and even pacing) only once settled. The built-in **Assemble** offers Toss (default), Drop or Glide, ordered by distance, reading order, lightness or random. **Drop** uses the same timeline started at the camera's height at rest (gravity = 2 x camera height / fall time²): tiles linger near the lens, looming large, then speed up and shrink onto their spots, bouncing and settling like tossed ones. **Slant** starts each tile beside its spot, outward from the middle, so it slides in from the picture's edge already large (0: a straight drop, except that tiles near the middle start just far enough out to come in from the edge; they loom over the view). **Flips** (`Flips`) turn tiles over in flight a whole number of times about one of their own edges, so each lands face up and unmirrored; seen from above a flipping tile foreshortens, shows the Photo backs color while back up, and darkens edge-on.
+- **Camera and light** (`core/animation/look.py`, Animate tab): a camera looks straight down at the table from Camera height, so tiles in the air look larger (H / (H - h)) and further from the middle; a distant light casts each airborne tile's soft shadow on the table, offset away from the light, blurred and faded with height. Tiles draw in three groups: at rest, shadows, in the air (nearest the camera on top). Nothing at the lens is seen: tiles above 97% of the camera height (33x their size) are hidden, and below it fully opaque, never see-through. Choreographies keep tiles that high off the picture (`clear_of_axis`): a drop starts each tile at least far enough from the camera's axis that it comes into view beside the mosaic and slides in, and throws peak at most at 80% of the camera height. Preview and video use the same camera, and timelines get the look (`Choreography.timeline(scene, look)`) so a drop starts at whatever height the camera is.
+- **Overlapping tiles land bottom first.** `scene.overlaps` lists every overlapping pair (rotated rectangles, exact), and `landing_order` turns each tile's preferred place in the sequence into a landing order in which a tile never lands before the tiles it lies on (a prioritized topological sort), so nothing pops under its neighbors on landing. Random order instead draws a **uniformly random bottom-first order** (`random_landing_order`: independent uniform keys conditioned on lower < upper, sampled by Gibbs sweeps, about 8 ms for 3,400 tiles), so tiles land close together in space and time exactly as often as chance has it; random preferences through `landing_order` would land a held-back tile right beside the one it lies on (92% of landings had a neighbor within 0.15 s on a pile, against 50% by chance). Orders without a direction are listed in `assemble.RANDOM_ORDERS`, and a test holds every order to its kind: random ones to chance, directed ones to their direction. For directed orders, a tile freed by the landing of its last support then waits a few landings (`landing_gap`: n / 150, 3 to 50) while others can go; otherwise the sequence climbs one stack after another (on a pile, about 70% of landings fell on one of the last three), and with it landings spread over the mosaic as they would without the rule, in nearly the preferred order. Assemble then spaces landings evenly, so piles and grids build at the same steady pace (adjustable pacing is a possible later setting). A test checks every registered choreography against a real Photo Pile: an overlapping lower tile is never drawn above the tile that covers it, unless it is higher in the air. Tiles that have touched down draw in stacking order even while bouncing; only tiles still falling draw by height.
 - `ui/render/player.py` plays a timeline on a canvas (`TimelinePlayer`, `seek`/`play`/`pause`). The **Animate** tab (unlocked while a valid mosaic exists, even if matching settings changed since it was made) picks a choreography, generates its settings form, and plays or scrubs it; it opens on the finished mosaic, Play runs from the start, and leaving the tab pauses. Updating every tile each frame with numpy costs about 0.25 µs per tile (15,000 tiles run at over 100 fps).
 
 ## Animation export
@@ -219,7 +229,9 @@ src/skitter/
       raster.py     rasterized region stacks
       index.py      candidate sets, faiss index, exact rerank and search
       assign.py     reuse-constrained assignment and refinement
-      quality.py    proxy render and distance-blurred scores
+      quality.py    proxy render and distance-blurred scores; local rescoring
+      candidates.py remembered candidates per region; pins
+      edit.py       manual picks: apply, revert, find more, reuse status
       matcher.py    the pipeline and its caches
       settings.py   MatchSettings (Params)
     slicing/        slicing framework
@@ -241,7 +253,8 @@ src/skitter/
       source.py     step 1: source image selection and editing
       slicing.py    step 2: slicing plan editor and region preview
       tiles.py      step 3: tile library folders, update, statistics
-      matching.py   step 4: matching settings, run, mosaic preview, heat map
+      matching.py   step 4: matching settings, run, mosaic preview, heat map, edit mode
+      tile_picker.py  picking tiles by hand: side panel, canvas overlays, crop reader
       animate.py    step 5: choreography settings, playback and scrubbing of the build animation
     jobs.py         background jobs with progress and cancel
     widgets/
@@ -249,6 +262,7 @@ src/skitter/
       crop_overlay.py  interactive crop box over a canvas
       region_overlay.py  stacked GPU preview of a RegionSet (fill, outlines, hover)
       param_form.py    settings form generated from Params
+      candidate_grid.py  grid of tile candidates to pick from
     canvas.py       GPU canvas widget: layers, animations, navigation
     icons.py        vector toolbar icons drawn with QPainter
     render/

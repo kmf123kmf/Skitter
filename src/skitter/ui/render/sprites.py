@@ -98,10 +98,24 @@ class SpriteLayer:
         self.texture_from = texture_from
         self.visible = True
         self.dirty = True
+        self.patches: list[tuple[int, int, int, int, int]] = []  # texels to upload again
 
     def mark_dirty(self) -> None:
         """Flag the instance array for upload on the next frame."""
         self.dirty = True
+
+    def patch_texture(self, rects, source: np.ndarray | None = None) -> None:
+        """Texels (page, x, y, w, h) of the textures changed: upload them on the next frame.
+
+        source: the array they were written to, if not this layer's own textures
+        (layers made from RGB pages hold an RGBA copy).
+        """
+        for page, x, y, w, h in rects:
+            if source is not None and source is not self.textures:
+                self.textures[page, y : y + h, x : x + w, : source.shape[-1]] = source[
+                    page, y : y + h, x : x + w
+                ]
+            self.patches.append((int(page), int(x), int(y), int(w), int(h)))
 
 
 def _load_shader(name: str) -> str:
@@ -141,6 +155,12 @@ class _GpuLayer:
             )
         if len(instances):
             self.vbo.write(np.ascontiguousarray(instances, dtype=INSTANCE_DTYPE).tobytes())
+
+    def write_patches(self, textures: np.ndarray, patches) -> None:
+        for page, x, y, w, h in patches:
+            data = np.ascontiguousarray(textures[page, y : y + h, x : x + w])
+            self.texture.write(data.tobytes(), viewport=(x, y, page, w, h, 1))
+        self.texture.build_mipmaps()
 
     def set_nearest_mag(self, nearest: bool) -> None:
         if nearest != self.nearest_mag:
@@ -193,6 +213,10 @@ class SpriteRenderer:
         gpu = self._layers.get(layer)
         if gpu is None:
             gpu = self._layers[layer] = _GpuLayer(self.ctx, self.program, self.quad, layer)
+            layer.patches.clear()  # just uploaded whole
+        if layer.patches:
+            gpu.write_patches(layer.textures, layer.patches)
+            layer.patches.clear()
         if layer.dirty:
             gpu.write_instances(layer.instances)
             layer.dirty = False

@@ -11,6 +11,10 @@ results cost noticeably more (relative regret above REGRET_LIMIT), search
 effort is raised and the sample checked again. After assignment, adaptive
 passes search harder only for the regions the quality check finds worst,
 keeping a pass only if the overall score improves.
+
+The result remembers each region's best few candidates (candidates.py) for
+manual picks. Pins (manual picks kept from an earlier run) are placed
+first and never moved; everything else is matched around them.
 """
 
 import math
@@ -23,6 +27,7 @@ import numpy as np
 
 from skitter.core.color import oklab_to_srgb
 from skitter.core.matching.assign import Assignment
+from skitter.core.matching.candidates import KEEP, Candidates, Pins
 from skitter.core.matching.index import (
     CandidateSet,
     SearchIndex,
@@ -77,6 +82,15 @@ class MatchResult:
     quality: QualityReport
     regret: list[RegretStats]
     stats: dict = field(default_factory=dict)
+    # For manual picks (None in results made without them):
+    candidates: Candidates | None = None
+    choice: np.ndarray | None = None  # (R,) int32 shown candidate, index into its class's set
+    manual: np.ndarray | None = None  # (R,) bool: picked by hand
+    settings: MatchSettings | None = None  # the settings matched with
+
+    @property
+    def manual_count(self) -> int:
+        return 0 if self.manual is None else int(self.manual.sum())
 
     def tinted_mean(self) -> np.ndarray:
         return self.tile_mean + self.tint * (self.tint_target - self.tile_mean)
@@ -119,6 +133,7 @@ class Matcher:
         settings: MatchSettings,
         progress: Progress = lambda message, fraction: None,
         cancelled: Callable[[], bool] = lambda: False,
+        pins: Pins | None = None,
     ) -> MatchResult:
         timings: dict[str, float] = {}
         clock = [time.perf_counter()]
@@ -173,6 +188,9 @@ class Matcher:
 
         if not shapes:
             raise ValueError("no tiles fit these regions (empty library?)")
+        pinned, pin_ref, pin_cost = self._pin(pins, shapes, cls, need, targets, weights, settings,
+                                              cand_ref, costs)  # fmt: skip
+        free = need[~np.isin(need, pinned)]
         tiles = np.full((n, kw), -1, np.int64)
         cand_mean = np.zeros((n, kw, 3), np.float32)
         for cands, _, regs in shapes.values():
@@ -189,9 +207,10 @@ class Matcher:
         assign = Assignment(
             tiles, costs, regions.center, len(self.library.status), settings.max_uses, spacing
         )
-        order = self._priority(need, costs, importance)
+        assign.force(pinned)  # first, whatever the rules say
+        order = self._priority(free, costs, importance)
         if settings.error_diffusion:
-            reading = self._reading_order(regions, need)
+            reading = self._reading_order(regions, free)
             self._diffuse(assign, regions, reading, cand_mean, targets, settings)
         else:
             assign.greedy(order)
@@ -223,9 +242,9 @@ class Matcher:
                 cand_ref.copy(), cand_mean.copy())  # fmt: skip
         for round_ in range(settings.adaptive_rounds):
             step(f"Adaptive pass {round_ + 1}", 0.8 + 0.15 * round_ / settings.adaptive_rounds)
-            err = np.where(np.isnan(report.region_error), -np.inf, report.region_error)[need]
-            count = max(1, int(WORST_SHARE * len(need)))
-            worst = need[np.argsort(-err * importance[need])[:count]]
+            err = np.where(np.isnan(report.region_error), -np.inf, report.region_error)[free]
+            count = max(1, int(WORST_SHARE * len(free)))
+            worst = free[np.argsort(-err * importance[free])[:count]]
             self._research(shapes, cls, worst, targets, weights, settings, kw, efforts,
                            4 * (round_ + 1), assign, cand_ref, cand_mean)  # fmt: skip
             assign.unplace(worst)
@@ -253,6 +272,12 @@ class Matcher:
         step("Done", 1.0, "quality")
 
         result = self._result(regions, assign, shapes, cls, cand_ref, targets, tint, report, regret)
+        result.settings = settings.copy()
+        result.candidates = self._remember(classes, shapes, cls, cand_ref, assign, pinned, pin_ref,
+                                           pin_cost)  # fmt: skip
+        result.choice = self._chosen(assign, cand_ref).astype(np.int32)
+        result.manual = np.zeros(n, bool)
+        result.manual[pinned] = True
         over, close = assign.check()
         chosen = result.tile[result.tile >= 0]
         result.stats.update(
@@ -263,6 +288,7 @@ class Matcher:
             most_uses=int(np.bincount(chosen).max()) if len(chosen) else 0,
             rule_violations=int(over + close),
             forced=int(forced),
+            manual=int(len(pinned)),
             candidates=int(sum(len(c) for c, _, _ in shapes.values())),
             gamut_gap=self._gamut_gap(shapes, targets, need, area),
             timings=timings,
@@ -270,6 +296,52 @@ class Matcher:
         return result
 
     # Steps
+
+    def _pin(self, pins, shapes, cls, need, targets, weights, settings, cand_ref, costs):
+        """Make each pinned region's only candidate its pinned crop.
+
+        Crops the class's candidate set lacks are added to it. Returns the
+        pinned regions and their searched (ranked) lists, still offered for
+        picking later.
+        """
+        empty = np.zeros(0, np.int64)
+        if pins is None or not len(pins):
+            return empty, np.zeros((0, KEEP), np.int64), np.zeros((0, KEEP), np.float32)
+        keep = np.isin(pins.region, need) & np.isin(cls[pins.region], list(shapes))
+        pins = pins.subset(keep)
+        listed = cand_ref[pins.region, :KEEP].copy(), costs[pins.region, :KEEP].copy()
+        for c, (cands, index, regs) in list(shapes.items()):
+            mine = np.flatnonzero(cls[pins.region] == c)
+            if not len(mine):
+                continue
+            rows = pins.region[mine]
+            cands, ref = cands.with_crops(self.library, pins.tile[mine], pins.rect[mine],
+                                          pins.mirrored[mine])  # fmt: skip
+            shapes[c] = (cands, index, regs)
+            _, cost = rerank(cands, ref[:, None], targets.desc[rows], weights[rows],
+                             settings.crop_penalty)  # fmt: skip
+            cand_ref[rows], costs[rows] = -1, np.inf
+            cand_ref[rows, 0], costs[rows, 0] = ref, cost[:, 0]
+        return pins.region.astype(np.int64), *listed
+
+    def _remember(self, classes, shapes, cls, cand_ref, assign, pinned, pin_ref, pin_cost):
+        """The best KEEP candidates of each region, for manual picks."""
+        n = len(cand_ref)
+        ref = cand_ref[:, :KEEP].astype(np.int32)
+        cost = assign.costs[:, :KEEP].astype(np.float32)
+        if ref.shape[1] < KEEP:
+            pad = ((0, 0), (0, KEEP - ref.shape[1]))
+            ref = np.pad(ref, pad, constant_values=-1)
+            cost = np.pad(cost, pad, constant_values=np.inf)
+        cost[ref < 0] = np.inf
+        auto = self._chosen(assign, cand_ref).astype(np.int32)
+        auto_cost = assign.chosen_costs().astype(np.float32)
+        if len(pinned):
+            ref[pinned], cost[pinned] = pin_ref, pin_cost
+            auto[pinned], auto_cost[pinned] = ref[pinned, 0], cost[pinned, 0]
+        sets = tuple(shapes[c][0] if c in shapes else None for c in range(len(classes)))
+        return Candidates(sets, cls.astype(np.int16) if n else np.zeros(0, np.int16), ref, cost,
+                          auto, auto_cost)  # fmt: skip
 
     @staticmethod
     def _priority(regs, costs, importance) -> np.ndarray:

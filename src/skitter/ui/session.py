@@ -17,6 +17,8 @@ from skitter.core.assembly import (
     save_mosaic,
 )
 from skitter.core.edits import Edit, apply_edits
+from skitter.core.matching import edit as picks
+from skitter.core.matching.candidates import Pins
 from skitter.core.matching.matcher import MatchCancelled, Matcher, MatchResult
 from skitter.core.project import Project
 from skitter.core.scene import MosaicScene
@@ -53,6 +55,9 @@ class Session(QObject):
     matching_changed = Signal()  # project.matches replaced, or matching failed or stopped
     # (scene and textures always match project.matches when it is emitted)
     matching_progress = Signal(str, float)
+    # Manual picks changed tiles of these regions (np.ndarray); project.matches, scene and
+    # textures were updated in place of a full replacement (matching_changed isn't emitted).
+    mosaic_edited = Signal(object)
     export_progress = Signal(str, float)
     export_finished = Signal(
         str, object, object
@@ -82,6 +87,10 @@ class Session(QObject):
         self._match_tiles: tuple | None = None  # the library tiles it uses (see mosaic_is_valid)
         self.scene: MosaicScene | None = None  # project.matches as a scene (core/scene.py)
         self.textures: TileTextures | None = None  # the scene's tile textures, shared by views
+        # Manual picks: each entry maps regions to their (choice, manual) before a step.
+        self._pick_undo: list[dict[int, tuple[int, bool]]] = []
+        self._pick_redo: list[dict[int, tuple[int, bool]]] = []
+        self.dropped_picks = 0  # picks the last matching run couldn't keep
         self._job: Job | None = None
         self._job_kind: str | None = None
 
@@ -355,17 +364,22 @@ class Session(QObject):
             bool(self.project.regions) and self._slice_context is not None and (self.library_ready)
         )
 
-    def start_matching(self) -> Job:
-        """Match tiles to the current regions in the background."""
+    def start_matching(self, keep_picks: bool = False) -> Job:
+        """Match tiles to the current regions in the background.
+
+        keep_picks: keep the current mosaic's manual picks (pinned in place).
+        """
         if not self.can_match:
             raise RuntimeError("matching needs regions and a tile library")
         key = self._match_inputs()
         regions, ctx, _, _ = key
         settings = self.project.match_settings.copy()
         matcher = self.matcher
+        kept = self._pins() if keep_picks else None
+        self.dropped_picks = 0 if kept is None else self.manual_picks - len(kept)
 
         def work(progress, cancelled):
-            return matcher.run(regions, ctx, settings, progress, cancelled)
+            return matcher.run(regions, ctx, settings, progress, cancelled, pins=kept)
 
         def done(result: MatchResult | None, error: str | None):
             self.match_error = error
@@ -375,6 +389,90 @@ class Session(QObject):
 
         self.match_error = None
         return self._start_job("matching", work, self.matching_progress, done, (MatchCancelled,))
+
+    # Manual picks
+
+    @property
+    def manual_picks(self) -> int:
+        """Regions of the current mosaic whose tiles were picked by hand."""
+        matches = self.project.matches
+        return 0 if matches is None or not self.mosaic_is_valid else matches.manual_count
+
+    def can_pick(self, region: int) -> bool:
+        return (
+            self.mosaic_is_valid
+            and not self._picks_blocked
+            and picks.editable(self.project.matches, region)
+        )
+
+    @property
+    def _picks_blocked(self) -> bool:
+        """Matching or a library update is running (exports copy what they render)."""
+        return self.busy in ("matching", "library")
+
+    def pick_tile(self, region: int, ref: int) -> None:
+        """Show candidate `ref` (see Candidates) in a region, picked by hand."""
+        self._edit_picks({int(region): (int(ref), True)})
+
+    def revert_picks(self, regions=None) -> None:
+        """Give regions (default: every manual pick) back the matcher's choice."""
+        matches = self.project.matches
+        if regions is None:
+            regions = np.flatnonzero(matches.manual)
+        auto = matches.candidates.auto
+        self._edit_picks({int(r): (int(auto[r]), False) for r in regions})
+
+    def find_more_candidates(self, region: int) -> int:
+        """Search every tile for one region; returns how many candidates were added."""
+        return picks.find_more(self.project.matches, self._slice_context, int(region))
+
+    @property
+    def can_undo_pick(self) -> bool:
+        return bool(self._pick_undo) and self.mosaic_is_valid and not self._picks_blocked
+
+    @property
+    def can_redo_pick(self) -> bool:
+        return bool(self._pick_redo) and self.mosaic_is_valid and not self._picks_blocked
+
+    def undo_pick(self) -> None:
+        if self.can_undo_pick:
+            self._edit_picks(self._pick_undo.pop(), self._pick_redo)
+
+    def redo_pick(self) -> None:
+        if self.can_redo_pick:
+            self._edit_picks(self._pick_redo.pop(), self._pick_undo)
+
+    def _edit_picks(self, changes: dict[int, tuple[int, bool]], history=None) -> None:
+        """Apply picks; the state they replace goes on `history` (default: undo, and the
+        redo history is dropped)."""
+        matches = self.project.matches
+        if matches is None or not self.mosaic_is_valid or self._picks_blocked:
+            return
+        before = {r: (int(matches.choice[r]), bool(matches.manual[r])) for r in changes}
+        edited = picks.apply_choices(matches, self._slice_context, changes)
+        if edited is matches:
+            return
+        if history is None:
+            history = self._pick_undo
+            self._pick_redo.clear()
+        history.append(before)
+        changed = np.fromiter(changes, np.int64)
+        self.project.matches = edited
+        self._match_tiles = self._tile_snapshot(edited.tile)
+        self.scene = self.scene.with_result(edited, self._slice_context)
+        self.textures.set_scene(self.scene, self.library)
+        self.mosaic_edited.emit(changed)
+
+    def _pins(self) -> Pins | None:
+        """The current picks, less those whose photos are no longer usable."""
+        matches = self.project.matches
+        if matches is None or not matches.manual_count or not self.mosaic_is_valid:
+            return None
+        kept = picks.pins(matches)
+        status = self.library.status
+        ok = kept.tile < len(status)
+        ok[ok] = status[kept.tile[ok]] == OK
+        return kept.subset(ok)
 
     def match_settings_edited(self) -> None:
         """project.match_settings changed (results become out of date)."""
@@ -387,6 +485,8 @@ class Session(QObject):
         if self.textures is not None:
             self.textures.cancel()
         self.project.matches, self._match_key = result, key
+        self._pick_undo.clear()
+        self._pick_redo.clear()
         if result is None:
             self._match_tiles = self.scene = self.textures = None
             return
@@ -456,10 +556,12 @@ class Session(QObject):
         choreography = project.choreography.copy()
         settings = project.video_settings.copy()
         background = project.animation_look.background
-        plan = plan_video(scene, choreography.timeline(scene).duration, settings, background)
+        look = project.animation_look.copy()
+        timeline = choreography.timeline(scene, look)
+        plan = plan_video(scene, timeline.duration, settings, background)
         job = VideoJob(
             path=Path(path), scene=scene, choreography=choreography, settings=settings,
-            background=background, look=project.animation_look.copy(), plan=plan,
+            background=background, look=look, plan=plan,
             # Read here: the library isn't threadsafe.
             request=DetailRequest.for_scene(scene, TileFiles.read(self.library, scene.slot),
                                             plan.scale),

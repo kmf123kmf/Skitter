@@ -94,6 +94,10 @@ CONFIGS = [(cls, {}) for cls in choreography_types()] + [
     (AssembleChoreography, {"motion": "glide"}),
     (AssembleChoreography, {"flips": 2}),
     (AssembleChoreography, {"motion": "glide", "flips": 1}),
+    (AssembleChoreography, {"motion": "drop"}),
+    (AssembleChoreography, {"motion": "drop", "slant": 0.0, "flips": 1}),
+    (AssembleChoreography, {"order": "random"}),
+    (AssembleChoreography, {"order": "random", "motion": "drop"}),
 ]
 CONFIG_IDS = [
     f"{cls.id}{'-' + '-'.join(map(str, kw.values())) if kw else ''}" for cls, kw in CONFIGS
@@ -218,7 +222,115 @@ def test_landing_order_follows_preference_but_lands_bottom_first():
     scene = make_scene(regions, [0, 1, 2, 3])
     order = landing_order(scene, [5.0, 1.0, 3.0, 0.5])
     assert order.tolist() == [2, 3, 1, 0]  # 3, 2, then 0 before the 1 lying on it
-    assert landing_order(scene, [0, 0, 0, 0]).tolist() == [0, 1, 2, 3]  # ties: stacking order
+    ties = [0, 0, 0, 0]
+    assert landing_order(scene, ties, gap=0).tolist() == [0, 1, 2, 3]  # ties: stacking order
+    # By default a tile waits a few landings after the one it lies on, while others can go.
+    assert landing_order(scene, ties).tolist() == [0, 3, 1, 2]
+    assert landing_order(scene, ties, gap=1).tolist() == [0, 2, 1, 3]
+
+
+def big_pile(seed=1, columns=20) -> MosaicScene:
+    from skitter.core.slicing.operations import PileSlicer
+
+    ctx = SliceContext(np.zeros((400, 600, 3), np.uint8), MosaicLayout(columns=columns),
+                       tile_width=10)  # fmt: skip
+    regions = PileSlicer(seed=seed).apply(ctx.canvas(), ctx)
+    return make_scene(regions, np.arange(len(regions)) % 9)
+
+
+def nearby_soon(scene, rank, window: int, near: float = 1.5) -> float:
+    """Share of landings with another one within `window` landings and `near` tiles."""
+    centers = scene.center[np.argsort(rank)]
+    tile = np.sqrt(np.prod(scene.size, axis=1)).mean()
+    hit = np.zeros(len(rank), bool)
+    for w in range(1, window + 1):
+        close = np.hypot(*(centers[w:] - centers[:-w]).T) < near * tile
+        hit[w:] |= close
+        hit[:-w] |= close
+    return float(hit.mean())
+
+
+def landing_ranks(timeline) -> np.ndarray:
+    rank = np.empty(len(timeline.delay), np.int64)
+    rank[np.argsort(timeline.delay, kind="stable")] = np.arange(len(rank))
+    return rank
+
+
+@pytest.mark.parametrize("order", [o for o, _ in ORDERS])
+def test_every_order_on_a_pile_is_either_random_like_chance_or_directed(order):
+    """Random orders land close together in space and time just as often as chance has
+    it (the bottom-first rule must not clump them); directed ones follow their order.
+    A new ordering lands in one of the two groups (assemble.RANDOM_ORDERS)."""
+    from skitter.core.animation.assemble import RANDOM_ORDERS
+
+    if order in RANDOM_ORDERS:
+        for seed in (1, 2):
+            scene = big_pile(seed)
+            n = len(scene)
+            assert len(scene.overlaps) > 2 * n
+            ranks = [landing_ranks(AssembleChoreography(order=order, seed=s).timeline(scene))
+                     for s in (seed, seed + 10)]  # fmt: skip
+            shuffled = [np.random.default_rng(s).permutation(n) for s in range(4)]
+            for share in (0.017, 0.05, 0.1):  # about 0.1, 0.3 and 0.6 s of an 8 s Assemble
+                window = max(1, round(share * n))
+                got = np.mean([nearby_soon(scene, r, window) for r in ranks])
+                chance = np.mean([nearby_soon(scene, r, window) for r in shuffled])
+                assert abs(got - chance) < 0.05, (share, got, chance)
+    else:
+        scene = big_pile()
+        choreography = AssembleChoreography(order=order, spread=0.0)
+        key = choreography._order_key(scene, np.random.default_rng(0))
+        rank = landing_ranks(choreography.timeline(scene))
+        assert np.corrcoef(rank, np.argsort(np.argsort(key)))[0, 1] > 0.8
+
+
+def test_random_landing_order_is_valid_reproducible_and_uniform():
+    from skitter.core.animation import landing_order, random_landing_order
+
+    scene = big_pile()
+    n = len(scene)
+    rank = random_landing_order(scene, 3)
+    lower, upper = scene.overlaps.T
+    assert sorted(rank.tolist()) == list(range(n)) and np.all(rank[lower] < rank[upper])
+    assert np.array_equal(rank, random_landing_order(scene, 3))
+    assert not np.array_equal(rank, random_landing_order(scene, 4))
+    # Random preferences through landing_order are not a random order: tiles held back
+    # land right beside the ones they lie on (why random orders don't use it).
+    biased = landing_order(scene, np.random.default_rng(3).random(n))
+    window = max(1, n // 60)
+    chance = np.mean([nearby_soon(scene, np.random.default_rng(s).permutation(n), window)
+                      for s in range(4)])  # fmt: skip
+    assert nearby_soon(scene, biased, window) > chance + 0.2
+    assert abs(nearby_soon(scene, rank, window) - chance) < 0.06
+    # Without overlaps it is a plain random permutation.
+    grid = grid_scene(columns=20, rows=15)
+    plain = random_landing_order(grid, 1)
+    assert abs(np.corrcoef(plain, np.arange(len(grid)))[0, 1]) < 0.2
+
+
+def test_pile_landings_spread_over_the_mosaic():
+    """Consecutive landings are about as far apart as without the overlap rule: the
+    sequence doesn't climb one stack after another."""
+    from skitter.core.animation import landing_order
+    from skitter.core.slicing.operations import PileSlicer
+
+    ctx = SliceContext(np.zeros((400, 600, 3), np.uint8), MosaicLayout(columns=16), tile_width=10)
+    regions = PileSlicer().apply(ctx.canvas(), ctx)
+    scene = make_scene(regions, np.arange(len(regions)) % 9)
+    rng = np.random.default_rng(0)
+    preference = scene.distance + rng.uniform(-0.15, 0.15, len(scene))  # center outward
+
+    def median_step(rank):
+        centers = scene.center[np.argsort(rank)]
+        return np.median(np.hypot(*np.diff(centers, axis=0).T))
+
+    ideal = np.argsort(np.argsort(preference, kind="stable"), kind="stable")
+    clumped = median_step(landing_order(scene, preference, gap=0))
+    spread = median_step(landing_order(scene, preference))
+    assert clumped < 0.4 * median_step(ideal)  # what the overlap rule alone does
+    assert spread > 0.75 * median_step(ideal)
+    rank = landing_order(scene, preference)
+    assert np.corrcoef(rank, ideal)[0, 1] > 0.8  # the preferred order is kept
 
 
 def test_landing_order_on_a_pile_is_complete_and_respects_overlaps():
@@ -253,7 +365,9 @@ def test_assemble_lands_tiles_at_an_even_pace(make, motion):
 @pytest.mark.parametrize(("cls", "settings"), CONFIGS, ids=CONFIG_IDS)
 def test_every_choreography_keeps_overlapping_tiles_in_stacking_order(cls, settings):
     # If a lower tile ever drew above a tile that covers it, it would have to pop
-    # underneath later (at the latest on the last frame).
+    # underneath later (at the latest on the last frame). The one exception is a
+    # lower tile higher in the air (nearer the camera): it rightly covers the other,
+    # and their order changes only as their heights cross, continuously.
     scene = pile_scene()
     lower, upper = scene.overlaps.T
     assert len(lower)
@@ -263,7 +377,9 @@ def test_every_choreography_keeps_overlapping_tiles_in_stacking_order(cls, setti
         rank = np.empty(len(scene), np.int64)
         rank[frame.draw_order()] = np.arange(len(scene))
         visible = (frame.alpha[lower] > 0) & (frame.alpha[upper] > 0)
-        wrong = visible & (rank[upper] < rank[lower])
+        height = frame.heights()
+        nearer = height[lower] > height[upper]
+        wrong = visible & (rank[upper] < rank[lower]) & ~nearer
         assert not wrong.any(), f"{wrong.sum()} lower tiles drawn on top at {t:.2f} s"
 
 
@@ -319,6 +435,23 @@ def test_toss_bounces_lower_each_time_then_rests():
     assert timeline.duration == pytest.approx(2.0 + timeline.settle)
 
 
+def test_a_tile_landing_on_a_bouncing_one_stays_on_top():
+    from skitter.core.animation import TossTimeline
+
+    regions = RegionSet.from_rects([0, 5], 0, 10, 10)  # 1 lies on 0
+    scene = make_scene(regions, [0, 1])
+    timeline = TossTimeline(scene, scene.center, scene.rotation, [0.0, 0.1], 1.0, apex=20.0,
+                            bounce=0.6)  # fmt: skip
+    checked = 0
+    for t in np.linspace(1.1, 1.1 + timeline.settle, 60):  # 1 has landed; 0 still bouncing
+        frame = timeline.frame(t)
+        rank = np.argsort(frame.draw_order())
+        if frame.heights()[0] > frame.heights()[1]:
+            checked += 1
+        assert rank[1] > rank[0]
+    assert checked  # 0 bounced higher than 1 lay, and still drew below it
+
+
 def test_toss_settles_with_a_dying_wobble():
     scene, timeline = single_toss(bounce=0.0, wobble=0.2)
     assert timeline.settle == pytest.approx(0.3 * 2.0)
@@ -348,6 +481,130 @@ def test_table_camera_perspective_and_shadows():
     assert seen.ground.tolist() == [0] and seen.air.tolist() == [1] and seen.shadow.tolist() == [1]
     assert seen.shadow_center[0, 1] > final.center[1, 1]  # light from the top: shadow below
     assert 0 < seen.shadow_alpha[0] < 0.5 and seen.shadow_blur[0] > 0
+
+
+# Drop
+
+
+def test_drop_falls_from_rest_at_the_camera():
+    from skitter.core.animation import TossTimeline
+
+    scene = grid_scene(columns=1, rows=1)
+    timeline = TossTimeline(scene, scene.center + 5.0, scene.rotation, 0.0, 2.0, apex=50.0,
+                            start_height=50.0)  # fmt: skip
+    assert timeline.gravity == pytest.approx(2 * 50.0 / 2.0**2) and timeline.speed == 0
+    times = np.linspace(0, 2.0, 41)
+    height = np.array([timeline.frame(t).heights()[0] for t in times])
+    np.testing.assert_allclose(height, 50.0 * (1 - (times / 2.0) ** 2), atol=1e-9)
+    # Slow near the camera, fast near the table: half the fall time covers a quarter.
+    assert height[20] == pytest.approx(37.5)
+
+
+def test_drop_starts_at_the_camera_whatever_its_height():
+    from skitter.core.animation.look import AnimationLook, TableCamera, scene_extent
+
+    scene = pile_scene()
+    for camera_height in (1.0, 3.0):
+        look = AnimationLook(camera_height=camera_height)
+        timeline = AssembleChoreography(motion="drop", spread=0).timeline(scene, look)
+        camera = TableCamera.for_scene(scene, look)
+        first = int(np.argmin(timeline.delay))
+        frame = timeline.frame(timeline.delay[first] + 1e-6)
+        assert frame.heights()[first] == pytest.approx(camera_height * scene_extent(scene))
+        seen = camera.project(frame)
+        assert seen.alpha[first] == 0  # at the camera: not seen
+
+
+def test_drop_slant_starts_tiles_beside_their_spots_outward():
+    import math
+
+    from skitter.core.animation.look import NEAR, clear_of_axis
+
+    scene = pile_scene()
+    final = TileFrame.final(scene)
+    x0, y0, x1, y1 = scene.bounds
+    middle = np.array([(x0 + x1) / 2, (y0 + y1) / 2])
+    extent = max(x1 - x0, y1 - y0)
+    # Straight down, except tiles near the camera's axis: those start just far enough
+    # out to come into view beside the mosaic.
+    clear = clear_of_axis(scene)
+    least = 1.05 * clear / (1 - math.sqrt(1 - NEAR))  # sideways way it takes at most
+    straight = AssembleChoreography(motion="drop", slant=0.0).timeline(scene)
+    moved = np.hypot(*(straight.start_center - final.center).T)
+    off_axis = np.hypot(*(final.center - middle).T) > 1.1 * clear
+    assert off_axis.any() and np.all(moved[off_axis] < 1e-9)
+    assert np.all(moved <= least + 1e-9)
+    slanted = AssembleChoreography(motion="drop", slant=0.5).timeline(scene)
+    away = slanted.start_center - final.center
+    reach = np.hypot(*away.T)
+    assert np.all((reach >= 0.4 * extent - 1e-9) & (reach <= np.maximum(0.6 * extent, least)))
+    out = final.center - middle
+    far = np.hypot(*out.T) > 0.05 * extent
+    cos = (away[far] * out[far]).sum(axis=1) / (reach[far] * np.hypot(*out[far].T))
+    assert np.all(cos > np.cos(0.36))  # outward from the middle, within about 20 degrees
+
+
+@pytest.mark.parametrize("slant", [0.0, 0.25])
+def test_drops_come_into_view_off_the_picture_and_opaque(slant):
+    """No pop-in and no see-through tiles: each dropped tile becomes visible (at the
+    near plane) entirely beside the mosaic, fully opaque, and slides in from there."""
+    from skitter.core.animation.look import AnimationLook, TableCamera
+
+    scene = pile_scene()
+    look = AnimationLook()
+    timeline = AssembleChoreography(motion="drop", slant=slant).timeline(scene, look)
+    camera = TableCamera.for_scene(scene, look)
+    x0, y0, x1, y1 = scene.bounds
+    seen_before = np.zeros(len(scene), bool)
+    appeared = looming = 0
+    for t in np.linspace(0, timeline.duration, 1500):
+        frame = timeline.frame(t)
+        seen = camera.project(frame)
+        assert np.isin(seen.alpha, (0.0, 1.0)).all()  # never see-through
+        new = np.flatnonzero((seen.alpha > 0) & ~seen_before)
+        half = np.hypot(*seen.size[new].T) / 2  # reach of each rotated tile
+        cx, cy = seen.center[new].T
+        gap_x = np.maximum.reduce([x0 - cx, np.zeros_like(cx), cx - x1])
+        gap_y = np.maximum.reduce([y0 - cy, np.zeros_like(cy), cy - y1])
+        outside = np.hypot(gap_x, gap_y) > half  # the tile's circle misses the mosaic
+        assert outside.all(), f"{(~outside).sum()} tiles popped into view at {t:.2f} s"
+        appeared += len(new)
+        seen_before |= seen.alpha > 0
+        looming += np.count_nonzero((seen.alpha > 0) & (camera.scale(frame.heights()) > 3))
+    assert appeared == len(scene) and looming > 0  # all came in, looking big for a while
+
+
+def test_camera_hides_tiles_at_the_lens():
+    from skitter.core.animation.look import NEAR, AnimationLook, TableCamera
+
+    scene = grid_scene(columns=4, rows=1)
+    camera = TableCamera.for_scene(scene, AnimationLook())
+    H = camera.height
+    h = np.array([0.0, 0.5 * H, NEAR * H, 1.01 * NEAR * H, 1.2 * H])
+    frame = TileFrame.final(scene).replace(height=h[:4], rest=np.zeros(4, bool))
+    seen = camera.project(frame)
+    assert seen.alpha.tolist() == [1.0, 1.0, 1.0, 0.0]  # opaque below the near plane
+    scale = camera.scale(h)  # capped at the near plane, never infinite
+    assert np.isfinite(scale).all() and scale[-1] == pytest.approx(1 / (1 - NEAR))
+
+
+def test_throws_never_reach_the_camera():
+    from skitter.core.animation.assemble import TOSS_LIMIT
+    from skitter.core.animation.look import AnimationLook, scene_extent
+
+    scene = pile_scene()
+    look = AnimationLook(camera_height=0.5)
+    timeline = AssembleChoreography(arc=5.0).timeline(scene, look)
+    top = max(timeline.frame(t).heights().max() for t in np.linspace(0, timeline.duration, 300))
+    assert top <= TOSS_LIMIT * 0.5 * scene_extent(scene) + 1e-9
+
+
+def test_airborne_tiles_draw_nearest_the_camera_on_top():
+    scene = grid_scene(columns=3, rows=1)
+    timeline = AssembleChoreography(motion="drop", spread=0, duration=3, travel=2).timeline(scene)
+    frame = timeline.frame(1.5)
+    air = frame.draw_order()[~frame.at_rest()[frame.draw_order()]]
+    assert len(air) >= 2 and np.all(np.diff(frame.heights()[air]) >= 0)
 
 
 # Flips

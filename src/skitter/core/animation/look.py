@@ -12,6 +12,12 @@ finished mosaic.
 `TableCamera.project` turns a TileFrame into what the camera sees, in three
 draw groups: tiles at rest on the table (stacking order), shadows, and
 tiles in the air (above everything at rest).
+
+Nothing at or above the camera is seen: tiles higher than NEAR x camera
+height are hidden, and below it fully opaque. Choreographies keep tiles
+that high off the picture (`clear_of_axis`): near the camera everything
+projects far out, so a tile that isn't right under the camera's axis there
+is out of view and slides in from the picture's edge instead of popping in.
 """
 
 import math
@@ -25,7 +31,8 @@ from skitter.core.slicing.params import ColorParam, Configurable, FloatParam
 SHADOW_SLOPE = 0.6  # shadow offset per unit of height (light about 60° above the table)
 FLIP_SHADE = 0.45  # how much darker a tile is edge-on than flat (flips)
 BACK = (0.933, 0.910, 0.863)  # default back of a photo (flips)
-MAX_HEIGHT = 0.9  # heights are capped at this share of the camera height
+NEAR = 0.97  # tiles higher than this share of the camera height are not seen (33x size)
+VIEW = 1.5  # the widest view, in half diagonals of the mosaic (framing margins included)
 
 
 class AnimationLook(Configurable):
@@ -75,6 +82,15 @@ def flip_tint(frame, back: tuple[float, float, float]) -> np.ndarray:
     tint[up, :3] = np.asarray(back)[None, :] * light[up][:, None]
     tint[up, 3] = 1.0  # the back shows its own color, shaded
     return tint
+
+
+def clear_of_axis(scene: MosaicScene) -> np.ndarray:
+    """(N,) how far from the camera's axis (horizontally) each tile's center must be
+    while it is just below the near plane, for the whole tile to be off the picture."""
+    x0, y0, x1, y1 = scene.bounds
+    view = VIEW * math.hypot(x1 - x0, y1 - y0) / 2
+    reach = np.hypot(scene.size[:, 0], scene.size[:, 1]) / 2  # rotated tile, any way
+    return reach + view * (1.0 - NEAR)  # the view, seen at the near plane's size
 
 
 def scene_extent(scene: MosaicScene) -> float:
@@ -127,8 +143,12 @@ class TableCamera:
 
     def scale(self, height: np.ndarray) -> np.ndarray:
         """Apparent size factor of things at these heights."""
-        h = np.minimum(np.maximum(height, 0.0), MAX_HEIGHT * self.height)
+        h = np.minimum(np.maximum(height, 0.0), NEAR * self.height)
         return self.height / (self.height - h)
+
+    def visibility(self, height: np.ndarray) -> np.ndarray:
+        """1 below the near plane, 0 above it (no fading: tiles are never see-through)."""
+        return (np.asarray(height, np.float64) <= NEAR * self.height).astype(np.float64)
 
     def project(self, frame) -> Projected:
         """A TileFrame as seen from the camera (see the module docstring)."""
@@ -147,7 +167,7 @@ class TableCamera:
             center=center,
             size=frame.size * scale[:, None],
             rotation=frame.rotation,
-            alpha=frame.alpha,
+            alpha=frame.alpha * self.visibility(height),
             tint=flip_tint(frame, self.back),
             ground=ground,
             air=air,

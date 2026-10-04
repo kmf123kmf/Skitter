@@ -19,6 +19,7 @@ Animation = Callable[[float], bool]
 
 VIEW_ANIMATION_S = 0.2
 WHEEL_ZOOM_STEP = 1.15
+CLICK_SLOP = 4  # logical pixels a click may move and still not be a drag
 CHECKER_PX = 8  # checkerboard square size, logical pixels (transparent backgrounds)
 
 _CHECKER_VERTEX = """
@@ -71,6 +72,7 @@ class MosaicCanvas(QOpenGLWidget):
     cursor_moved = Signal(float, float)  # world coordinates under the mouse
     cursor_left = Signal()
     double_clicked = Signal(float, float)  # screen coordinates
+    clicked = Signal(float, float)  # world coordinates of a left click (not a drag)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -94,6 +96,7 @@ class MosaicCanvas(QOpenGLWidget):
         self._view_token: object | None = None
         self._fbo: moderngl.Framebuffer | None = None
         self._drag_pos: QPointF | None = None
+        self._press_pos: QPointF | None = None
         self._fps_frames = 0
         self._fps_start = time.perf_counter()
 
@@ -311,6 +314,8 @@ class MosaicCanvas(QOpenGLWidget):
     def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() in (Qt.MouseButton.LeftButton, Qt.MouseButton.MiddleButton):
             self._drag_pos = event.position()
+            left = event.button() == Qt.MouseButton.LeftButton
+            self._press_pos = event.position() if left else None
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
         else:
             event.ignore()
@@ -324,8 +329,14 @@ class MosaicCanvas(QOpenGLWidget):
             self.set_view(cam.center - np.array([delta.x(), delta.y()]) / cam.zoom, cam.zoom)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
+        press, self._press_pos = self._press_pos, None
         self._drag_pos = None
         self.unsetCursor()
+        if press is not None and event.button() == Qt.MouseButton.LeftButton:
+            moved = event.position() - press
+            if abs(moved.x()) + abs(moved.y()) <= CLICK_SLOP:
+                x, y = self.camera.screen_to_world(event.position().x(), event.position().y())
+                self.clicked.emit(float(x), float(y))
 
     def mouseDoubleClickEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.MouseButton.LeftButton:

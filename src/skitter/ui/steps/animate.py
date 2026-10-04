@@ -57,6 +57,7 @@ class AnimateStep(StepPage):
         super().__init__(session, parent)
         self.scene: MosaicScene | None = None
         self.textures: TileTextures | None = None
+        self._stale = False  # manual picks changed the mosaic while this tab was hidden
 
         self.canvas = MosaicCanvas()
         self.player = TimelinePlayer(self.canvas, self)
@@ -80,6 +81,7 @@ class AnimateStep(StepPage):
         )
 
         session.matching_changed.connect(self._load_scene)
+        session.mosaic_edited.connect(self._on_mosaic_edited)
         session.animation_changed.connect(self._on_animation_changed)
         for signal in session.export_signals():
             signal.connect(self._refresh_export)
@@ -181,18 +183,30 @@ class AnimateStep(StepPage):
     def is_complete(self) -> bool:
         return self.scene is not None
 
+    def on_enter(self) -> None:
+        if self._stale:
+            self._load_scene()
+
     def on_leave(self) -> None:
         self.player.pause()
+
+    def _on_mosaic_edited(self, regions) -> None:
+        if self.isVisible():
+            self._load_scene()
+        else:
+            self._stale = True
 
     # Scene
 
     def _load_scene(self) -> None:
         scene = self.session.scene
+        self._stale = False
         if scene is self.scene:
             return
         self.player.pause()
         if self.textures is not None:
             self.textures.changed.disconnect(self._on_textures)
+            self.textures.patched.disconnect(self._on_textures)
             self.textures.status_changed.disconnect(self.status.setText)
         self.scene, self.textures = scene, self.session.textures
         if scene is None or self.textures is None or not len(scene):
@@ -204,9 +218,10 @@ class AnimateStep(StepPage):
             self.state_changed.emit()
             return
         self.textures.changed.connect(self._on_textures)
+        self.textures.patched.connect(self._on_textures)  # crops for picks read meanwhile
         self.textures.status_changed.connect(self.status.setText)
         self.status.setText(self.textures.status)
-        timeline = self.choreography.timeline(scene)
+        timeline = self.choreography.timeline(scene, self.project.animation_look)
         self.player.set_timeline(timeline, time=timeline.duration)  # open on the finished mosaic
         self.player.set_camera(TableCamera.for_scene(scene, self.project.animation_look))
         self.player.set_content(self.textures.pages, self.textures.instances())
@@ -214,7 +229,9 @@ class AnimateStep(StepPage):
         self._fit()
         self.state_changed.emit()
 
-    def _on_textures(self) -> None:
+    def _on_textures(self, *_) -> None:
+        if not self.isVisible() and self._stale:
+            return  # reloaded on entering
         self.player.set_content(self.textures.pages, self.textures.instances())
 
     def _show_choreography(self) -> None:
@@ -241,7 +258,7 @@ class AnimateStep(StepPage):
         if self.scene is None:
             return
         at_end = self.player.time >= self.player.duration
-        timeline = self.choreography.timeline(self.scene)
+        timeline = self.choreography.timeline(self.scene, self.project.animation_look)
         self.player.set_timeline(timeline, timeline.duration if at_end else None)
 
     # Look and export frame

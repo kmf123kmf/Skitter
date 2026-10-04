@@ -56,7 +56,7 @@ def run_video_job(job: VideoJob, progress, cancelled) -> VideoReport:
     start = time.perf_counter()
     plan, settings = job.plan, job.settings
     fmt = settings.video_format
-    timeline = job.choreography.timeline(job.scene)
+    timeline = job.choreography.timeline(job.scene, job.look)
 
     def report_textures(message, fraction):
         progress(message, None if fraction is None else 0.08 * fraction)

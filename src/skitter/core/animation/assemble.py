@@ -1,4 +1,4 @@
-"""Built-in choreography: tiles fly in from all around and land in place."""
+"""Built-in choreography: tiles fly in from all around, or fall from the camera, and land."""
 
 import math
 
@@ -12,12 +12,20 @@ from skitter.core.animation.base import (
     Timeline,
     TossTimeline,
     landing_order,
+    random_landing_order,
     register_choreography,
 )
-from skitter.core.animation.look import scene_extent
+from skitter.core.animation.look import NEAR, AnimationLook, clear_of_axis, scene_extent
 from skitter.core.easing import ease_out_back, ease_out_cubic
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import BoolParam, ChoiceParam, FloatParam, IntParam
+
+TOSS_LIMIT = 0.8  # throws peak at most this share of the camera height (5x size)
+
+# Orders without a direction: they land in a uniformly random bottom-first order
+# (random_landing_order), never through landing_order (see base.py). A new
+# ordering must be listed here if it is random; tests hold both kinds to account.
+RANDOM_ORDERS = frozenset({"random"})
 
 ORDERS = (
     ("center", "Center outward"),
@@ -35,14 +43,17 @@ class AssembleChoreography(Choreography):
     name = "Assemble"
     description = (
         "Tiles fly in from all around the mosaic, spinning, and land in place: tossed "
-        "onto the table under gravity (with bounces and a settling wobble), or gliding "
-        "in. Overlapping tiles always land bottom first."
+        "onto the table under gravity (with bounces and a settling wobble), dropped "
+        "from the camera, or gliding in. Overlapping tiles always land bottom first."
     )
 
     motion = ChoiceParam(
-        "toss", "Motion", choices=[("toss", "Toss (gravity)"), ("glide", "Glide")],
+        "toss", "Motion",
+        choices=[("toss", "Toss (gravity)"), ("drop", "Drop (from the camera)"),
+                 ("glide", "Glide")],
         help="Toss: thrown in an arc, falling faster and faster onto the table, then "
-             "bouncing. Glide: slides in flat and slows to a stop.",
+             "bouncing. Drop: falls from beside the camera, looming large at first and "
+             "shrinking onto its spot. Glide: slides in flat and slows to a stop.",
     )  # fmt: skip
 
     order = ChoiceParam("center", "Order", choices=ORDERS, help="Which tiles land first.")
@@ -56,11 +67,21 @@ class AssembleChoreography(Choreography):
     )  # fmt: skip
     spread = FloatParam(
         0.15, "Spread", min=0.0, max=1.0, step=0.05,
+        when=lambda c: c.order not in RANDOM_ORDERS,
         help="Randomness in the landing order, as a share of the whole sequence.",
     )  # fmt: skip
     distance = FloatParam(
         1.5, "Distance", min=0.0, max=10.0, step=0.25, suffix=" × mosaic",
+        when=lambda c: c.motion != "drop",
         help="How far out tiles start, in mosaic sizes from the center.",
+    )  # fmt: skip
+    slant = FloatParam(
+        0.25, "Slant", min=0.0, max=3.0, step=0.05, suffix=" × mosaic",
+        when=lambda c: c.motion == "drop",
+        help="How far beside its spot a tile starts, outward from the middle. 0 drops "
+             "straight down (tiles near the middle start just far enough out to come in "
+             "from the edge): they loom huge and cover the view. More slides tiles in "
+             "from the edges of the picture, smaller when they appear.",
     )  # fmt: skip
     spin = FloatParam(1.0, "Spin", min=0.0, max=20.0, step=0.25, suffix=" turns")
     flips = IntParam(
@@ -75,13 +96,13 @@ class AssembleChoreography(Choreography):
              "gravity follows from this and the flight time.",
     )  # fmt: skip
     bounce = FloatParam(
-        0.3, "Bounce", min=0.0, max=0.8, step=0.05, when=lambda c: c.motion == "toss",
+        0.3, "Bounce", min=0.0, max=0.8, step=0.05, when=lambda c: c.motion != "glide",
         help="How springy a landing is: each bounce keeps this share of the speed "
              "(0: no bounce).",
     )  # fmt: skip
     wobble = FloatParam(
         4.0, "Settle wobble", min=0.0, max=30.0, step=1.0, decimals=0, suffix="°",
-        when=lambda c: c.motion == "toss",
+        when=lambda c: c.motion != "glide",
         help="A small rocking turn that dies away after landing.",
     )  # fmt: skip
     shrink = FloatParam(
@@ -95,15 +116,23 @@ class AssembleChoreography(Choreography):
     )  # fmt: skip
     seed = IntParam(1, "Seed", min=0, max=999_999)
 
-    def timeline(self, scene: MosaicScene) -> Timeline:
+    def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:
         n = len(scene)
         rng = np.random.default_rng(self.seed)
-        apex = self.arc * scene_extent(scene)
+        look = look if look is not None else AnimationLook()
+        extent = scene_extent(scene)
+        drop = self.motion == "drop"
+        camera = look.camera_height * extent
+        start_height = camera if drop else 0.0  # at the camera, at rest
+        # A throw never reaches the camera (it would pass the lens and pop into view).
+        apex = start_height if drop else min(self.arc * extent, TOSS_LIMIT * camera)
         wobble = math.radians(self.wobble)
         # Bouncing and settling take a fixed share of the flight time; a tile's whole
         # trip must fit in the duration.
         share = (
-            TossTimeline.settle_time(1.0, apex, self.bounce, wobble) if self.motion == "toss" else 0
+            TossTimeline.settle_time(1.0, apex, self.bounce, wobble, start_height)
+            if self.motion != "glide"
+            else 0
         )
         travel = min(self.travel, self.duration / (1.0 + share))
         settle = share * travel
@@ -111,11 +140,14 @@ class AssembleChoreography(Choreography):
 
         # Preferred place in the sequence (0..1), loosened by the spread; overlapping
         # tiles still land bottom first. Landings are evenly paced.
-        key = self._order_key(scene, rng)
-        preferred = np.empty(n)
-        preferred[np.argsort(key, kind="stable")] = np.linspace(0.0, 1.0, n) if n else []
-        preferred += rng.uniform(-1.0, 1.0, n) * self.spread
-        order = landing_order(scene, preferred)
+        if self.order in RANDOM_ORDERS:  # uniformly random among bottom-first orders
+            order = random_landing_order(scene, self.seed)
+        else:
+            key = self._order_key(scene, rng)
+            preferred = np.empty(n)
+            preferred[np.argsort(key, kind="stable")] = np.linspace(0.0, 1.0, n) if n else []
+            preferred += rng.uniform(-1.0, 1.0, n) * self.spread
+            order = landing_order(scene, preferred)
         delay = order / max(n - 1, 1) * window
 
         x0, y0, x1, y1 = scene.bounds
@@ -129,9 +161,11 @@ class AssembleChoreography(Choreography):
         flips = Flips(  # random direction and edge per tile, always whole turns
             turns=self.flips * rng.choice([-1.0, 1.0], n), axis=rng.integers(0, 2, n)
         )
-        if self.motion == "toss":
+        if drop:
+            start_center = self._drop_starts(scene, final, middle, extent, rng)
+        if self.motion != "glide":
             return TossTimeline(scene, start_center, start_rotation, delay, travel, apex,
-                                self.bounce, wobble, flips)  # fmt: skip
+                                self.bounce, wobble, flips, start_height)  # fmt: skip
         start = final.replace(
             center=start_center,
             size=final.size * self.shrink,
@@ -140,6 +174,30 @@ class AssembleChoreography(Choreography):
         )
         easing = ease_out_back if self.overshoot else ease_out_cubic
         return FlightTimeline(scene, start, delay, travel, easing=easing, flips=flips)
+
+    def _drop_starts(self, scene, final: TileFrame, middle, extent: float, rng) -> np.ndarray:
+        """Where dropped tiles start: beside their spots by the slant, outward from the
+        middle (the camera's axis), a little varied, and always far enough out to be off
+        the picture when they come into view below the near plane (see look.py)."""
+        n = len(final)
+        out = final.center - middle
+        angle = np.where(
+            np.hypot(out[:, 0], out[:, 1]) > 1e-9 * extent,
+            np.arctan2(out[:, 1], out[:, 0]),
+            rng.uniform(0.0, 2 * math.pi, n),  # right under the camera: any way
+        )
+        angle = angle + rng.uniform(-0.35, 0.35, n)  # about 20 degrees either way
+        way = np.stack([np.cos(angle), np.sin(angle)], axis=1)
+        reach = self.slant * extent * rng.uniform(0.8, 1.2, n)
+        # Falling from rest, a tile is at the near plane after this share of its fall,
+        # still this share of its sideways way from its spot.
+        left = 1.0 - math.sqrt(1.0 - NEAR)
+        # Smallest k = reach x left with |out + k way| >= clear (a little to spare).
+        clear = 1.05 * clear_of_axis(scene)
+        along = (out * way).sum(axis=1)
+        k = -along + np.sqrt(np.maximum(along**2 - (out**2).sum(axis=1) + clear**2, 0.0))
+        reach = np.maximum(reach, np.maximum(k, 0.0) / left)
+        return final.center + reach[:, None] * way
 
     def _order_key(self, scene: MosaicScene, rng: np.random.Generator) -> np.ndarray:
         if self.order == "center":

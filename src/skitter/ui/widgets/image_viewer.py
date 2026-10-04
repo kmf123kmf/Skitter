@@ -104,6 +104,7 @@ class ImageViewer(QWidget):
         self._dimming = 0.0
         self._world_size: tuple[float, float] | None = None  # None: image pixels
         self._content_bounds: tuple[float, float, float, float] | None = None
+        self.double_click_zooms = True  # double-click toggles fit / actual size
 
         self.canvas = MosaicCanvas()
         self.canvas.clamp_to_bounds = True
@@ -214,6 +215,8 @@ class ImageViewer(QWidget):
         self.fit_action.setChecked(True)
 
     def _on_double_click(self, x: float, y: float) -> None:
+        if not self.double_click_zooms:
+            return
         if self.canvas.fit_mode:
             self.set_zoom_percent(100, anchor=(x, y))
         else:

@@ -21,6 +21,9 @@ from numba import njit
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.slicing import SliceContext
 
+# Cached properties that depend only on where tiles lie (kept by with_result).
+GEOMETRY = ("corners", "bounds", "position", "distance", "angle", "reading_order", "overlaps")
+
 
 @dataclass(frozen=True, eq=False)
 class MosaicScene:
@@ -69,6 +72,18 @@ class MosaicScene:
 
     def __len__(self) -> int:
         return len(self.region)
+
+    def with_result(self, result: MatchResult, ctx: SliceContext) -> "MosaicScene":
+        """The scene of an edited result (other tiles picked, same regions placed).
+
+        Geometry, and what is cached from it, carries over.
+        """
+        scene = MosaicScene.from_result(result, ctx)
+        if np.array_equal(scene.region, self.region):
+            for name in GEOMETRY:
+                if name in self.__dict__:
+                    scene.__dict__[name] = self.__dict__[name]
+        return scene
 
     # Display
 

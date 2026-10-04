@@ -529,6 +529,266 @@ def choose(combo, value) -> None:
     combo.setCurrentIndex(combo.findData(value))
 
 
+def matched(window, photos, qapp):
+    """The Matching tab showing a finished mosaic at full detail."""
+    build_library(window, photos)
+    window.next_button.click()  # Tiles
+    window.next_button.click()  # Matching
+    step = matching_step(window)
+    window.session.project.match_settings.update(refine_seconds=0.3, adaptive_rounds=1)
+    step.run_matching()
+    window.session.wait_for_job()
+    window.session.textures.wait()
+    qapp.processEvents()
+    return step
+
+
+def click_region(step, r):
+    x, y = step.session.project.matches.regions.center[r]
+    step.viewer.canvas.clicked.emit(float(x), float(y))
+
+
+def test_edit_mode_picks_tiles_by_hand(sliced, photos, qapp):
+    from skitter.ui.steps.animate import AnimateStep
+
+    window = sliced
+    step = matched(window, photos, qapp)
+    session = window.session
+    result = session.project.matches
+    picker, overlays = step.picker, step.overlays
+    assert picker.edit_button.isEnabled() and not step.editing
+    click_region(step, 0)  # not editing: clicks do nothing
+    assert step.selected < 0
+
+    step.set_editing(True)
+    assert step.editing and picker.edit_button.isChecked() and step.settings_group.isHidden()
+    assert "Click a tile" in picker.hint.text()
+    # Hovering an editable tile outlines it.
+    x, y = result.regions.center[5]
+    step.viewer.canvas.cursor_moved.emit(float(x), float(y))
+    assert len(overlays.hover.instances) == 1
+    np.testing.assert_allclose(overlays.hover.instances["pos"][0], result.regions.center[5])
+
+    # Selecting a tile lists its remembered candidates, best first, the shown one framed.
+    click_region(step, 0)
+    assert step.selected == 0 and not picker.grid.isHidden()
+    items = picker.grid.items
+    refs, _ = result.candidates.ranked(0)
+    assert len(items) == len(refs) == 32
+    assert [i.rank for i in items[:3]] == ["1", "2", "3"]
+    current = [i for i, item in enumerate(items) if item.current]
+    assert len(current) == 1 and items[current[0]].auto
+    assert all(item.image is not None and item.tooltip for item in items)
+    assert len(overlays.select.instances) == 1 and len(overlays.dim.instances) == 1
+    tile = int(step._tile_of[0])
+    assert (
+        overlays.cover.instances["pos"][0].tolist()
+        == step._tile_layer.instances["pos"][tile].tolist()
+    )
+    assert picker.target.pixmap() is not None and not picker.target.pixmap().isNull()
+
+    # Hovering a candidate previews it in place; leaving restores the tile shown now.
+    other = next(i for i, item in enumerate(items) if not item.current)
+    picker.grid.hovered.emit(other)
+    assert step._previewing == other and len(overlays.preview.instances) == 1
+    assert "Preview" in picker.info.text()
+    picker.grid.hovered.emit(-1)
+    assert step._previewing == -1 and len(overlays.preview.instances) == 0
+
+    # Picking it: the mosaic, scene, stats and markers update; the matcher's choice is kept.
+    picker.grid.activated.emit(other)
+    edited = session.project.matches
+    slot = result.candidates.crops(0, [refs[other]])[0][0]
+    assert edited is not result and edited.tile[0] == slot and edited.manual[0]
+    assert session.scene.slot[tile] == slot and session.scene.result is edited
+    assert step._labels["picks"].text() == "1" and len(overlays.markers.instances) == 1
+    assert "Picked: ΔE" in picker.info.text() and picker.revert_button.isEnabled()
+    assert [i for i, item in enumerate(picker.grid.items) if item.current] == [other]
+    assert step.undo_action.isEnabled() and not step.redo_action.isEnabled()
+    np.testing.assert_allclose(
+        step._tile_layer.instances["uv"], session.textures.instances()["uv"]
+    )  # fmt: skip
+    # Its full-size crop is read in the background and patched into the pages in place.
+    pages = session.textures.pages
+    session.textures.wait()
+    qapp.processEvents()
+    assert session.textures.pages is pages
+    uv = step._tile_layer.instances["uv"][tile]
+    texels = np.abs(uv[2:] - uv[:2]) * pages.shape[1] + 1
+    np.testing.assert_allclose(texels, np.ceil(result.regions.size[0]), atol=1e-3)
+
+    # Undo, redo, revert.
+    step.undo_action.trigger()
+    assert session.project.matches.tile[0] == result.tile[0]
+    assert not session.project.matches.manual[0] and step._labels["picks"].text() == "0"
+    step.redo_action.trigger()
+    assert session.project.matches.tile[0] == slot and session.manual_picks == 1
+    picker.revert_button.click()
+    assert session.project.matches.tile[0] == result.tile[0] and session.manual_picks == 0
+
+    # Picking the matcher's own choice is a revert, not a manual pick.
+    picker.grid.activated.emit(other)
+    auto = next(i for i, item in enumerate(picker.grid.items) if item.auto)
+    picker.grid.activated.emit(auto)
+    assert session.manual_picks == 0
+
+    # Find more lists the next best tiles.
+    picker.more_button.click()
+    assert len(picker.grid.items) > 32
+
+    # The edited mosaic is what Animate shows.
+    picker.grid.activated.emit(other)
+    animate = window.step(AnimateStep)
+    window.tabs.setCurrentWidget(animate)
+    qapp.processEvents()
+    assert animate.scene is session.scene and animate.scene.slot[tile] == slot
+    window.tabs.setCurrentWidget(step)
+
+    # Esc: deselect, then leave edit mode.
+    step.escape()
+    assert step.selected < 0 and step.editing
+    step.escape()
+    assert not step.editing and not step.settings_group.isHidden()
+    assert len(overlays.markers.instances) == 0
+
+
+def test_double_click_edits_a_tile(sliced, photos, qapp):
+    window = sliced
+    step = matched(window, photos, qapp)
+    canvas = step.viewer.canvas
+    view = (canvas.camera.center.copy(), canvas.camera.zoom)
+    x, y = step.session.project.matches.regions.center[7]
+    sx, sy = canvas.camera.world_to_screen(float(x), float(y))
+    canvas.double_clicked.emit(float(sx), float(sy))
+    assert step.editing and step.selected == 7
+    assert np.allclose(canvas.camera.center, view[0]) and canvas.camera.zoom == view[1]
+    # While editing it selects another tile; off the mosaic it does nothing.
+    x, y = step.session.project.matches.regions.center[12]
+    canvas.double_clicked.emit(*map(float, canvas.camera.world_to_screen(float(x), float(y))))
+    assert step.selected == 12
+    canvas.double_clicked.emit(-5000.0, -5000.0)
+    assert step.editing and step.selected == 12
+
+    # Double-clicking a candidate picks it and leaves edit mode.
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    grid = step.picker.grid
+    grid.resize(280, grid.height())
+    grid._fit_height()
+    other = next(i for i, item in enumerate(grid.items) if not item.current)
+    ref = int(step._refs[other])
+    QTest.mouseDClick(grid, Qt.MouseButton.LeftButton, pos=grid._cell(other).center().toPoint())
+    result = step.session.project.matches
+    assert result.choice[12] == ref and result.manual[12]
+    assert not step.editing and step.selected < 0
+    assert step.session.can_undo_pick
+
+
+def test_matching_again_asks_whether_to_keep_picks(sliced, photos, qapp):
+    window = sliced
+    step = matched(window, photos, qapp)
+    session = window.session
+    step.set_editing(True)
+    click_region(step, 3)
+    other = next(i for i, item in enumerate(step.picker.grid.items) if not item.current)
+    step.picker.grid.activated.emit(other)
+    slot = session.project.matches.tile[3]
+    asked = []
+
+    def answer(value):
+        def ask(count):
+            asked.append(count)
+            return value
+
+        return ask
+
+    step.ask_keep_picks = answer(None)  # Cancel: nothing happens
+    step.run_matching()
+    assert asked == [1] and session.busy is None and step.editing
+
+    step.ask_keep_picks = answer(True)
+    step.run_matching()
+    assert session.busy == "matching" and not step.editing
+    session.wait_for_job()
+    kept = session.project.matches
+    assert kept.tile[3] == slot and kept.manual[3] and session.manual_picks == 1
+
+    step.ask_keep_picks = answer(False)
+    step.run_matching()
+    session.wait_for_job()
+    assert session.manual_picks == 0 and asked == [1, 1, 1]
+
+    step.ask_keep_picks = answer(True)  # no picks: no question
+    step.run_matching()
+    session.wait_for_job()
+    assert asked == [1, 1, 1]
+
+
+def test_long_file_names_never_resize_the_side_panel(sliced, tmp_path, qapp):
+    folder = tmp_path / "long names"
+    folder.mkdir()
+    rng = np.random.default_rng(1)
+    for i, color in enumerate(rng.integers(0, 256, (40, 3))):
+        name = f"{i:02d}_" + "a_very_long_file_name_without_any_spaces_" * 4 + ".png"
+        Image.new("RGB", (60 + 30 * (i % 2), 60), tuple(int(c) for c in color)).save(folder / name)
+    window = sliced
+    window.resize(1200, 800)
+    window.show()
+    step = matched(window, folder, qapp)
+    step.set_editing(True)
+    click_region(step, 0)
+    qapp.processEvents()
+    panel = step.picker.parentWidget()
+    sizes = set()
+    for index in range(len(step.picker.grid.items)):
+        step.picker.grid.hovered.emit(index)
+        x, y = step.session.project.matches.regions.center[index % 6]
+        step.viewer.canvas.cursor_moved.emit(float(x), float(y))
+        qapp.processEvents()
+        sizes.add((panel.width(), step.picker.width(), step.picker.info.height(),
+                   step._hover.width()))  # fmt: skip
+        assert "…" in step.picker.info.text() and "…" in step._hover.text()
+    assert len(sizes) == 1
+    window.hide()
+
+
+def test_candidate_grid_keyboard_and_painting(qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtGui import QColor, QImage
+    from PySide6.QtTest import QTest
+
+    from skitter.ui.widgets.candidate_grid import ACCENT, CandidateGrid, CandidateItem
+
+    grid = CandidateGrid()
+    grid.resize(280, 10)
+    gray = QImage(8, 8, QImage.Format.Format_RGB888)
+    gray.fill(QColor(128, 128, 128))
+    items = [CandidateItem(gray, str(i + 1), warning="!" if i % 2 else "") for i in range(6)]
+    items[1].current = True
+    grid.set_items(items, aspect=1.5)
+    assert grid.height() > 2 * grid._cell_size()[1]  # two rows of square cells
+    hovered, activated = [], []
+    grid.hovered.connect(hovered.append)
+    grid.activated.connect(activated.append)
+    grid.setFocus()
+    QTest.keyClick(grid, Qt.Key.Key_Right)  # from the current one
+    QTest.keyClick(grid, Qt.Key.Key_Down)
+    assert hovered == [2, 5] and grid.preview_index == 5
+    QTest.keyClick(grid, Qt.Key.Key_Return)
+    assert activated == [5]
+    QTest.keyClick(grid, Qt.Key.Key_Escape)  # stops previewing first
+    assert hovered[-1] == -1 and grid.preview_index == -1
+
+    # Frames never fill a cell: the crop shows through (badges draw only in corners).
+    image = grid.grab().toImage()
+    for index in (1, 3):  # the current one, and one with a warning badge
+        center = grid._cell(index).center().toPoint()
+        assert image.pixelColor(center) == QColor(128, 128, 128)
+    cell = grid._cell(1)  # the current one is framed in the accent color
+    assert image.pixelColor(int(cell.left()) + 1, int(cell.center().y())) == ACCENT
+
+
 def test_matching_can_be_cancelled(sliced, photos):
     window = sliced
     build_library(window, photos)

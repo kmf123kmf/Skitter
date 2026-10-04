@@ -45,6 +45,54 @@ class CandidateSet:
     def __len__(self) -> int:
         return len(self.tile)
 
+    def find(self, tile, rect, mirrored) -> np.ndarray:
+        """Index of each given crop in this set (-1: not in it)."""
+        tile = np.asarray(tile, dtype=np.int64)
+        out = np.full(len(tile), -1, np.int64)
+        if not len(tile) or not len(self):
+            return out
+        by_tile = np.argsort(self.tile, kind="stable")
+        sorted_tile = self.tile[by_tile]
+        for i, (t, r, m) in enumerate(zip(tile, np.asarray(rect), np.asarray(mirrored, bool),
+                                          strict=True)):  # fmt: skip
+            lo, hi = np.searchsorted(sorted_tile, t), np.searchsorted(sorted_tile, t, side="right")
+            same = by_tile[lo:hi]
+            near = np.abs(self.rect[same] - r).max(axis=1) < 1e-4
+            hit = same[near & (self.mirrored[same] == m)]
+            if len(hit):
+                out[i] = hit.min()
+        return out
+
+    def with_crops(
+        self, library: TileLibrary, tile, rect, mirrored
+    ) -> tuple["CandidateSet", np.ndarray]:
+        """This set plus the given crops (those it lacks), and each crop's index.
+
+        Used for manual picks kept across matching runs: a crop picked under
+        other settings (more crops, mirroring) may not be in this set.
+        """
+        tile = np.asarray(tile, dtype=np.int64)
+        rect = np.asarray(rect, dtype=np.float32).reshape(-1, 4)
+        mirrored = np.asarray(mirrored, bool)
+        index = self.find(tile, rect, mirrored)
+        new = np.flatnonzero(index < 0)
+        if not len(new):
+            return self, index
+        order = new[np.argsort(tile[new], kind="stable")]  # tile_descriptors wants tile order
+        desc = tile_descriptors(library.thumbs, library.thumb_size, tile[order], rect[order])
+        desc[mirrored[order]] = mirror(desc[mirrored[order]])
+        retained = np.prod(rect[order, 2:] - rect[order, :2], axis=1)
+        index[order] = len(self) + np.arange(len(order))
+        extended = CandidateSet(
+            self.aspect,
+            np.concatenate([self.tile, tile[order]]),
+            np.concatenate([self.rect, rect[order]]),
+            np.concatenate([self.mirrored, mirrored[order]]),
+            np.concatenate([self.retained, retained.astype(np.float32)]),
+            np.concatenate([self.desc, desc.astype(np.float16)]),
+        )
+        return extended, index
+
 
 def build_candidates(
     library: TileLibrary, aspect: float, crops: int = 3, mirrored: bool = False
@@ -163,3 +211,35 @@ def exact_best(
         better = c < best_cost
         best[better], best_cost[better] = lo + i[better], c[better]
     return best, best_cost
+
+
+def exact_top(
+    cands: CandidateSet,
+    desc: np.ndarray,
+    weights: np.ndarray,
+    crop_penalty: float,
+    count: int,
+    chunk: int = 131_072,
+) -> tuple[np.ndarray, np.ndarray]:
+    """The `count` cheapest candidates for one region, searching every candidate exactly.
+
+    desc, weights: (DIM,) the region's target and cost weights (region_weights).
+    Returns (ids, costs), best first.
+    """
+    q = np.asarray(desc, dtype=np.float32)
+    w = np.asarray(weights, dtype=np.float32)
+    penalty = crop_penalty * CROP_PENALTY_SCALE * (1.0 - cands.retained)
+    best_ids = np.zeros(0, np.int64)
+    best_costs = np.zeros(0, np.float32)
+    for lo in range(0, len(cands), chunk):
+        x = cands.desc[lo : lo + chunk].astype(np.float32)
+        cost = ((x - q) ** 2 @ w + penalty[lo : lo + chunk]).astype(np.float32)
+        keep = min(count, len(cost))
+        top = np.argpartition(cost, keep - 1)[:keep] if keep < len(cost) else np.arange(len(cost))
+        best_ids = np.concatenate([best_ids, lo + top])
+        best_costs = np.concatenate([best_costs, cost[top]])
+        if len(best_ids) > count:
+            keep = np.argpartition(best_costs, count - 1)[:count]
+            best_ids, best_costs = best_ids[keep], best_costs[keep]
+    order = np.argsort(best_costs, kind="stable")
+    return best_ids[order], best_costs[order]

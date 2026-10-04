@@ -58,6 +58,61 @@ class Raster:
         return out
 
 
+@dataclass(frozen=True)
+class RasterGrid:
+    """Where a raster's pixels lie: windows of it paint exactly the same pixels."""
+
+    origin: tuple[float, float]
+    px: float
+    shape: tuple[int, int]  # (height, width)
+
+    @classmethod
+    def of(
+        cls,
+        regions: RegionSet,
+        bounds: tuple[float, float, float, float] | None = None,
+        px: float | None = None,
+        max_pixels: int = MAX_RASTER_PIXELS,
+    ) -> "RasterGrid":
+        """The grid `rasterize` uses for these arguments."""
+        if bounds is None:
+            b = regions.bounds()
+            empty = (0, 0, 1, 1)
+            bounds = (*b[:, :2].min(axis=0), *b[:, 2:].max(axis=0)) if len(regions) else empty
+        x0, y0, x1, y1 = (float(v) for v in bounds)
+        area = max(x1 - x0, 1e-9) * max(y1 - y0, 1e-9)
+        if px is None:
+            smallest = float(regions.size.min()) if len(regions) else 1.0
+            px = smallest / 4
+        px = max(px, math.sqrt(area / max_pixels), 1e-9)
+        width = max(1, math.ceil((x1 - x0) / px))
+        height = max(1, math.ceil((y1 - y0) / px))
+        return cls((x0, y0), px, (height, width))
+
+    def pixels(self, x0: float, y0: float, x1: float, y1: float) -> tuple[int, int, int, int]:
+        """Pixel range (i0, j0, i1, j1) covering a world rect, clipped to the grid."""
+        (ox, oy), px, (h, w) = self.origin, self.px, self.shape
+        return (
+            min(max(int(math.floor((x0 - ox) / px)), 0), w),
+            min(max(int(math.floor((y0 - oy) / px)), 0), h),
+            min(max(int(math.ceil((x1 - ox) / px)), 0), w),
+            min(max(int(math.ceil((y1 - oy) / px)), 0), h),
+        )
+
+    def paint(self, regions: RegionSet, i0: int = 0, j0: int = 0, i1=None, j1=None) -> Raster:
+        """Pixels [j0:j1, i0:i1] of the raster (all of it by default)."""
+        h, w = self.shape
+        i1, j1 = w if i1 is None else i1, h if j1 is None else j1
+        x0, y0 = self.origin[0] + i0 * self.px, self.origin[1] + j0 * self.px
+        ids = np.full((max(j1 - j0, 0), max(i1 - i0, 0)), -1, np.int32)
+        if len(regions) and ids.size:
+            _paint(
+                ids, regions.stacking_order().astype(np.int64), regions.center, regions.size,
+                regions.rotation, x0, y0, self.px,
+            )  # fmt: skip
+        return Raster(ids, (x0, y0), self.px)
+
+
 def rasterize(
     regions: RegionSet,
     bounds: tuple[float, float, float, float] | None = None,
@@ -69,21 +124,4 @@ def rasterize(
     bounds defaults to all regions' extent. px defaults to a quarter of the
     smallest region side, coarser if needed to stay within max_pixels.
     """
-    if bounds is None:
-        b = regions.bounds()
-        bounds = (*b[:, :2].min(axis=0), *b[:, 2:].max(axis=0)) if len(regions) else (0, 0, 1, 1)
-    x0, y0, x1, y1 = (float(v) for v in bounds)
-    area = max(x1 - x0, 1e-9) * max(y1 - y0, 1e-9)
-    if px is None:
-        smallest = float(regions.size.min()) if len(regions) else 1.0
-        px = smallest / 4
-    px = max(px, math.sqrt(area / max_pixels), 1e-9)
-    width = max(1, math.ceil((x1 - x0) / px))
-    height = max(1, math.ceil((y1 - y0) / px))
-    ids = np.full((height, width), -1, np.int32)
-    if len(regions):
-        _paint(
-            ids, regions.stacking_order().astype(np.int64), regions.center, regions.size,
-            regions.rotation, x0, y0, px,
-        )  # fmt: skip
-    return Raster(ids, (x0, y0), px)
+    return RasterGrid.of(regions, bounds, px, max_pixels).paint(regions)

@@ -15,6 +15,7 @@ from skitter.core.animation.base import (
     choreography_types,
     get_choreography,
     landing_order,
+    random_landing_order,
     register_choreography,
 )
 
@@ -29,5 +30,6 @@ __all__ = [
     "choreography_types",
     "get_choreography",
     "landing_order",
+    "random_landing_order",
     "register_choreography",
 ]
