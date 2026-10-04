@@ -171,6 +171,117 @@ def test_matcher_reports_indexing_and_cancels_within_it(library):
     assert calls and not matcher._candidates and not matcher._indexes
 
 
+@pytest.mark.parametrize("exact", [True, False])
+def test_batched_search_matches_one_big_batch(monkeypatch, exact):
+    import skitter.core.matching.index as index_module
+    import skitter.core.matching.matcher as matcher_module
+
+    if not exact:
+        monkeypatch.setattr(index_module, "EXACT_LIMIT", 1000)
+    cands = random_candidates(4000)
+    index = SearchIndex(cands, dim_weights(), 0.0)
+    assert index.exact == exact
+    rng = np.random.default_rng(5)
+    desc = rng.normal(0, 0.1, (1500, DIM)).astype(np.float32)
+    weights = region_weights(dim_weights(), np.ones((1500, DIM), np.float32), 0.0)
+    regs = rng.permutation(3000)[:1500]  # region ids into the (larger) arrays below
+    big_desc = np.zeros((3000, DIM), np.float32)
+    big_desc[regs] = desc
+    big_w = np.zeros((3000, DIM), np.float32)
+    big_w[regs] = weights
+    settings = MatchSettings()
+
+    one = Matcher._search(cands, index, regs, big_desc, big_w, settings, 20, 8)  # one batch
+    monkeypatch.setattr(matcher_module, "FIRST_BATCH", 37)  # many small ones
+    monkeypatch.setattr(matcher_module, "MIN_BATCH", 37)
+    monkeypatch.setattr(matcher_module, "MAX_BATCH", 37)
+    batches = []
+    many = Matcher._search(cands, index, regs, big_desc, big_w, settings, 20, 8,
+                           lambda rows, ids, cs: batches.append((rows, ids, cs)))  # fmt: skip
+    np.testing.assert_array_equal(many[0], one[0])
+    np.testing.assert_array_equal(many[1], one[1])
+    assert len(batches) == -(-1500 // 37)
+    rows = np.concatenate([b[0] for b in batches])
+    assert sorted(rows) == sorted(regs) and not np.array_equal(rows, regs)  # shuffled
+    position = {r: i for i, r in enumerate(regs)}
+    for rows, ids, cs in batches:  # each batch hands over its own regions' results
+        at = [position[r] for r in rows]
+        np.testing.assert_array_equal(ids, one[0][at])
+        np.testing.assert_array_equal(cs, one[1][at])
+
+
+def test_first_allowed_is_what_greedy_would_pick():
+    n, k = 60, 10
+    rng = np.random.default_rng(1)
+    tiles = rng.integers(0, 30, (n, k))
+    costs = np.sort(rng.random((n, k)), axis=1).astype(np.float32)
+    costs[5, 3:] = np.inf  # few candidates
+    costs[59] = np.inf  # none at all: nothing allowed
+    a = Assignment(tiles, costs, grid_centers(n), n_tiles=30, max_uses=2, spacing=25.0)
+    a.greedy(np.arange(30))  # some placed; the rest wait
+    waiting = np.flatnonzero(a.choice < 0)
+    before = a.choice.copy(), a.uses.copy()
+    pick = a.first_allowed(waiting)
+    np.testing.assert_array_equal(a.choice, before[0])  # nothing placed
+    np.testing.assert_array_equal(a.uses, before[1])
+    for r, j in zip(waiting, pick, strict=True):  # each alone, greedy picks the same
+        trial = Assignment(tiles, costs, grid_centers(n), n_tiles=30, max_uses=2, spacing=25.0)
+        trial.set_choices(before[0])
+        trial.greedy([r])
+        assert trial.choice[r] == j
+    assert (pick >= 0).any() and (pick < 0).any()
+
+
+@pytest.mark.parametrize("exact", [True, False])
+def test_search_skips_excluded_candidates(monkeypatch, exact):
+    import skitter.core.matching.index as index_module
+
+    if not exact:
+        monkeypatch.setattr(index_module, "EXACT_LIMIT", 1000)
+    cands = random_candidates(3000)
+    index = SearchIndex(cands, dim_weights(), 0.0)
+    queries = cands.desc[:50].astype(np.float32)
+    plain = index.search(queries, 30, 16)
+    exclude = np.unique(plain[:, :10])  # everyone's favorites
+    found = index.search(queries, 30, 16, exclude)
+    assert (found >= 0).all() and not np.isin(found, exclude).any()
+
+
+def test_forced_regions_spread_over_the_least_used_photos():
+    n, k = 40, 5
+    tiles = np.tile(np.arange(k), (n, 1))  # everyone wants photo 0, then 1, ...
+    costs = np.tile(np.arange(k, dtype=np.float32), (n, 1))
+    a = Assignment(tiles, costs, grid_centers(n), n_tiles=k, max_uses=1, spacing=0.0)
+    a.greedy(np.arange(n))  # 5 placed, 35 waiting
+    assert a.force(np.arange(n)) == n - k
+    np.testing.assert_array_equal(np.bincount(a.chosen_tiles(), minlength=k), [8] * k)
+    # Equally used: the photo farthest from its other uses wins.
+    centers = np.array([[0.0, 0.0], [100.0, 0.0], [10.0, 0.0]])
+    b = Assignment(np.array([[0, 1]] * 3), np.zeros((3, 2), np.float32), centers, n_tiles=2,
+                   max_uses=1)  # fmt: skip
+    b.greedy([0, 1])  # 0 takes photo 0 at x=0, 1 takes photo 1 at x=100
+    b.force([2])  # at x=10: photo 1 is farther from its use
+    assert b.chosen_tiles()[2] == 1
+
+
+def test_plain_areas_keep_the_reuse_rules(library):
+    # Every region wants the same few photos; there are enough photos for all of them
+    # within the rules, if the search looks past each region's favorites.
+    image = np.full((150, 200, 3), 235, np.uint8)
+    ctx = flat_ctx(image, columns=20, tile=10)
+    regions = GridSlicer().apply(ctx.canvas(), ctx)
+    assert len(regions) == 300 and len(library) * 3 >= len(regions)
+    settings = MatchSettings(max_uses=3, min_spacing=0.0, refine_seconds=5.0, adaptive_rounds=1)
+    result = Matcher(library).run(regions, ctx, settings)
+    assert result.stats["rule_violations"] == 0 and result.stats["forced"] == 0
+    assert np.bincount(result.tile).max() <= 3
+    # Too few photos even so: the breaks spread instead of piling onto one photo.
+    strict = Matcher(library).run(regions, ctx, MatchSettings(max_uses=1, refine_seconds=5.0,
+                                                              adaptive_rounds=1))  # fmt: skip
+    assert strict.stats["forced"] == len(regions) - len(library)
+    assert np.bincount(strict.tile).max() <= 3  # 300 regions over 122 photos
+
+
 def test_reuse_rules_hold():
     n, k = 100, 30
     rng = np.random.default_rng(0)
@@ -333,22 +444,38 @@ def test_matcher_previews_the_run_without_changing_it(library):
     for name in ("tile", "rect", "mirrored", "cost", "tint_target"):  # same with or without
         np.testing.assert_array_equal(getattr(result, name), getattr(plain, name))
     stages = [p.stage for p in previews]
-    assert stages[:4] == [PreviewStage.SKETCH, PreviewStage.BEST, PreviewStage.ASSIGNED,
-                          PreviewStage.COMPLETE]  # fmt: skip
-    assert set(stages[4:]) <= {PreviewStage.REFINING, PreviewStage.ADAPTIVE}
+    runs = [s for i, s in enumerate(stages) if i == 0 or s != stages[i - 1]]  # repeats folded
+    assert runs[:5] == [PreviewStage.SKETCH, PreviewStage.BEST, PreviewStage.ASSIGNED,
+                        PreviewStage.WIDENING, PreviewStage.COMPLETE]  # fmt: skip
+    assert set(runs[5:]) <= {PreviewStage.REFINING, PreviewStage.ADAPTIVE}
     assert PreviewStage.REFINING in stages and PreviewStage.ADAPTIVE in stages
     rank = list(PreviewStage)
     assert [rank.index(s) for s in stages] == sorted(rank.index(s) for s in stages)
 
-    sketch, best, assigned, complete = previews[:4]
+    def first(stage):
+        return next(p for p in previews if p.stage is stage)
+
+    sketch, assigned, complete = (first(s) for s in (PreviewStage.SKETCH, PreviewStage.ASSIGNED,
+                                                     PreviewStage.COMPLETE))  # fmt: skip
+    best = [p for p in previews if p.stage is PreviewStage.BEST][-1]
     assert sketch.result is None and sketch.regions is regions
     right, low = (regions.center / [ctx.width / 2, ctx.height / 2]).T >= 1  # quadrant
     expected = target_image()[np.where(low, 90, 30), np.where(right, 120, 40)]
     np.testing.assert_allclose(sketch.target * 255, expected, atol=2)  # flat quadrants
     assert (best.result.tile >= 0).all()  # each region's own best: repeats allowed
     assert np.bincount(best.result.tile).max() > 1
-    assert (assigned.result.tile < 0).any() and (complete.result.tile >= 0).all()
-    assert np.bincount(assigned.result.tile[assigned.result.tile >= 0]).max() == 1
+    # Every region keeps showing a tile: regions the rules left waiting show their
+    # favorite (the best tile) until widening replaces it.
+    assert (assigned.result.tile >= 0).all() and (complete.result.tile >= 0).all()
+    waiting = assigned.result.tile == best.result.tile
+    assert waiting.any() and np.bincount(assigned.result.tile).max() > 1  # favorites repeat
+    placed = ~waiting
+    assert np.bincount(assigned.result.tile[placed]).max() == 1  # placed within the rules
+    widenings = [p for p in previews if p.stage is PreviewStage.WIDENING]
+    for frame in widenings:  # placed tiles stay; waiting ones change only to tentative tiles
+        np.testing.assert_array_equal(frame.result.tile[placed], assigned.result.tile[placed])
+        assert (frame.result.tile >= 0).all()
+    assert (widenings[-1].result.tile[waiting] != best.result.tile[waiting]).any()
     assert complete.result.quality is None
     assert complete.result.tint == result.tint  # tiles show tinted, as they will
     # Snapshots are copies: nothing the run did afterwards shows in them.

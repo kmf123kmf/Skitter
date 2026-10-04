@@ -159,15 +159,24 @@ class SearchIndex:
             progress(f"Adding tiles to the index: {lo:,} of {m:,}", lo / max(m, 1))
             self.index.add(scaled(cands.desc[lo : lo + chunk], self.weights, tint_ref))
 
-    def search(self, desc: np.ndarray, k: int, nprobe: int = 16) -> np.ndarray:
-        """(R, k) candidate indices nearest to target descriptors (-1 where fewer exist)."""
+    def search(self, desc: np.ndarray, k: int, nprobe: int = 16, exclude=None) -> np.ndarray:
+        """(R, k) candidate indices nearest to target descriptors (-1 where fewer exist).
+
+        exclude: candidate indices never to return (photos that can't be used anyway).
+        """
         if not self.exact:
             faiss.extract_index_ivf(self.index).nprobe = nprobe
         k = min(k, len(self.cands))
         if not len(desc) or not k:
             return np.full((len(desc), k), -1, np.int64)
-        _, ids = self.index.search(scaled(desc, self.weights, self.tint_ref), k)
-        return ids
+        x = scaled(desc, self.weights, self.tint_ref)
+        if exclude is None or not len(exclude):
+            return self.index.search(x, k)[1]
+        batch = faiss.IDSelectorBatch(np.ascontiguousarray(exclude, dtype=np.int64))
+        selector = faiss.IDSelectorNot(batch)  # keeps a pointer to batch: both stay alive here
+        params = (faiss.SearchParameters(sel=selector) if self.exact
+                  else faiss.SearchParametersIVF(sel=selector, nprobe=nprobe))  # fmt: skip
+        return self.index.search(x, k, params=params)[1]
 
 
 def train_ivf(index, x: np.ndarray, progress: Progress = _quiet) -> None:

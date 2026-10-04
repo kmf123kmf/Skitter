@@ -245,12 +245,15 @@ def test_indexing_shows_its_own_progress(sliced, photos, qapp):
     assert session.project.matches is not None
     assert not step.sub_progress.isVisible() and not step.sub_status.isVisible()
 
-    # A cached index reports nothing: the bar stays hidden all run.
+    # A cached index isn't built again (nothing to report), but the search still reports.
     seen = []
-    session.matching_detail.connect(lambda *report: seen.append(report))
+    session.matching_detail.connect(lambda message, _: seen.append(message))
     step.run_matching()
     session.wait_for_job()
-    assert not seen and not step.sub_progress.isVisible()
+    regions = len(session.project.regions)
+    assert not any(m.startswith(("Describing", "Grouping", "Adding")) for m in seen)
+    assert f"Searching: {regions:,} of {regions:,} regions" in seen
+    assert not step.sub_progress.isVisible()
 
 
 def test_run_frames_show_target_colors_then_tiles(sliced, photos):
@@ -275,15 +278,60 @@ def test_run_frames_show_target_colors_then_tiles(sliced, photos):
     np.testing.assert_allclose(instances["tint"][:, :3], previews[0].target, atol=1e-6)
     assert (instances["tint"][:, 3] == 1).all()
 
-    assigned = next(p for p in previews if p.result is not None and (p.result.tile < 0).any())
+    # Half the regions without a tile yet: they show their target color.
+    best = next(p for p in previews if p.result is not None)
+    tile = best.result.tile.copy()
+    tile[::2] = -1
+    assigned = replace(best, result=replace(best.result, tile=tile))
     frame = build_frame(assigned, library, ctx, None)
     waiting = int((assigned.result.tile < 0).sum())
     assert len(frame.sketch.instances) == waiting and frame.placed == regions - waiting
     assert frame.pages is not None and len(frame.tiles) == frame.placed
-    # A later frame whose tiles the atlas already holds reuses its pages.
+    # A later frame whose tiles the atlas already holds reuses its pages, uploading nothing.
     again = build_frame(assigned, library, ctx, frame.atlas)
-    assert again.pages is None and again.atlas is frame.atlas
+    assert again.pages is None and again.patches == [] and again.atlas is frame.atlas
     np.testing.assert_array_equal(again.tiles, frame.tiles)
+    # One with new tiles adds just their cells to the same pages.
+    final = build_frame(previews[-1], library, ctx, frame.atlas)
+    atlas = frame.atlas
+    assert final.pages is None and final.atlas is atlas and final.patches
+    shown = np.unique(session.project.matches.tile)
+    assert (atlas.cell_of[shown] >= 0).all()
+    texels = sum(w * h for _, _, _, w, h in final.patches)
+    added = len(np.setdiff1d(shown, assigned.result.tile))
+    assert texels == added * atlas.cell**2  # exactly the new cells
+
+
+def test_growing_atlas_packs_cells_once_and_reports_them():
+    from types import SimpleNamespace
+
+    from skitter.ui.render.atlas import PAGE
+    from skitter.ui.render.match_preview import GrowingAtlas
+
+    thumbs = np.random.default_rng(0).integers(0, 256, (300, 32, 32, 3)).astype(np.uint8)
+    library = SimpleNamespace(thumbs=thumbs, thumb_size=np.full((300, 2), 32))
+    atlas = GrowingAtlas(library, 200)
+    per_row = PAGE // atlas.cell
+    assert atlas.add([5, 5, 7]) == [(0, 0, 0, 2 * atlas.cell, atlas.cell)]
+    assert atlas.add([7]) == []  # already there
+    # Crossing rows: the rest of row 0, whole rows, then the start of a row.
+    count = per_row - 2 + 2 * per_row + 3
+    rects = atlas.add(np.arange(10, 10 + count))
+    c = atlas.cell
+    assert rects == [(0, 2 * c, 0, (per_row - 2) * c, c), (0, 0, c, per_row * c, 2 * c),
+                     (0, 0, 3 * c, 3 * c, c)]  # fmt: skip
+    # Each cell holds its thumbnail, and locate points at it.
+    layer, uv = atlas.locate([7], [[0, 0, 1, 1]])
+    x, y = c, 0
+    np.testing.assert_array_equal(atlas.pages[0, y : y + c, x : x + c, :3], thumbs[7])
+    assert layer[0] == 0 and uv[0, 0] * PAGE == x + 0.5
+    # Room is whole pages; beyond it nothing is written (the caller starts a new atlas).
+    assert atlas.capacity == (PAGE // c) ** 2
+    big = SimpleNamespace(thumbs=np.zeros((atlas.capacity + 5, 32, 32, 3), np.uint8),
+                          thumb_size=np.full((atlas.capacity + 5, 2), 32))  # fmt: skip
+    full = GrowingAtlas(big, 1)
+    assert full.add(np.arange(10)) and full.add(np.arange(atlas.capacity + 5)) is None
+    assert full.count == 10 and (full.cell_of[10:] < 0).all()
 
 
 def test_reslicing_clears_the_mosaic(sliced, photos):
@@ -302,6 +350,25 @@ def test_reslicing_clears_the_mosaic(sliced, photos):
     assert step._tile_layer is None and step._heat_layer is None and step._shown is None
     assert step._labels["score"].text() == "—"
     assert "Press Match Tiles" in step.status.text()
+
+
+def test_reslicing_smaller_fits_the_new_mosaic(sliced, photos):
+    # The last mosaic's area must not stay in what the view fits and scrolls over.
+    window = sliced
+    build_library(window, photos)
+    session = window.session
+    step = matching_step(window)
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    step.run_matching()
+    session.wait_for_job()
+    old = session.mosaic_size()
+    assert step.viewer.canvas.bounds == (0.0, 0.0, *old)
+
+    layout = session.project.layout
+    session.set_layout(replace(layout, columns=layout.columns - 3))
+    new = session.mosaic_size()
+    assert new[0] < old[0] and new[1] < old[1]
+    assert step.viewer.canvas.bounds == (0.0, 0.0, *new)
 
 
 def test_export_image_from_the_mosaic_menu(sliced, photos, tmp_path):

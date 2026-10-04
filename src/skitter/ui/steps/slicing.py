@@ -450,6 +450,8 @@ class SlicingStep(StepPage):
             x0, y0 = bounds[:, :2].min(axis=0)
             x1, y1 = bounds[:, 2:].max(axis=0)
             self.viewer.set_content_bounds((x0, y0, x1 - x0, y1 - y0))
+        else:  # no regions (a slicing error): just the image, not the last slicing's area
+            self.viewer.set_content_bounds(None)
 
     def _on_slicing_changed(self) -> None:
         regions = self.session.project.regions

@@ -789,6 +789,8 @@ class MatchingStep(StepPage):
         self._shown, self._textures = scene, self.session.textures
         self._show_stats(None if scene is None else scene.result)
         self._detail.setText("—")
+        if scene is None:
+            self.viewer.set_content_bounds(None)  # not the last mosaic's (it may be larger)
         if scene is None or self._textures is None:
             return
         self._textures.changed.connect(self._on_textures_changed)
@@ -914,7 +916,12 @@ class MatchingStep(StepPage):
         if self.session.busy != "matching":
             return
         canvas = self.viewer.canvas
-        if self._shown is not None or self._tile_layer is not None:  # the run's first frame
+        if self._run_sketch is None and self._run_tiles is None:  # the run's first frame
+            regions = None if self._run_latest is None else self._run_latest.regions
+            if regions is not None and len(regions):  # fit what the run covers (may overhang)
+                box = regions.bounds()
+                (x0, y0), (x1, y1) = box[:, :2].min(axis=0), box[:, 2:].max(axis=0)
+                self.viewer.set_content_bounds((x0, y0, x1 - x0, y1 - y0))
             for layer in (self._tile_layer, self._heat_layer):
                 if layer is not None:
                     canvas.remove_layer(layer)
@@ -928,6 +935,7 @@ class MatchingStep(StepPage):
                 canvas.remove_layer(self._run_tiles)
             self._run_tiles = canvas.add_layer(frame.pages, self.overlays.first)
         elif frame.tiles is not None and self._run_tiles is not None:
+            self._run_tiles.patch_texture(frame.patches)  # the new thumbnails' cells
             self._run_tiles.instances = frame.tiles
             self._run_tiles.mark_dirty()
         if self._run_sketch is not None:
@@ -936,7 +944,7 @@ class MatchingStep(StepPage):
         self._run_sketch = canvas.add_layer(frame.sketch, below)
         text = frame.stage.value
         if frame.tiles is not None:
-            text += f"\n{frame.placed:,} of {frame.needed:,} placed"
+            text += f"\n{frame.placed:,} of {frame.needed:,} with a tile"
         self._detail.setText(text)
         self._apply_display()
 
@@ -952,5 +960,5 @@ class MatchingStep(StepPage):
         return shown
 
     def shutdown(self) -> None:
-        self._builder.reset()
+        self._builder.close()
         self._reader.cancel()

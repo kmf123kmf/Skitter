@@ -6,8 +6,10 @@ and two uses of the same image must be at least `spacing` apart (mosaic units;
 0: off). Crops and mirrored copies of one image count as that image.
 
 `Assignment.greedy` visits regions in priority order and gives each its
-cheapest allowed candidate. `refine_pass` then improves the result: a region
-moves to a better candidate when that is allowed, or when the one region
+cheapest allowed candidate. Regions no candidate is allowed for are finally
+`force`d, spreading the rule breaks over the least-used photos. `refine_pass`
+then improves the result: a region moves to a better candidate when that is
+allowed, or when the one region
 blocking it can move to another allowed candidate for a lower total cost.
 Costs are weighted by region importance (visible area), so refinement
 trades fairly between large and small regions.
@@ -84,6 +86,49 @@ def _greedy(order, tiles, costs, center, max_uses, spacing2, choice, uses, head,
         if not placed:
             unplaced += 1
     return unplaced
+
+
+@njit(cache=True, nogil=True)
+def _first_allowed(regions, tiles, costs, center, max_uses, spacing2, uses, head, nxt, out):
+    for i in range(len(regions)):
+        r = regions[i]
+        out[i] = -1
+        for j in range(tiles.shape[1]):
+            tile = tiles[r, j]
+            if tile < 0 or not np.isfinite(costs[r, j]):
+                break
+            if _allowed(r, tile, uses, head, nxt, center, max_uses, spacing2):
+                out[i] = j
+                break
+
+
+@njit(cache=True, nogil=True)
+def _force_spread(regions, tiles, costs, center, choice, uses, head, nxt, prv):
+    """Place each unplaced region on its least-used candidate, the one farthest from
+    other uses of its photo among those, then the cheapest."""
+    count = 0
+    for r in regions:
+        if choice[r] >= 0:
+            continue
+        best_j, best_uses, best_far = -1, 0, 0.0
+        for j in range(tiles.shape[1]):
+            tile = tiles[r, j]
+            if tile < 0 or not np.isfinite(costs[r, j]):
+                break
+            near = np.inf  # squared distance to the closest use of this photo
+            q = head[tile]
+            while q != -1:
+                dx = center[q, 0] - center[r, 0]
+                dy = center[q, 1] - center[r, 1]
+                near = min(near, dx * dx + dy * dy)
+                q = nxt[q]
+            if best_j < 0 or uses[tile] < best_uses or (uses[tile] == best_uses
+                                                         and near > best_far):  # fmt: skip
+                best_j, best_uses, best_far = j, uses[tile], near
+        if best_j >= 0:
+            _place(r, best_j, tiles, choice, uses, head, nxt, prv)
+            count += 1
+    return count
 
 
 @njit(cache=True, nogil=True)
@@ -238,6 +283,14 @@ class Assignment:
             np.ascontiguousarray(importance, dtype=np.float64), self.center, *self._state(),
         )  # fmt: skip
 
+    def first_allowed(self, regions) -> np.ndarray:
+        """Each region's cheapest candidate the rules allow now (-1: none); places nothing."""
+        regions = np.asarray(regions, dtype=np.int64)
+        out = np.empty(len(regions), np.int64)
+        _first_allowed(regions, self.tiles, self.costs, self.center, self.max_uses, self.spacing2,
+                       self.uses, self.head, self.nxt, out)  # fmt: skip
+        return out
+
     def set_choices(self, choice) -> None:
         """Replace the whole assignment (choice[r]: candidate index, -1 for none)."""
         self.unplace(np.flatnonzero(self.choice >= 0))
@@ -251,16 +304,16 @@ class Assignment:
                 _remove(r, self.tiles, self.choice, self.uses, self.head, self.nxt, self.prv)
 
     def force(self, regions) -> int:
-        """Give unplaced regions their best candidate regardless of the rules.
+        """Place unplaced regions regardless of the rules, in the given order.
 
-        Returns how many were placed this way (rule violations).
+        Each takes the candidate whose photo is used least so far, the one farthest
+        from other uses of its photo among those, so breaking the rules spreads over
+        many photos instead of piling onto each region's favorite. Returns how many
+        were placed this way (rule violations).
         """
-        count = 0
-        for r in np.asarray(regions, dtype=np.int64):
-            if self.choice[r] < 0 and self.tiles[r, 0] >= 0:
-                _place(r, 0, self.tiles, self.choice, self.uses, self.head, self.nxt, self.prv)
-                count += 1
-        return count
+        return _force_spread(np.asarray(regions, dtype=np.int64), self.tiles, self.costs,
+                             self.center, self.choice, self.uses, self.head, self.nxt,
+                             self.prv)  # fmt: skip
 
     def chosen_tiles(self) -> np.ndarray:
         rows = np.arange(len(self.choice))
