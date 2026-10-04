@@ -145,12 +145,14 @@ def _tile_cells(thumbs, sizes, starts, rects, lut, out_grid, out_spread):
                     out_spread[m, i, j] = np.sqrt(max(s2[i, j] / s0[i, j] - mean * mean, 0.0))
 
 
-def tile_descriptors(thumbs, sizes, tile, rect, *, chunk: int = 32_768) -> np.ndarray:
+def tile_descriptors(thumbs, sizes, tile, rect, *, chunk: int = 32_768,
+                     progress=None) -> np.ndarray:  # fmt: skip
     """Descriptors of crop windows of tile thumbnails.
 
     thumbs: (T, S, S, 3) uint8 (array or memmap), tile t filling [:h, :w].
     sizes: (T, 2) thumbnail (w, h). tile, rect: crops grouped by tile, in
     tile order (see crops.Crops). Thumbnails are read chunk tiles at a time.
+    progress(done, total): crops described so far, after each chunk.
     """
     tile = np.asarray(tile, dtype=np.int64)
     rect = np.ascontiguousarray(rect, dtype=np.float32)
@@ -172,4 +174,6 @@ def tile_descriptors(thumbs, sizes, tile, rect, *, chunk: int = 32_768) -> np.nd
             grid, spread,
         )  # fmt: skip
         out[first:last] = assemble(grid, spread)
+        if progress is not None:
+            progress(int(last), len(tile))
     return out

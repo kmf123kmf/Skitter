@@ -3,6 +3,7 @@
 import math
 from types import SimpleNamespace
 
+import faiss
 import numpy as np
 import pytest
 from PIL import Image
@@ -17,8 +18,9 @@ from skitter.core.matching.index import (
     exact_best,
     region_weights,
     rerank,
+    train_ivf,
 )
-from skitter.core.matching.matcher import Matcher
+from skitter.core.matching.matcher import MatchCancelled, Matcher, PreviewStage
 from skitter.core.matching.quality import evaluate, target_raster
 from skitter.core.matching.settings import MatchSettings
 from skitter.core.slicing import MosaicLayout, RegionSet, SliceContext
@@ -96,6 +98,77 @@ def test_approximate_index_finds_near_neighbors():
 def grid_centers(n, step=10.0):
     side = math.ceil(math.sqrt(n))
     return np.stack([np.arange(n) % side, np.arange(n) // side], axis=1) * step
+
+
+def test_stepwise_training_gives_faiss_own_index():
+    rng = np.random.default_rng(4)
+    centers = rng.normal(0, 1, (300, DIM)).astype(np.float32)
+    x = (centers[rng.integers(0, 300, 20_000)] + rng.normal(0, 0.3, (20_000, DIM))).astype(
+        np.float32
+    )
+    own = faiss.index_factory(DIM, "IVF128,SQ8")
+    own.train(x)
+    stepwise = faiss.index_factory(DIM, "IVF128,SQ8")
+    reports = []
+    train_ivf(stepwise, x, lambda message, fraction: reports.append((message, fraction)))
+
+    quantizers = [faiss.extract_index_ivf(i).quantizer for i in (own, stepwise)]
+    np.testing.assert_array_equal(*(q.reconstruct_n(0, 128) for q in quantizers))
+    for index in (own, stepwise):
+        faiss.extract_index_ivf(index).nprobe = 8
+        index.add(x)
+    np.testing.assert_array_equal(own.search(x[:500], 10)[1], stepwise.search(x[:500], 10)[1])
+    # One report per k-means round, then the finish.
+    rounds = faiss.extract_index_ivf(own).cp.niter
+    assert len(reports) == rounds + 1 and reports[0] == (
+        f"Grouping similar tiles: round 1 of {rounds}",
+        0.0,
+    )
+    assert [f for _, f in reports] == sorted(f for _, f in reports) and reports[-1][1] == 1.0
+
+
+def test_index_building_reports_progress_and_can_stop(monkeypatch):
+    import skitter.core.matching.index as index_module
+
+    monkeypatch.setattr(index_module, "EXACT_LIMIT", 1000)  # IVF without a huge set
+    cands = random_candidates(6000)
+    weights = dim_weights()
+    reports = []
+    SearchIndex(cands, weights, 0.0, chunk=2048,
+                progress=lambda message, fraction: reports.append((message, fraction)))  # fmt: skip
+    messages = [m for m, _ in reports]
+    assert any(m.startswith("Grouping similar tiles") for m in messages)
+    assert [m for m in messages if m.startswith("Adding")] == [
+        f"Adding tiles to the index: {lo:,} of 6,000" for lo in (0, 2048, 4096)
+    ]
+    assert all(0.0 <= f <= 1.0 for _, f in reports)
+
+    class Stop(Exception):
+        pass
+
+    def stop(message, fraction):
+        if message.startswith("Grouping similar tiles: round 2"):
+            raise Stop
+
+    with pytest.raises(Stop):
+        SearchIndex(cands, weights, 0.0, progress=stop)
+
+
+def test_matcher_reports_indexing_and_cancels_within_it(library):
+    ctx = flat_ctx(target_image(), columns=8, tile=20)
+    regions = GridSlicer().apply(ctx.canvas(), ctx)
+    settings = MatchSettings(adaptive_rounds=0, refine_seconds=0.1)
+    details = []
+    Matcher(library).run(regions, ctx, settings, detail=lambda *report: details.append(report))
+    assert details[0][0].startswith("Describing tile crops: 0 of")
+    assert any(m.startswith("Adding tiles to the index") for m, _ in details)
+
+    # Cancelling while indexing stops the run there, and leaves nothing half built.
+    matcher, calls = Matcher(library), []
+    with pytest.raises(MatchCancelled):
+        matcher.run(regions, ctx, settings, cancelled=lambda: len(calls) >= 1,
+                    detail=lambda message, fraction: calls.append(message))  # fmt: skip
+    assert calls and not matcher._candidates and not matcher._indexes
 
 
 def test_reuse_rules_hold():
@@ -245,6 +318,43 @@ def test_matcher_end_to_end(library):
     assert tinted.quality.score < result.quality.score
     offset = tinted.tint_offset()
     assert offset.shape == (len(regions), 3) and np.abs(offset).max() > 0
+
+
+def test_matcher_previews_the_run_without_changing_it(library):
+    ctx = flat_ctx(target_image(), columns=16, tile=20)
+    regions = GridSlicer().apply(ctx.canvas(), ctx)
+    # Fewer allowed uses than regions need: the first assignment leaves regions waiting.
+    settings = MatchSettings(tint="custom", tint_strength=0.3, max_uses=1, min_spacing=2.0,
+                             refine_seconds=5.0, adaptive_rounds=2)  # fmt: skip
+    plain = Matcher(library).run(regions, ctx, settings)
+    previews = []
+    result = Matcher(library).run(regions, ctx, settings, preview=previews.append)
+
+    for name in ("tile", "rect", "mirrored", "cost", "tint_target"):  # same with or without
+        np.testing.assert_array_equal(getattr(result, name), getattr(plain, name))
+    stages = [p.stage for p in previews]
+    assert stages[:4] == [PreviewStage.SKETCH, PreviewStage.BEST, PreviewStage.ASSIGNED,
+                          PreviewStage.COMPLETE]  # fmt: skip
+    assert set(stages[4:]) <= {PreviewStage.REFINING, PreviewStage.ADAPTIVE}
+    assert PreviewStage.REFINING in stages and PreviewStage.ADAPTIVE in stages
+    rank = list(PreviewStage)
+    assert [rank.index(s) for s in stages] == sorted(rank.index(s) for s in stages)
+
+    sketch, best, assigned, complete = previews[:4]
+    assert sketch.result is None and sketch.regions is regions
+    right, low = (regions.center / [ctx.width / 2, ctx.height / 2]).T >= 1  # quadrant
+    expected = target_image()[np.where(low, 90, 30), np.where(right, 120, 40)]
+    np.testing.assert_allclose(sketch.target * 255, expected, atol=2)  # flat quadrants
+    assert (best.result.tile >= 0).all()  # each region's own best: repeats allowed
+    assert np.bincount(best.result.tile).max() > 1
+    assert (assigned.result.tile < 0).any() and (complete.result.tile >= 0).all()
+    assert np.bincount(assigned.result.tile[assigned.result.tile >= 0]).max() == 1
+    assert complete.result.quality is None
+    assert complete.result.tint == result.tint  # tiles show tinted, as they will
+    # Snapshots are copies: nothing the run did afterwards shows in them.
+    arrays = [getattr(p.result, name) for p in previews[1:] for name in ("tile", "cost")]
+    arrays += [result.tile, result.cost]
+    assert not any(np.shares_memory(a, b) for i, a in enumerate(arrays) for b in arrays[:i])
 
 
 def test_matcher_skips_hidden_regions_and_uses_structure(library):

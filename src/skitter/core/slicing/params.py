@@ -87,6 +87,48 @@ class FloatParam(Param):
         return value
 
 
+class RangeParam(Param):
+    """A range of values (low, high), for example each tile drawing its own value in it.
+
+    Equal ends mean one fixed value; a single number is accepted as that.
+    whole=True keeps both ends whole numbers.
+    """
+
+    def __init__(self, default, label: str = "", *, min: float = 0.0, max: float = 1e9,
+                 step: float = 0.1, decimals: int = 2, suffix: str = "", whole: bool = False,
+                 **kwargs):  # fmt: skip
+        self.min, self.max, self.step = min, max, step
+        self.decimals, self.suffix, self.whole = decimals, suffix, whole
+        super().__init__(default, label, **kwargs)
+
+    def validate(self, value) -> tuple:
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            value = (value, value)
+        try:
+            low, high = value
+        except (TypeError, ValueError):
+            raise self._error(f"expected (low, high), got {value!r}") from None
+        ends = []
+        for v in (low, high):
+            if isinstance(v, bool) or not isinstance(v, (int, float)):
+                raise self._error(f"expected numbers, got {value!r}")
+            if self.whole and not float(v).is_integer():
+                raise self._error(f"expected whole numbers, got {value!r}")
+            if not self.min <= v <= self.max:
+                raise self._error(f"{v} is outside {self.min}..{self.max}")
+            ends.append(int(v) if self.whole else float(v))
+        if ends[0] > ends[1]:
+            raise self._error(f"low end {ends[0]} is above high end {ends[1]}")
+        return tuple(ends)
+
+    def draw(self, value, rng, n: int):
+        """n values drawn uniformly from the range (whole numbers: each equally likely)."""
+        low, high = value
+        if self.whole:
+            return rng.integers(low, high + 1, n)
+        return rng.uniform(low, high, n)
+
+
 class TileSizeParam(FloatParam):
     """A length measured in base tiles: 1.0 is one base tile (see MosaicLayout).
 

@@ -55,6 +55,11 @@ class Session(QObject):
     matching_changed = Signal()  # project.matches replaced, or matching failed or stopped
     # (scene and textures always match project.matches when it is emitted)
     matching_progress = Signal(str, float)
+    # A look at the run in progress (core.matching.matcher.MatchPreview), from the worker
+    # thread (queued); a few may still arrive just after the run ends.
+    matching_preview = Signal(object)
+    # Progress within a long matching step (indexing tiles): (message, fraction 0..1).
+    matching_detail = Signal(str, float)
     # Manual picks changed tiles of these regions (np.ndarray); project.matches, scene and
     # textures were updated in place of a full replacement (matching_changed isn't emitted).
     mosaic_edited = Signal(object)
@@ -379,7 +384,9 @@ class Session(QObject):
         self.dropped_picks = 0 if kept is None else self.manual_picks - len(kept)
 
         def work(progress, cancelled):
-            return matcher.run(regions, ctx, settings, progress, cancelled, pins=kept)
+            return matcher.run(regions, ctx, settings, progress, cancelled, pins=kept,
+                               preview=self.matching_preview.emit,
+                               detail=self.matching_detail.emit)  # fmt: skip
 
         def done(result: MatchResult | None, error: str | None):
             self.match_error = error

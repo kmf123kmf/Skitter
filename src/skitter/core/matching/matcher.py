@@ -15,12 +15,19 @@ keeping a pass only if the overall score improves.
 The result remembers each region's best few candidates (candidates.py) for
 manual picks. Pins (manual picks kept from an earlier run) are placed
 first and never moved; everything else is matched around them.
+
+Previews: `run(preview=...)` is handed a MatchPreview at each point where
+the run has something to show (see PreviewStage), copied so it stays valid
+while the run goes on. Previews only read the run's state: results are the
+same with or without them. `run(detail=...)` reports progress within the
+long steps (building candidates and indexes), and cancelling stops those too.
 """
 
 import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from enum import Enum
 
 import faiss
 import numpy as np
@@ -53,6 +60,17 @@ WORST_SHARE = 0.1  # share of regions re-searched in each adaptive pass
 GAMUT_DE = 0.06  # a region's color is "missing" from the library beyond this ΔE (OKLab)
 
 Progress = Callable[[str, float | None], None]
+
+
+class PreviewStage(Enum):
+    """What a preview's tiles are, in the order a run reaches them."""
+
+    SKETCH = "Target colors (no tiles yet)"
+    BEST = "Best tiles, before reuse rules"  # each region's own best: repeats unlimited
+    ASSIGNED = "Assigned, some regions waiting"  # reuse rules left these without a tile
+    COMPLETE = "Every region has a tile"
+    REFINING = "Refining: swapping tiles"
+    ADAPTIVE = "Adaptive pass: worst regions"  # searched again, harder
 
 
 class MatchCancelled(Exception):
@@ -102,28 +120,44 @@ class MatchResult:
         )
 
 
+@dataclass(frozen=True)
+class MatchPreview:
+    """A look at a run in progress."""
+
+    stage: PreviewStage
+    regions: RegionSet
+    target: np.ndarray  # (R, 3) sRGB (0..1) each region aims for; nan: hidden, no tile needed
+    result: MatchResult | None = None  # tiles so far (tile -1: none yet; quality None)
+
+
 class Matcher:
     def __init__(self, library: TileLibrary):
         self.library = library
         self._candidates: dict[tuple, CandidateSet] = {}
         self._indexes: dict[tuple, SearchIndex] = {}
 
-    def candidates(self, aspect: float, settings: MatchSettings) -> tuple[tuple, CandidateSet]:
+    def candidates(
+        self, aspect: float, settings: MatchSettings, progress=lambda message, fraction: None
+    ) -> tuple[tuple, CandidateSet]:
         key = (self.library.version, round(float(aspect), 4), settings.crops, settings.mirror)
         if key not in self._candidates:
+            cands = build_candidates(self.library, aspect, settings.crops, settings.mirror,
+                                     progress)  # fmt: skip
             self._candidates = {k: v for k, v in self._candidates.items() if k[0] == key[0]}
-            self._candidates[key] = build_candidates(
-                self.library, aspect, settings.crops, settings.mirror
-            )
+            self._candidates[key] = cands
         return key, self._candidates[key]
 
-    def index(self, key: tuple, cands: CandidateSet, settings: MatchSettings) -> SearchIndex:
+    def index(
+        self, key: tuple, cands: CandidateSet, settings: MatchSettings,
+        progress=lambda message, fraction: None,
+    ) -> SearchIndex:  # fmt: skip
         weights = settings.weights()
         full = (key, tuple(np.round(weights, 6)))
         index = self._indexes.get(full)
         if index is None or abs(index.tint_ref - settings.tint_value) > TINT_REBUILD:
+            index = SearchIndex(cands, weights, settings.tint_value, progress=progress)
             self._indexes = {k: v for k, v in self._indexes.items() if k[0][0] == key[0]}
-            index = self._indexes[full] = SearchIndex(cands, weights, settings.tint_value)
+            self._indexes[full] = index
         return index
 
     def run(
@@ -134,6 +168,8 @@ class Matcher:
         progress: Progress = lambda message, fraction: None,
         cancelled: Callable[[], bool] = lambda: False,
         pins: Pins | None = None,
+        preview: Callable[[MatchPreview], None] | None = None,
+        detail: Progress | None = None,
     ) -> MatchResult:
         timings: dict[str, float] = {}
         clock = [time.perf_counter()]
@@ -147,6 +183,12 @@ class Matcher:
             clock[0] = now
             progress(message, fraction)
 
+        def sub_step(message: str, fraction: float) -> None:  # within a long step
+            if cancelled():
+                raise MatchCancelled()
+            if detail is not None:
+                detail(message, fraction)
+
         n = len(regions)
         tint = settings.tint_value
         k = settings.candidates
@@ -154,6 +196,24 @@ class Matcher:
         step("Analyzing regions", 0.0)
         targets = target_descriptors(regions, ctx, rasterize(regions))
         need = np.flatnonzero(targets.needed)
+        target_rgb = np.full((n, 3), np.nan, np.float32)
+        target_rgb[need] = np.clip(oklab_to_srgb(targets.desc[need][:, MEAN]), 0, 1)
+
+        def show(stage: PreviewStage, ref=None, cost=None, tint_target=None) -> None:
+            if preview is None:
+                return
+            result = None
+            if ref is not None:
+                tint_target = targets.desc[:, MEAN] if tint_target is None else tint_target
+                result = self._snapshot(regions, ref, cost, tint_target, shapes, cls, tint)
+            preview(MatchPreview(stage, regions, target_rgb, result))
+
+        def show_assigned(stage: PreviewStage) -> None:
+            if preview is not None:
+                show(stage, self._chosen(assign, cand_ref), assign.chosen_costs(),
+                     assign.tint_target)  # fmt: skip
+
+        show(PreviewStage.SKETCH)
         weights = region_weights(settings.weights(), targets.mask, tint)
         classes, cls = (
             aspect_classes(regions.size[:, 0] / regions.size[:, 1])
@@ -172,10 +232,10 @@ class Matcher:
             if not len(regs):
                 continue
             step(f"Indexing tiles for {aspect:.3g}:1 regions", 0.05 + 0.25 * c / len(classes))
-            key, cands = self.candidates(aspect, settings)
+            key, cands = self.candidates(aspect, settings, sub_step)
             if not len(cands):
                 continue
-            index = self.index(key, cands, settings)
+            index = self.index(key, cands, settings, sub_step)
             shapes[c] = (cands, index, regs)
             step("Checking search accuracy", None, "index")
             effort, stats = self._calibrate(cands, index, regs, targets.desc, weights, settings)
@@ -190,6 +250,8 @@ class Matcher:
             raise ValueError("no tiles fit these regions (empty library?)")
         pinned, pin_ref, pin_cost = self._pin(pins, shapes, cls, need, targets, weights, settings,
                                               cand_ref, costs)  # fmt: skip
+        show(PreviewStage.BEST, np.where(np.isfinite(costs[:, 0]), cand_ref[:, 0], -1),
+             costs[:, 0])  # fmt: skip
         free = need[~np.isin(need, pinned)]
         tiles = np.full((n, kw), -1, np.int64)
         cand_mean = np.zeros((n, kw, 3), np.float32)
@@ -216,11 +278,13 @@ class Matcher:
             assign.greedy(order)
         unplaced = need[assign.choice[need] < 0]
         if len(unplaced):  # widen the search for regions every candidate of which is taken
+            show_assigned(PreviewStage.ASSIGNED)
             step("Widening search", 0.65, "assign")
             self._research(shapes, cls, unplaced, targets, weights, settings, kw, efforts,
                            4, assign, cand_ref, cand_mean)  # fmt: skip
             assign.greedy(self._priority(unplaced, assign.costs, importance))
         forced = assign.force(need[assign.choice[need] < 0])
+        show_assigned(PreviewStage.COMPLETE)
 
         if not settings.error_diffusion:
             deadline = time.perf_counter() + settings.refine_seconds
@@ -228,7 +292,9 @@ class Matcher:
                                              assign.chosen_costs(), 0) * importance))  # fmt: skip
             while time.perf_counter() < deadline:
                 step("Refining", 0.7, "assign")
-                if assign.refine_pass(order, importance) <= 1e-6 * max(total, 1e-12):
+                gain = assign.refine_pass(order, importance)
+                show_assigned(PreviewStage.REFINING)
+                if gain <= 1e-6 * max(total, 1e-12):
                     break
 
         step("Checking quality", 0.8, "refine")
@@ -252,6 +318,7 @@ class Matcher:
             forced += assign.force(worst[assign.choice[worst] < 0])
             if not settings.error_diffusion:
                 assign.refine_pass(order, importance)
+            show_assigned(PreviewStage.ADAPTIVE)
             report, target = quality(target)
             if report.score < best[0] - 1e-3:
                 improvement = (best[0] - report.score) / max(best[0], 1e-9)
@@ -456,8 +523,17 @@ class Matcher:
         return evaluate(regions, ctx, cells, placed, target), target
 
     def _result(self, regions, assign, shapes, cls, cand_ref, targets, tint, report, regret):
+        tint_target = (
+            assign.tint_target if assign.tint_target is not None else targets.desc[:, MEAN]
+        )
+        return self._snapshot(regions, self._chosen(assign, cand_ref), assign.chosen_costs(),
+                              tint_target, shapes, cls, tint, report, regret)  # fmt: skip
+
+    @staticmethod
+    def _snapshot(regions, ref, cost, tint_target, shapes, cls, tint, report=None, regret=None):
+        """A result showing candidate ref[r] in each region r (-1: none), every array
+        copied (the run may go on changing its own)."""
         n = len(regions)
-        ref = self._chosen(assign, cand_ref)
         tile = np.full(n, -1, np.int64)
         rect = np.zeros((n, 4), np.float32)
         mirrored = np.zeros(n, bool)
@@ -467,13 +543,11 @@ class Matcher:
             i = ref[rows]
             tile[rows], rect[rows], mirrored[rows] = cands.tile[i], cands.rect[i], cands.mirrored[i]
             mean[rows] = cands.desc[i][:, MEAN].astype(np.float32)
-        tint_target = (
-            assign.tint_target if assign.tint_target is not None else targets.desc[:, MEAN]
-        ).astype(np.float32)
         return MatchResult(
             regions=regions, tile=tile, rect=rect, mirrored=mirrored,
-            cost=assign.chosen_costs().astype(np.float32), tile_mean=mean,
-            tint_target=tint_target, tint=tint, quality=report, regret=regret,
+            cost=np.array(cost, np.float32), tile_mean=mean,
+            tint_target=np.array(tint_target, np.float32), tint=tint, quality=report,
+            regret=[] if regret is None else regret,
         )  # fmt: skip
 
     @staticmethod

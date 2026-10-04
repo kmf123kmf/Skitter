@@ -11,13 +11,16 @@ from dataclasses import dataclass
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QCheckBox,
     QColorDialog,
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
     QMenu,
+    QSizePolicy,
     QSpinBox,
     QToolButton,
     QWidget,
@@ -30,7 +33,10 @@ from skitter.core.slicing import (
     FloatParam,
     IntParam,
     Param,
+    RangeParam,
 )
+
+RANGE_BOX_MIN = 48  # px: the least each box of a range keeps (the row shares the rest)
 
 COLOR_PRESETS = (
     ("#000000", "Black"), ("#1e1e1e", "Dark gray"), ("#808080", "Gray"), ("#ffffff", "White"),
@@ -85,6 +91,59 @@ def _float_editor(param: FloatParam) -> Editor:
     spin.setSuffix(param.suffix)
     spin.setKeyboardTracking(False)
     return Editor(spin, spin.setValue, spin.valueChanged.connect)
+
+
+@register_editor(RangeParam)
+def _range_editor(param: RangeParam) -> Editor:
+    """Two boxes in one row, "low – high" (the unit only after the second, no arrow
+    buttons); raising the low end above the high one moves both, and the other way
+    around."""
+    widget = QWidget()
+    layout = QHBoxLayout(widget)
+    layout.setContentsMargins(0, 0, 0, 0)
+    layout.setSpacing(4)
+    boxes = []
+    for i in range(2):
+        box = QSpinBox() if param.whole else QDoubleSpinBox()
+        if not param.whole:
+            box.setDecimals(param.decimals)
+        box.setRange(param.min, param.max)
+        box.setSingleStep(param.step)
+        box.setKeyboardTracking(False)
+        if i == 1:
+            box.setSuffix(param.suffix)
+        # Spin boxes ask for room for their widest possible value ("20.00 turns"); two
+        # side by side would widen the whole form. They share the row instead.
+        box.setMinimumWidth(RANGE_BOX_MIN)
+        box.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Fixed)  # by stretch
+        # No arrow buttons: two pairs leave too little room for the numbers. Typing, the
+        # arrow keys and the mouse wheel (once focused) still step the value.
+        box.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
+        boxes.append(box)
+    low, high = boxes
+    layout.addWidget(low, stretch=2)
+    layout.addWidget(QLabel("–"))
+    layout.addWidget(high, stretch=3)
+    callbacks = []
+
+    def set_value(value) -> None:
+        for box, v in zip(boxes, value, strict=True):
+            box.blockSignals(True)
+            box.setValue(v)
+            box.blockSignals(False)
+
+    def edited(which: int) -> None:
+        a, b = low.value(), high.value()
+        if a > b:  # keep low <= high: the other end follows
+            a, b = (a, a) if which == 0 else (b, b)
+            set_value((a, b))
+        value = (int(a), int(b)) if param.whole else (a, b)
+        for callback in callbacks:
+            callback(value)
+
+    low.valueChanged.connect(lambda _: edited(0))
+    high.valueChanged.connect(lambda _: edited(1))
+    return Editor(widget, set_value, callbacks.append)
 
 
 def color_swatch(value: str, size: int = 16) -> QIcon:

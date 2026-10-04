@@ -225,18 +225,28 @@ class TossTimeline(Timeline):
     It spins at a constant rate from start_rotation and stops spinning on
     impact. Then it bounces in place, each bounce `bounce` times the speed of
     the last (heights shrink by bounce²), and its rotation settles with a
-    damped wobble of `wobble` radians. Everything is closed form, so frames
-    are exact at any time. A tile counts as at rest (and draws among the
-    tiles on the table) only once it has settled, `settle` seconds after
-    impact.
+    damped wobble of `wobble` radians (its sign is the way the tile first
+    rocks). `bounce` and `wobble` are one value or one per tile. Everything
+    is closed form, so frames are exact at any time. A tile counts as at
+    rest (and draws among the tiles on the table) only once it has settled,
+    `settle[i]` seconds after impact.
+
+    Stacked tiles (`cover`: seconds from each tile's impact until a tile
+    lying on it lands; see cover_after_impact): a covered tile makes only the
+    hops that end back on the table before the cover lands; a later hop
+    would show it rising (and, seen from the camera, growing) under a tile
+    lying flat on it. Its rocking goes on past the cover and dies out within
+    COVER_DAMP seconds, as if pressed down. Impacts are never moved, so
+    landing orders and pacing are unaffected.
     """
 
     MAX_BOUNCES = 4
     MIN_BOUNCE = 0.01  # bounces lower than this share of the apex are dropped
+    COVER_DAMP = 0.15  # seconds a covered tile keeps rocking after a tile lands on it
 
     def __init__(self, scene: MosaicScene, start_center, start_rotation, delay, travel: float,
-                 apex: float, bounce: float = 0.0, wobble: float = 0.0,
-                 flips: Flips | None = None, start_height: float = 0.0):  # fmt: skip
+                 apex: float, bounce=0.0, wobble=0.0, flips: Flips | None = None,
+                 start_height: float = 0.0, cover=None):  # fmt: skip
         n = len(scene)
         self.flips = flips if flips is not None else Flips.none(n)
         self.final = TileFrame.final(scene)
@@ -249,12 +259,25 @@ class TossTimeline(Timeline):
         self.gravity = self._gravity(self.travel, self.apex, self.start_height)
         # Upward speed at take-off (0 for a drop from rest).
         self.speed = math.sqrt(2.0 * self.gravity * (self.apex - self.start_height))
-        self.bounce_speed = self._bounce_speeds(self.travel, self.apex, bounce, self.start_height)
-        self.bounce_time = 2.0 * self.bounce_speed / max(self.gravity, 1e-12)
-        self.bounce_start = np.concatenate([[0.0], np.cumsum(self.bounce_time)])
-        self.wobble = float(wobble)
-        self.settle = self.settle_time(self.travel, self.apex, bounce, wobble, self.start_height)
-        self.duration = float(self.delay.max() + self.travel + self.settle) if n else 0.0
+        bounce = np.broadcast_to(np.asarray(bounce, dtype=np.float64), (n,))
+        speeds = self.bounce_table(self.travel, self.apex, bounce, self.start_height)
+        g = max(self.gravity, 1e-12)
+        free_end = (2.0 * speeds / g).sum(axis=1)  # hopping time with nothing on top
+        self.cover = (np.full(n, np.inf) if cover is None
+                      else np.broadcast_to(np.asarray(cover, dtype=np.float64), (n,)))  # fmt: skip
+        in_time = np.cumsum(2.0 * speeds / g, axis=1) <= self.cover[:, None] + 1e-12
+        self.bounce_speed = np.where(in_time, speeds, 0.0)  # (N, MAX_BOUNCES), 0: none
+        self.bounce_time = 2.0 * self.bounce_speed / g
+        self.bounce_start = np.concatenate(
+            [np.zeros((n, 1)), np.cumsum(self.bounce_time, axis=1)], axis=1
+        )  # (N, MAX_BOUNCES + 1): each hop's start, then the end of the last
+        self.wobble = np.broadcast_to(np.asarray(wobble, dtype=np.float64), (n,))
+        # Rocking takes as long as a free tile's settling; a covered tile's dies out soon
+        # after the cover lands.
+        self.rock = np.where(self.wobble != 0, np.maximum(free_end, 0.3 * self.travel), 0.0)
+        rock_end = np.minimum(self.rock, self.cover + self.COVER_DAMP)
+        self.settle = np.maximum(self.bounce_start[:, -1], rock_end)  # (N,)
+        self.duration = float((self.delay + self.travel + self.settle).max()) if n else 0.0
 
     @staticmethod
     def _gravity(travel: float, apex: float, start_height: float = 0.0) -> float:
@@ -277,6 +300,33 @@ class TossTimeline(Timeline):
             speeds.append(v)
             v *= bounce
         return np.array(speeds)
+
+    @classmethod
+    def bounce_table(cls, travel: float, apex: float, bounce, start_height: float = 0.0):
+        """(N, MAX_BOUNCES) take-off speed of each tile's bounces (0: no more bounces),
+        as _bounce_speeds for each tile's own `bounce`."""
+        bounce = np.asarray(bounce, dtype=np.float64).reshape(-1)
+        apex = max(apex, start_height)
+        speeds = np.zeros((len(bounce), cls.MAX_BOUNCES))
+        if apex <= 0:
+            return speeds
+        gravity = cls._gravity(travel, apex, start_height)
+        k = np.arange(1, cls.MAX_BOUNCES + 1)
+        speeds = math.sqrt(2.0 * gravity * apex) * np.maximum(bounce, 0.0)[:, None] ** k
+        high = speeds**2 / (2 * gravity) >= cls.MIN_BOUNCE * apex
+        return np.where(np.cumprod(high, axis=1).astype(bool), speeds, 0.0)
+
+    @classmethod
+    def settle_times(cls, travel: float, apex: float, bounce, wobble,
+                     start_height: float = 0.0) -> np.ndarray:  # fmt: skip
+        """(N,) settle_time of each tile on its own (nothing landing on it)."""
+        travel = max(float(travel), 1e-6)
+        apex = max(float(apex), float(start_height), 0.0)
+        bounce, wobble = np.broadcast_arrays(np.asarray(bounce, float), np.asarray(wobble, float))
+        speeds = cls.bounce_table(travel, apex, bounce, start_height)
+        gravity = cls._gravity(travel, apex, start_height) if apex > 0 else 1.0
+        bounces = (2.0 * speeds / gravity).sum(axis=1)
+        return np.where(wobble.reshape(-1) != 0, np.maximum(bounces, 0.3 * travel), bounces)
 
     @classmethod
     def settle_time(cls, travel: float, apex: float, bounce: float, wobble: float,
@@ -303,18 +353,19 @@ class TossTimeline(Timeline):
 
         after = tau - self.travel  # time since first impact
         landed = after >= 0
-        if len(self.bounce_speed):
-            k = np.clip(np.searchsorted(self.bounce_start, after, side="right") - 1,
-                        0, len(self.bounce_speed) - 1)  # fmt: skip
-            s = after - self.bounce_start[k]
-            bouncing = landed & (after < self.bounce_start[-1])
-            hop = self.bounce_speed[k] * s - 0.5 * self.gravity * s**2
-            height = np.where(bouncing, np.maximum(hop, 0.0), np.where(landed, 0.0, height))
-        else:
-            height = np.where(landed, 0.0, height)
-        if self.wobble and self.settle > 0:
-            u = np.clip(after / self.settle, 0.0, 1.0)
+        rows = np.arange(len(tau))
+        # Each tile's current hop: the last one started (all start at 0 once there are no more).
+        k = (after[:, None] >= self.bounce_start[:, :-1]).sum(axis=1) - 1
+        k = np.clip(k, 0, self.MAX_BOUNCES - 1)
+        s = after - self.bounce_start[rows, k]
+        bouncing = landed & (after < self.bounce_start[:, -1])
+        hop = self.bounce_speed[rows, k] * s - 0.5 * self.gravity * s**2
+        height = np.where(bouncing, np.maximum(hop, 0.0), np.where(landed, 0.0, height))
+        if np.any(self.wobble):
+            u = np.clip(after / np.maximum(self.rock, 1e-9), 0.0, 1.0)
             swing = self.wobble * np.exp(-4.0 * u) * (1.0 - u) * np.sin(3.0 * math.tau * u)
+            pressed = np.clip((after - self.cover) / self.COVER_DAMP, 0.0, 1.0)  # 1: still
+            swing = swing * (1.0 - pressed) ** 2
             rotation = np.where(landed, b.rotation + swing, rotation)
 
         rest = after >= self.settle
@@ -382,6 +433,16 @@ def _conditioned_keys(keys, below_start, below, above_start, above, sweeps, seed
             for k in range(above_start[i], above_start[i + 1]):
                 hi = min(hi, keys[above[k]])
             keys[i] = lo + np.random.random() * (hi - lo)
+
+
+def cover_after_impact(scene: MosaicScene, impact) -> np.ndarray:
+    """(N,) seconds from each tile's impact until the first tile lying on it lands
+    (inf: nothing does). impact: (N,) when each tile first touches the table."""
+    impact = np.asarray(impact, dtype=np.float64)
+    first = np.full(len(scene), np.inf)
+    lower, upper = scene.overlaps.T
+    np.minimum.at(first, lower, impact[upper])
+    return first - impact
 
 
 def landing_gap(n: int) -> int:

@@ -15,9 +15,16 @@ changes, since reranking always uses the real tint.
 `exact_best` searches every candidate exactly for a sample of regions; the
 gap between that and the approximate result (regret) tells whether the
 approximate search is good enough.
+
+Building candidates and indexes takes a while for big libraries (training
+the IVF clusters most of all), so both report progress as they go: an
+optional `progress(message, fraction)` that may raise to stop the work.
+Clusters are trained one k-means round at a time, which gives exactly the
+centroids of faiss's own training (tests check it).
 """
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import faiss
@@ -29,6 +36,12 @@ from skitter.core.tiles.library import TileLibrary
 
 EXACT_LIMIT = 50_000  # candidates up to which a flat (exact) index is used
 CROP_PENALTY_SCALE = 0.01  # cost of keeping none of a photo at crop_penalty 1
+
+Progress = Callable[[str, float], None]  # (what is being done, fraction of it done)
+
+
+def _quiet(message: str, fraction: float) -> None:
+    pass
 
 
 @dataclass(frozen=True)
@@ -95,12 +108,18 @@ class CandidateSet:
 
 
 def build_candidates(
-    library: TileLibrary, aspect: float, crops: int = 3, mirrored: bool = False
-) -> CandidateSet:
+    library: TileLibrary, aspect: float, crops: int = 3, mirrored: bool = False,
+    progress: Progress = _quiet,
+) -> CandidateSet:  # fmt: skip
     ids = library.ids
     c = crop_candidates(library.width[ids], library.height[ids], aspect, max_crops=crops)
     tile = ids[c.tile]
-    desc = tile_descriptors(library.thumbs, library.thumb_size, tile, c.rect)
+
+    def described(done: int, total: int) -> None:
+        progress(f"Describing tile crops: {done:,} of {total:,}", done / max(total, 1))
+
+    described(0, len(tile))
+    desc = tile_descriptors(library.thumbs, library.thumb_size, tile, c.rect, progress=described)
     flags = np.zeros(len(tile), bool)
     rect, retained = c.rect, c.retained
     if mirrored:
@@ -120,7 +139,8 @@ def scaled(desc: np.ndarray, weights: np.ndarray, tint: float) -> np.ndarray:
 class SearchIndex:
     """faiss index over one CandidateSet at reference weights and tint."""
 
-    def __init__(self, cands: CandidateSet, weights: np.ndarray, tint_ref: float, chunk=262_144):
+    def __init__(self, cands: CandidateSet, weights: np.ndarray, tint_ref: float, chunk=262_144,
+                 progress: Progress = _quiet):  # fmt: skip
         self.cands = cands
         self.weights = np.asarray(weights, dtype=np.float64)
         self.tint_ref = tint_ref
@@ -132,9 +152,11 @@ class SearchIndex:
             nlist = int(np.clip(4 * math.sqrt(m), 64, 65_536))
             self.index = faiss.index_factory(DIM, f"IVF{nlist},SQ8")
             sample = np.random.default_rng(0).choice(m, min(m, 64 * nlist, 300_000), False)
-            self.index.train(scaled(cands.desc[np.sort(sample)], self.weights, tint_ref))
+            train_ivf(self.index, scaled(cands.desc[np.sort(sample)], self.weights, tint_ref),
+                      progress)  # fmt: skip
             self.exact = False
         for lo in range(0, m, chunk):
+            progress(f"Adding tiles to the index: {lo:,} of {m:,}", lo / max(m, 1))
             self.index.add(scaled(cands.desc[lo : lo + chunk], self.weights, tint_ref))
 
     def search(self, desc: np.ndarray, k: int, nprobe: int = 16) -> np.ndarray:
@@ -146,6 +168,26 @@ class SearchIndex:
             return np.full((len(desc), k), -1, np.int64)
         _, ids = self.index.search(scaled(desc, self.weights, self.tint_ref), k)
         return ids
+
+
+def train_ivf(index, x: np.ndarray, progress: Progress = _quiet) -> None:
+    """index.train(x) for an untrained IVF index with a flat quantizer, one k-means
+    round at a time (centroids carried from round to round), reporting each."""
+    ivf = faiss.extract_index_ivf(index)
+    params, nlist = ivf.cp, ivf.nlist
+    centroids = None
+    for i in range(params.niter):
+        progress(f"Grouping similar tiles: round {i + 1} of {params.niter}", i / params.niter)
+        clustering = faiss.Clustering(ivf.d, nlist, params)
+        clustering.niter = 1
+        if centroids is not None:  # start where the last round ended
+            faiss.copy_array_to_vector(centroids.ravel(), clustering.centroids)
+        clustering.train(x, faiss.IndexFlatL2(ivf.d))
+        centroids = faiss.vector_to_array(clustering.centroids).reshape(nlist, ivf.d)
+    progress("Grouping similar tiles: finishing", 1.0)
+    ivf.quantizer.reset()
+    ivf.quantizer.add(centroids)
+    index.train(x)  # the quantizer is trained, so only the scalar quantizer trains here
 
 
 def region_weights(weights, mask, tint: float) -> np.ndarray:

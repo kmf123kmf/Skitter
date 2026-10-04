@@ -3,6 +3,8 @@
 Matching runs in the background (see core/matching). The preview draws the
 session's scene of the result (core/scene.py) with its shared textures:
 thumbnails first, full-size crops once read (ui/render/tile_textures.py).
+While matching runs, the view follows the run instead: target colors, then
+the tiles chosen so far as they improve (ui/render/match_preview.py).
 A heat map shows where the mosaic differs most from the image as seen from
 a distance.
 
@@ -15,7 +17,7 @@ when matching again.
 import html
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QAction, QImage, QKeySequence
 from PySide6.QtWidgets import (
     QComboBox,
@@ -33,6 +35,7 @@ from skitter.core.assembly import TileFiles
 from skitter.core.matching import edit as picks
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.scene import MosaicScene
+from skitter.ui.render.match_preview import PreviewBuilder, PreviewFrame
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import TileTextures
 from skitter.ui.steps.base import StepPage, side_panel
@@ -80,6 +83,7 @@ def _muted(label: QLabel) -> QLabel:
 
 class MatchingStep(StepPage):
     title = "Matching"
+    export_requested = Signal()  # the user pressed Export Image…
 
     def __init__(self, session, parent=None):
         super().__init__(session, parent)
@@ -104,6 +108,12 @@ class MatchingStep(StepPage):
         self._feedback = ""  # result of the last pick, shown until the selection changes
         self._reader = CropReader(self)
         self._reader.ready.connect(self._on_crop)
+        # The run in progress (shown in place of the mosaic while matching)
+        self._run_sketch: SpriteLayer | None = None  # target colors of regions without a tile
+        self._run_tiles: SpriteLayer | None = None
+        self._run_latest = None  # the newest preview, built when this tab shows
+        self._builder = PreviewBuilder(self)
+        self._builder.ready.connect(self._show_run)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -117,6 +127,7 @@ class MatchingStep(StepPage):
                 self._build_picker(),
                 self._build_display_group(),
                 self.settings_group,
+                self._build_export_group(),
             )  # fmt: skip
         )
         session.source_committed.connect(self._sync_image)
@@ -125,7 +136,11 @@ class MatchingStep(StepPage):
                        session.matching_changed, session.busy_changed):  # fmt: skip
             signal.connect(self._refresh)
         session.matching_progress.connect(self._on_progress)
+        session.matching_detail.connect(self._on_detail)
+        session.matching_preview.connect(self._on_run_preview)
         session.mosaic_edited.connect(self._on_mosaic_edited)
+        for signal in session.export_signals():
+            signal.connect(self._refresh_export)
         canvas = self.viewer.canvas
         canvas.cursor_moved.connect(self._on_hover)
         canvas.cursor_left.connect(self._on_cursor_left)
@@ -133,6 +148,7 @@ class MatchingStep(StepPage):
         self.viewer.double_click_zooms = False  # double-click edits the tile instead
         canvas.double_clicked.connect(self._on_double_click)
         self._refresh()
+        self._refresh_export()
 
     # Construction
 
@@ -148,6 +164,13 @@ class MatchingStep(StepPage):
         self.progress = QProgressBar()
         self.progress.setTextVisible(False)
         self.status = _muted(QLabel())
+        # Within a long step (indexing tiles): a thinner bar, shown while it reports.
+        self.sub_progress = QProgressBar()
+        self.sub_progress.setTextVisible(False)
+        self.sub_progress.setRange(0, 1000)
+        self.sub_progress.setFixedHeight(max(4, self.progress.sizeHint().height() // 2))
+        self.sub_status = fixed_width(_muted(QLabel()))
+        self.sub_status.setWordWrap(False)
         self._error = QLabel()
         self._error.setWordWrap(True)
         self._error.setStyleSheet(WARNING_STYLE)
@@ -156,7 +179,10 @@ class MatchingStep(StepPage):
         layout.addLayout(buttons)
         layout.addWidget(self.progress)
         layout.addWidget(self.status)
+        layout.addWidget(self.sub_progress)
+        layout.addWidget(self.sub_status)
         layout.addWidget(self._error)
+        self._show_detail(False)
         return group
 
     def _build_settings_group(self) -> QGroupBox:
@@ -201,7 +227,7 @@ class MatchingStep(StepPage):
         for value, label in DISPLAY_MODES:
             self.display_mode.addItem(label, value)
         self.display_mode.currentIndexChanged.connect(self._apply_display)
-        self._detail = _muted(QLabel("—"))
+        self._detail = fixed_width(_muted(QLabel("—")), lines=2)  # the run's stage: no jumps
         self._detail.setToolTip(
             "Tiles first show as small thumbnails, then at full size once read from their files."
         )
@@ -210,6 +236,17 @@ class MatchingStep(StepPage):
         form.addRow("Show:", self.display_mode)
         form.addRow("Tile detail:", self._detail)
         return group
+
+    def _build_export_group(self) -> QGroupBox:
+        self.export_button = QPushButton("Export Image…")
+        self.export_button.setToolTip("Size, format, tile detail and more, then export.")
+        self.export_button.clicked.connect(self.export_requested)
+        group = QGroupBox("Image")
+        QVBoxLayout(group).addWidget(self.export_button)
+        return group
+
+    def _refresh_export(self) -> None:
+        self.export_button.setEnabled(self.session.can_export)
 
     def _build_picker(self) -> TilePicker:
         picker = self.picker = TilePicker()
@@ -284,6 +321,9 @@ class MatchingStep(StepPage):
     def on_enter(self) -> None:
         self._sync_image()
         self._refresh()
+        if self._run_latest is not None:  # skipped while another tab showed
+            self._builder.submit(self._run_latest, self.session.library,
+                                 self.session.slice_context)  # fmt: skip
 
     def on_leave(self) -> None:
         self._preview(-1)
@@ -677,6 +717,7 @@ class MatchingStep(StepPage):
             self.viewer.set_world_size(*size)
 
     def _on_progress(self, message: str, fraction: float) -> None:
+        self._show_detail(False)  # a new step: its own detail (if any) follows
         self.status.setText(message)
         if fraction < 0:
             self.progress.setRange(0, 0)
@@ -684,10 +725,23 @@ class MatchingStep(StepPage):
             self.progress.setRange(0, 1000)
             self.progress.setValue(round(fraction * 1000))
 
+    def _on_detail(self, message: str, fraction: float) -> None:
+        if self.session.busy != "matching":
+            return
+        self.sub_status.setText(message)
+        self.sub_progress.setValue(round(min(max(fraction, 0.0), 1.0) * 1000))
+        self._show_detail(True)
+
+    def _show_detail(self, shown: bool) -> None:
+        self.sub_progress.setVisible(shown)
+        self.sub_status.setVisible(shown)
+
     def _refresh(self) -> None:
         session = self.session
         busy = session.busy
         matching = busy == "matching"
+        if not matching:
+            self._show_detail(False)
         self.run_button.setEnabled(session.can_match and not busy)
         self.cancel_button.setEnabled(matching)
         self.progress.setVisible(matching)
@@ -714,7 +768,8 @@ class MatchingStep(StepPage):
                     text += (f" {session.dropped_picks:,} hand-picked tiles could not be kept: "
                              "their photos are no longer in the library.")  # fmt: skip
                 self.status.setText(text)
-        if session.scene is not self._shown and not matching:
+        ended = not matching and self._end_run_view()
+        if not matching and (ended or session.scene is not self._shown):
             self.select(-1)
             self._show_scene(session.scene)
         self._refresh_edit()
@@ -777,6 +832,9 @@ class MatchingStep(StepPage):
 
     def _apply_display(self) -> None:
         mode = self.display_mode.currentData()
+        for layer in (self._run_sketch, self._run_tiles):
+            if layer is not None:
+                layer.visible = mode in (TILES, HEAT)
         if self._tile_layer is not None:
             self._tile_layer.visible = mode in (TILES, HEAT)
         if self._heat_layer is not None:
@@ -841,5 +899,58 @@ class MatchingStep(StepPage):
         self._hover.setText(elide(self._hover, full) + "\n" + details)
         self._hover.setToolTip(full)
 
+    # The run in progress
+
+    def _on_run_preview(self, preview) -> None:
+        session = self.session
+        if session.busy != "matching":  # arrived after the run ended
+            return
+        self._run_latest = preview
+        if self.isVisible():
+            self._builder.submit(preview, session.library, session.slice_context)
+
+    def _show_run(self, frame: PreviewFrame) -> None:
+        """Show a frame of the run in place of the mosaic (or the last frame)."""
+        if self.session.busy != "matching":
+            return
+        canvas = self.viewer.canvas
+        if self._shown is not None or self._tile_layer is not None:  # the run's first frame
+            for layer in (self._tile_layer, self._heat_layer):
+                if layer is not None:
+                    canvas.remove_layer(layer)
+            self._tile_layer = self._heat_layer = None
+            self._shown = None
+            self.overlays.clear()
+            self._show_stats(None)
+            self._hover.setText("—")
+        if frame.pages is not None:
+            if self._run_tiles is not None:
+                canvas.remove_layer(self._run_tiles)
+            self._run_tiles = canvas.add_layer(frame.pages, self.overlays.first)
+        elif frame.tiles is not None and self._run_tiles is not None:
+            self._run_tiles.instances = frame.tiles
+            self._run_tiles.mark_dirty()
+        if self._run_sketch is not None:
+            canvas.remove_layer(self._run_sketch)
+        below = canvas.layers.index(self._run_tiles) if self._run_tiles else self.overlays.first
+        self._run_sketch = canvas.add_layer(frame.sketch, below)
+        text = frame.stage.value
+        if frame.tiles is not None:
+            text += f"\n{frame.placed:,} of {frame.needed:,} placed"
+        self._detail.setText(text)
+        self._apply_display()
+
+    def _end_run_view(self) -> bool:
+        """Stop showing the run (it ended); True if it was shown."""
+        self._builder.reset()
+        self._run_latest = None
+        shown = self._run_sketch is not None or self._run_tiles is not None
+        for layer in (self._run_sketch, self._run_tiles):
+            if layer is not None:
+                self.viewer.canvas.remove_layer(layer)
+        self._run_sketch = self._run_tiles = None
+        return shown
+
     def shutdown(self) -> None:
+        self._builder.reset()
         self._reader.cancel()

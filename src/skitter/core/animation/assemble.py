@@ -11,6 +11,7 @@ from skitter.core.animation.base import (
     TileFrame,
     Timeline,
     TossTimeline,
+    cover_after_impact,
     landing_order,
     random_landing_order,
     register_choreography,
@@ -18,7 +19,7 @@ from skitter.core.animation.base import (
 from skitter.core.animation.look import NEAR, AnimationLook, clear_of_axis, scene_extent
 from skitter.core.easing import ease_out_back, ease_out_cubic
 from skitter.core.scene import MosaicScene
-from skitter.core.slicing.params import BoolParam, ChoiceParam, FloatParam, IntParam
+from skitter.core.slicing.params import BoolParam, ChoiceParam, FloatParam, IntParam, RangeParam
 
 TOSS_LIMIT = 0.8  # throws peak at most this share of the camera height (5x size)
 
@@ -83,11 +84,16 @@ class AssembleChoreography(Choreography):
              "from the edge): they loom huge and cover the view. More slides tiles in "
              "from the edges of the picture, smaller when they appear.",
     )  # fmt: skip
-    spin = FloatParam(1.0, "Spin", min=0.0, max=20.0, step=0.25, suffix=" turns")
-    flips = IntParam(
-        0, "Flips", min=0, max=8,
+    spin = RangeParam(
+        (0.0, 1.0), "Spin", min=0.0, max=20.0, step=0.25, suffix=" turns",
+        help="How far each tile turns on the way, either way: each tile draws its own "
+             "amount from this range (equal ends: all the same).",
+    )  # fmt: skip
+    flips = RangeParam(
+        (0, 0), "Flips", min=0, max=8, step=1, whole=True,
         help="Whole times each tile turns over in flight (about one of its edges), "
-             "showing its back on the way. Tiles always land face up, the right way round.",
+             "showing its back on the way; each tile draws its own number from this range. "
+             "Tiles always land face up, the right way round.",
     )  # fmt: skip
     arc = FloatParam(
         0.4, "Arc height", min=0.0, max=5.0, step=0.05, suffix=" × mosaic",
@@ -95,15 +101,22 @@ class AssembleChoreography(Choreography):
         help="How high tiles fly at the top of their arc. Higher arcs fall harder: "
              "gravity follows from this and the flight time.",
     )  # fmt: skip
-    bounce = FloatParam(
-        0.3, "Bounce", min=0.0, max=0.8, step=0.05, when=lambda c: c.motion != "glide",
-        help="How springy a landing is: each bounce keeps this share of the speed "
-             "(0: no bounce).",
-    )  # fmt: skip
-    wobble = FloatParam(
-        4.0, "Settle wobble", min=0.0, max=30.0, step=1.0, decimals=0, suffix="°",
+    bounce = RangeParam(
+        (0.2, 0.4),
+        "Bounce",
+        min=0.0,
+        max=0.8,
+        step=0.05,
         when=lambda c: c.motion != "glide",
-        help="A small rocking turn that dies away after landing.",
+        help="How springy a landing is: each bounce keeps this share of the speed "
+        "(0: no bounce); each tile draws its own from this range. A tile that "
+        "another lands on stops hopping before it, and soon stops rocking.",
+    )
+    wobble = RangeParam(
+        (2.0, 6.0), "Settle wobble", min=0.0, max=30.0, step=1.0, decimals=0, suffix="°",
+        when=lambda c: c.motion != "glide",
+        help="A small rocking turn that dies away after landing, either way: each tile "
+             "draws its own amount from this range (equal ends: all the same).",
     )  # fmt: skip
     shrink = FloatParam(
         0.3, "Start size", min=0.0, max=10.0, step=0.1, suffix=" ×",
@@ -126,17 +139,18 @@ class AssembleChoreography(Choreography):
         start_height = camera if drop else 0.0  # at the camera, at rest
         # A throw never reaches the camera (it would pass the lens and pop into view).
         apex = start_height if drop else min(self.arc * extent, TOSS_LIMIT * camera)
-        wobble = math.radians(self.wobble)
-        # Bouncing and settling take a fixed share of the flight time; a tile's whole
-        # trip must fit in the duration.
+        tossed = self.motion != "glide"
+        params = type(self)
+        # Bouncing and settling take a share of the flight time (at most this, for the
+        # springiest tile); every tile's whole trip must fit in the duration.
         share = (
-            TossTimeline.settle_time(1.0, apex, self.bounce, wobble, start_height)
-            if self.motion != "glide"
+            TossTimeline.settle_time(
+                1.0, apex, self.bounce[1], math.radians(self.wobble[1]), start_height
+            )  # fmt: skip
+            if tossed
             else 0
         )
         travel = min(self.travel, self.duration / (1.0 + share))
-        settle = share * travel
-        window = max(self.duration - travel - settle, 0.0)
 
         # Preferred place in the sequence (0..1), loosened by the spread; overlapping
         # tiles still land bottom first. Landings are evenly paced.
@@ -148,7 +162,30 @@ class AssembleChoreography(Choreography):
             preferred[np.argsort(key, kind="stable")] = np.linspace(0.0, 1.0, n) if n else []
             preferred += rng.uniform(-1.0, 1.0, n) * self.spread
             order = landing_order(scene, preferred)
-        delay = order / max(n - 1, 1) * window
+        place = order / max(n - 1, 1)  # 0: lands first, 1: last
+        window = max(self.duration - travel, 0.0)  # when the last tile lands, after the first
+        if tossed:  # each tile's own bounce and rocking, drawn from the ranges
+            bounce = params.bounce.draw(self.bounce, rng, n)
+            wobble = (rng.choice([-1.0, 1.0], n)  # rocking either way first
+                      * np.radians(params.wobble.draw(self.wobble, rng, n)))  # fmt: skip
+            # Room for each tile to settle after landing, with nothing on top (a tile
+            # something lands on settles sooner). Whether one will be covered depends
+            # only on the order, so the window comes from the others: the last to come
+            # to rest does so exactly at the end. All of them, if a covered tile still
+            # wouldn't fit (a cover that itself settles very fast).
+            free = TossTimeline.settle_times(travel, apex, bounce, wobble, start_height)
+            room = self.duration - travel - free
+            covered = np.zeros(n, bool)
+            covered[scene.overlaps[:, 0]] = True
+
+            def fit(tiles) -> float:
+                tiles = tiles & (place > 0)
+                if not tiles.any():
+                    return window
+                return max(min(window, float((room[tiles] / place[tiles]).min())), 0.0)
+
+            windows = (fit(~covered), fit(np.ones(n, bool)))
+        delay = place * window
 
         x0, y0, x1, y1 = scene.bounds
         middle = np.array([(x0 + x1) / 2, (y0 + y1) / 2])
@@ -157,15 +194,25 @@ class AssembleChoreography(Choreography):
         radius = reach * rng.uniform(1.0, 1.6, n)
         final = TileFrame.final(scene)
         start_center = middle + radius[:, None] * np.stack([np.cos(angle), np.sin(angle)], axis=1)
-        start_rotation = final.rotation + rng.uniform(-1.0, 1.0, n) * self.spin * 2 * math.pi
+        way = rng.choice([-1.0, 1.0], n)  # each tile spins either way
+        start_rotation = final.rotation + way * params.spin.draw(self.spin, rng, n) * 2 * math.pi
         flips = Flips(  # random direction and edge per tile, always whole turns
-            turns=self.flips * rng.choice([-1.0, 1.0], n), axis=rng.integers(0, 2, n)
+            turns=params.flips.draw(self.flips, rng, n) * rng.choice([-1.0, 1.0], n),
+            axis=rng.integers(0, 2, n),
         )
         if drop:
             start_center = self._drop_starts(scene, final, middle, extent, rng)
-        if self.motion != "glide":
-            return TossTimeline(scene, start_center, start_rotation, delay, travel, apex,
-                                self.bounce, wobble, flips, start_height)  # fmt: skip
+        if tossed:
+            for window in windows:
+                delay = place * window
+                cover = cover_after_impact(scene, delay + travel)  # stacked tiles stop hopping
+                timeline = TossTimeline(
+                    scene, start_center, start_rotation, delay, travel, apex, bounce, wobble,
+                    flips, start_height, cover,
+                )  # fmt: skip
+                if timeline.duration <= self.duration + 1e-9:
+                    break
+            return timeline
         start = final.replace(
             center=start_center,
             size=final.size * self.shrink,

@@ -366,3 +366,23 @@ def test_line_style_persists_and_disables_when_hidden(window, slicing):
     assert not slicing.line_color.isEnabled() and not slicing.line_opacity.isEnabled()
     slicing.display_mode.setCurrentIndex(1)  # outlines
     assert slicing.line_color.isEnabled() and slicing.line_opacity.isEnabled()
+
+
+def test_range_rows_never_widen_a_settings_panel(qapp):
+    """Spin boxes ask for room for their widest value ("20.00 turns"); a range row of
+    two must not, or it widens the whole form past the side panel (its right edge
+    then hides under the scrollbar, as once on the Animate tab)."""
+    from PySide6.QtWidgets import QDoubleSpinBox, QLabel
+
+    from skitter.core.slicing import RangeParam
+    from skitter.ui.widgets.param_form import RANGE_BOX_MIN, create_editor
+
+    param = RangeParam((0.0, 1.0), "Spin", min=0.0, max=20.0, suffix=" turns")
+    param.name = "spin"
+    row = create_editor(param).widget
+    dash = QLabel("–").minimumSizeHint().width()
+    assert row.minimumSizeHint().width() <= 2 * RANGE_BOX_MIN + dash + 2 * 4 + 2
+    single = QDoubleSpinBox()
+    single.setRange(0.0, 20.0)
+    single.setSuffix(" turns")
+    assert row.minimumSizeHint().width() < 2 * single.minimumSizeHint().width()

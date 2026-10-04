@@ -1,5 +1,7 @@
 """The mosaic scene and the animation framework (choreographies and timelines)."""
 
+import math
+
 import numpy as np
 import pytest
 
@@ -7,6 +9,7 @@ from skitter.core.animation import (
     Choreography,
     FlightTimeline,
     TileFrame,
+    TossTimeline,
     choreography_types,
     get_choreography,
 )
@@ -98,6 +101,7 @@ CONFIGS = [(cls, {}) for cls in choreography_types()] + [
     (AssembleChoreography, {"motion": "drop", "slant": 0.0, "flips": 1}),
     (AssembleChoreography, {"order": "random"}),
     (AssembleChoreography, {"order": "random", "motion": "drop"}),
+    (AssembleChoreography, {"motion": "drop", "bounce": (0.1, 0.7), "wobble": (4.0, 10.0)}),
 ]
 CONFIG_IDS = [
     f"{cls.id}{'-' + '-'.join(map(str, kw.values())) if kw else ''}" for cls, kw in CONFIGS
@@ -355,11 +359,13 @@ def test_assemble_fits_short_durations():
 def test_assemble_lands_tiles_at_an_even_pace(make, motion):
     scene = make()
     timeline = AssembleChoreography(duration=8, travel=1.5, motion=motion).timeline(scene)
-    settle = getattr(timeline, "settle", 0.0)  # Toss: bounces and wobble after impact
+    settle = getattr(timeline, "settle", np.zeros(len(scene)))  # Toss: bounces and wobble
     assert timeline.duration == pytest.approx(8)  # the last tile comes to rest at the end
-    landing = np.sort(timeline.delay + timeline.travel)
-    assert landing[0] == pytest.approx(1.5) and landing[-1] == pytest.approx(8 - settle)
-    np.testing.assert_allclose(np.diff(landing), (6.5 - settle) / (len(scene) - 1))
+    impact = timeline.delay + timeline.travel
+    assert (impact + settle).max() == pytest.approx(8)
+    landing = np.sort(impact)
+    assert landing[0] == pytest.approx(1.5)
+    np.testing.assert_allclose(np.diff(landing), np.diff(landing).mean(), atol=1e-9)  # even
 
 
 @pytest.mark.parametrize(("cls", "settings"), CONFIGS, ids=CONFIG_IDS)
@@ -420,19 +426,91 @@ def test_toss_falls_under_constant_gravity():
 
 def test_toss_bounces_lower_each_time_then_rests():
     scene, timeline = single_toss(wobble=0.0)
-    speeds = timeline.bounce_speed
+    speeds = timeline.bounce_speed[0]
+    speeds = speeds[speeds > 0]
     assert len(speeds) >= 2
     np.testing.assert_allclose(speeds[1:] / speeds[:-1], 0.5)  # each keeps half the speed
     peaks = [speeds[k] ** 2 / (2 * timeline.gravity) for k in range(len(speeds))]
     assert peaks[0] == pytest.approx(10.0 * 0.25)  # heights shrink by bounce²
     # Sample the first bounce: up to its peak, back to the table.
-    start = 2.0 + timeline.bounce_start[0]
-    mid = start + timeline.bounce_time[0] / 2
+    start = 2.0 + timeline.bounce_start[0, 0]
+    mid = start + timeline.bounce_time[0, 0] / 2
     assert timeline.frame(mid).heights()[0] == pytest.approx(peaks[0])
     assert not timeline.frame(mid).at_rest()[0]  # still moving: draws above tiles at rest
-    end = timeline.frame(2.0 + timeline.settle)
+    end = timeline.frame(2.0 + timeline.settle[0])
     assert end.heights()[0] == 0 and end.at_rest()[0]
-    assert timeline.duration == pytest.approx(2.0 + timeline.settle)
+    assert timeline.duration == pytest.approx(2.0 + timeline.settle[0])
+
+
+def stacked(motion, order, bounce=(0.1, 0.7), wobble=(4.0, 10.0)):
+    scene = pile_scene()
+    choreography = AssembleChoreography(motion=motion, order=order, bounce=bounce, wobble=wobble)
+    return scene, choreography.timeline(scene)
+
+
+@pytest.mark.parametrize("motion", ["toss", "drop"])
+@pytest.mark.parametrize("order", ["random", "center"])
+def test_covered_tiles_stop_hopping_first_and_rocking_soon_after(motion, order):
+    """A tile something lands on is flat on the table by then (else, seen from the
+    camera, it would grow out from under it) and still within COVER_DAMP after it;
+    rocking may go on until then (as if pressed down)."""
+    scene, timeline = stacked(motion, order)
+    final = TileFrame.final(scene)
+    lower, upper = scene.overlaps.T
+    impact = timeline.delay + timeline.travel
+    damp = TossTimeline.COVER_DAMP
+    rocked_under = 0
+    for t in np.linspace(0, timeline.duration, 900):
+        frame = timeline.frame(t)
+        covered = (impact[upper] <= t) & (impact[lower] <= t)
+        assert np.all(frame.heights()[lower[covered]] == 0)
+        turned = np.abs(frame.rotation[lower] - final.rotation[lower]) > 1e-9
+        assert not np.any(turned & (impact[upper] + damp <= t))
+        rocked_under += int((turned & covered).sum())
+    assert rocked_under > 0  # rocking goes on a little after a tile lands on it
+    # Nothing moved: impacts are where the plan put them, and the end is the mosaic.
+    assert timeline.frame(timeline.duration) is timeline.final
+
+
+@pytest.mark.parametrize("motion", ["toss", "drop"])
+def test_stacked_settling_has_no_jumps(motion):
+    from skitter.core.animation import TossTimeline as Toss
+
+    scene, timeline = stacked(motion, "random")
+    free = Toss(scene, timeline.start_center, timeline.start_rotation, timeline.delay,
+                timeline.travel, timeline.apex, 0.0, timeline.wobble, timeline.flips,
+                timeline.start_height)  # fmt: skip
+    dt = 2e-3
+    fastest_fall = math.sqrt(2 * timeline.gravity * timeline.apex) * dt
+    steps = {"height": 0.0, "turn": 0.0, "free turn": 0.0}
+    times = np.arange(0, timeline.duration, dt)
+    previous = timeline.frame(0.0), free.frame(0.0)
+    for t in times[1:]:
+        now = timeline.frame(t), free.frame(t)
+        moved = {
+            "height": np.abs(now[0].heights() - previous[0].heights()).max(),
+            "turn": np.abs(now[0].rotation - previous[0].rotation).max(),
+            "free turn": np.abs(now[1].rotation - previous[1].rotation).max(),
+        }
+        steps = {k: max(v, moved[k]) for k, v in steps.items()}
+        previous = now
+    assert steps["height"] <= fastest_fall * 1.01  # never faster than a fall: no jumps
+    assert steps["turn"] <= steps["free turn"] * 1.05  # no faster than uncovered tiles turn
+
+
+def test_each_tile_bounces_with_its_own_springiness():
+    scene, timeline = stacked("toss", "random", bounce=(0.2, 0.7))
+    speeds = timeline.bounce_speed
+    hopping = (speeds[:, 0] > 0) & np.isinf(timeline.cover)  # free tiles that bounce
+    impact_speed = math.sqrt(2 * timeline.gravity * timeline.apex)
+    ratio = speeds[hopping, 0] / impact_speed  # each keeps its own share of the speed
+    assert len(ratio) > 5 and ratio.min() >= 0.2 - 1e-9 and ratio.max() <= 0.7 + 1e-9
+    assert ratio.std() > 0.05
+    two = hopping & (speeds[:, 1] > 0)
+    np.testing.assert_allclose(speeds[two, 1] / speeds[two, 0], ratio[two[hopping]])
+    for duration in (4.0, 8.0):  # each tile's own settling fits; the last rests at the end
+        timeline = AssembleChoreography(duration=duration, bounce=(0.1, 0.7)).timeline(scene)
+        assert timeline.duration == pytest.approx(duration)
 
 
 def test_a_tile_landing_on_a_bouncing_one_stays_on_top():
@@ -443,7 +521,7 @@ def test_a_tile_landing_on_a_bouncing_one_stays_on_top():
     timeline = TossTimeline(scene, scene.center, scene.rotation, [0.0, 0.1], 1.0, apex=20.0,
                             bounce=0.6)  # fmt: skip
     checked = 0
-    for t in np.linspace(1.1, 1.1 + timeline.settle, 60):  # 1 has landed; 0 still bouncing
+    for t in np.linspace(1.1, 1.1 + timeline.settle.max(), 60):  # 1 has landed; 0 still bouncing
         frame = timeline.frame(t)
         rank = np.argsort(frame.draw_order())
         if frame.heights()[0] > frame.heights()[1]:
@@ -454,9 +532,9 @@ def test_a_tile_landing_on_a_bouncing_one_stays_on_top():
 
 def test_toss_settles_with_a_dying_wobble():
     scene, timeline = single_toss(bounce=0.0, wobble=0.2)
-    assert timeline.settle == pytest.approx(0.3 * 2.0)
+    assert timeline.settle[0] == pytest.approx(0.3 * 2.0)
     after = [timeline.frame(2.0 + s).rotation[0] - scene.rotation[0]
-             for s in np.linspace(0.01, timeline.settle, 30)]  # fmt: skip
+             for s in np.linspace(0.01, timeline.settle[0], 30)]  # fmt: skip
     assert max(np.abs(after)) <= 0.2 and abs(after[-1]) < 1e-9
     assert np.abs(after[:10]).max() > np.abs(after[-10:]).max()  # dies away
 
@@ -600,11 +678,115 @@ def test_throws_never_reach_the_camera():
 
 
 def test_airborne_tiles_draw_nearest_the_camera_on_top():
-    scene = grid_scene(columns=3, rows=1)
+    scene = grid_scene(columns=6, rows=1)
     timeline = AssembleChoreography(motion="drop", spread=0, duration=3, travel=2).timeline(scene)
-    frame = timeline.frame(1.5)
-    air = frame.draw_order()[~frame.at_rest()[frame.draw_order()]]
-    assert len(air) >= 2 and np.all(np.diff(frame.heights()[air]) >= 0)
+    checked = 0
+    for t in np.linspace(0.0, timeline.duration, 60):
+        frame = timeline.frame(t)
+        falling = (timeline.delay < t) & (timeline.delay + timeline.travel > t)
+        order = frame.draw_order()
+        air = order[falling[order]]  # still falling (touched-down tiles keep stacking order)
+        if len(air) >= 2:
+            checked += 1
+            assert np.all(np.diff(frame.heights()[air]) >= 0)
+    assert checked
+
+
+# Ranges
+
+
+def test_range_param_validates_and_draws():
+    from skitter.core.slicing import Configurable, RangeParam
+
+    class Thing(Configurable):
+        turns = RangeParam((0.0, 1.0), min=0.0, max=5.0)
+        count = RangeParam((1, 3), min=0, max=8, whole=True)
+
+    thing = Thing()
+    assert thing.turns == (0.0, 1.0) and thing.count == (1, 3)
+    thing.turns = 2  # one number: a fixed value
+    assert thing.turns == (2.0, 2.0)
+    for bad in ((3.0, 1.0), (0.0, 9.0), "x", (1, 2, 3)):
+        with pytest.raises(ValueError):
+            thing.turns = bad
+    with pytest.raises(ValueError):
+        thing.count = (1.5, 2)
+    rng = np.random.default_rng(0)
+    counts = Thing.count.draw((1, 3), rng, 3000)
+    assert set(counts.tolist()) == {1, 2, 3}  # both ends included, each likely
+    assert np.all(np.abs(np.bincount(counts)[1:] / 3000 - 1 / 3) < 0.04)
+    turns = Thing.turns.draw((0.5, 2.0), rng, 1000)
+    assert turns.min() >= 0.5 and turns.max() <= 2.0
+    assert Thing(turns=(1.0, 1.0)).key() != Thing().key()
+
+
+@pytest.mark.parametrize("motion", ["toss", "drop", "glide"])
+def test_spin_and_flips_vary_per_tile_within_their_ranges(motion):
+    scene = pile_scene()
+    final = TileFrame.final(scene)
+    timeline = AssembleChoreography(motion=motion, spin=(0.5, 2.0), flips=(1, 3)).timeline(scene)
+    start = timeline.start_rotation if motion != "glide" else timeline.start.rotation
+    turns = np.abs(start - final.rotation) / (2 * np.pi)
+    assert turns.min() >= 0.5 - 1e-9 and turns.max() <= 2.0 + 1e-9 and turns.std() > 0.2
+    assert np.any(start > final.rotation) and np.any(start < final.rotation)  # either way
+    flips = np.abs(timeline.flips.turns)
+    assert set(flips.tolist()) <= {1, 2, 3} and len(set(flips.tolist())) == 3
+    fixed = AssembleChoreography(motion=motion, spin=(1.0, 1.0)).timeline(scene)
+    start = fixed.start_rotation if motion != "glide" else fixed.start.rotation
+    np.testing.assert_allclose(np.abs(start - final.rotation), 2 * np.pi)  # all the same
+
+
+@pytest.mark.parametrize("motion", ["toss", "drop"])
+def test_settle_wobble_varies_per_tile_within_its_range(motion):
+    scene = pile_scene()
+    final = TileFrame.final(scene)
+    timeline = AssembleChoreography(motion=motion, wobble=(2.0, 10.0), bounce=0.0).timeline(scene)
+    amount = np.degrees(np.abs(timeline.wobble))
+    assert amount.min() >= 2.0 - 1e-9 and amount.max() <= 10.0 + 1e-9 and amount.std() > 1.0
+    assert np.any(timeline.wobble > 0) and np.any(timeline.wobble < 0)  # rocking either way
+    # Each tile rocks within its own amount after landing, then lies still.
+    landed = timeline.delay + timeline.travel
+    swings = np.zeros(len(scene))
+    for i in range(len(scene)):
+        for s in np.linspace(0.01, timeline.settle[i], 25):
+            rotation = timeline.frame(landed[i] + s).rotation[i]
+            swings[i] = max(swings[i], abs(rotation - final.rotation[i]))
+    assert np.all(swings <= np.abs(timeline.wobble) + 1e-9)
+    assert np.corrcoef(swings, np.abs(timeline.wobble))[0, 1] > 0.9
+    same = AssembleChoreography(motion=motion, wobble=(5.0, 5.0)).timeline(scene)
+    np.testing.assert_allclose(np.degrees(np.abs(same.wobble)), 5.0)
+
+
+def test_range_editor_keeps_its_ends_in_order(qapp):
+    from PySide6.QtWidgets import QDoubleSpinBox, QSpinBox
+
+    from skitter.core.slicing import Configurable, RangeParam
+    from skitter.ui.widgets.param_form import ParamForm
+
+    class Thing(Configurable):
+        spin = RangeParam((0.0, 1.0), "Spin", min=0.0, max=20.0, suffix=" turns")
+        flips = RangeParam((0, 0), "Flips", min=0, max=8, whole=True)
+
+    thing = Thing()
+    form = ParamForm()
+    form.set_target(thing)
+    edits = []
+    form.changed.connect(edits.append)
+    low, high = form.editor("spin").widget.findChildren(QDoubleSpinBox)
+    assert high.suffix() == " turns" and low.suffix() == ""
+    high.setValue(3.0)
+    assert thing.spin == (0.0, 3.0) and edits == ["spin"]
+    low.setValue(5.0)  # above the high end: the high end follows
+    assert thing.spin == (5.0, 5.0) and high.value() == 5.0
+    high.setValue(2.0)  # below the low end: the low end follows
+    assert thing.spin == (2.0, 2.0)
+    flips_low, flips_high = form.editor("flips").widget.findChildren(QSpinBox)
+    flips_high.setValue(4)
+    assert thing.flips == (0, 4) and isinstance(thing.flips[1], int)
+    thing.spin = (1.0, 1.5)  # edited elsewhere: refresh shows it without reporting an edit
+    count = len(edits)
+    form.refresh()
+    assert (low.value(), high.value()) == (1.0, 1.5) and len(edits) == count
 
 
 # Flips

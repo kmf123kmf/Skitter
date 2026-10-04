@@ -17,6 +17,7 @@ from skitter.ui.export_dialog import ExportDialog
 from skitter.ui.session import Session
 from skitter.ui.steps import STEPS, StepPage
 from skitter.ui.steps.animate import AnimateStep
+from skitter.ui.steps.matching import MatchingStep
 from skitter.ui.steps.source import SourceStep
 from skitter.ui.video_dialog import VideoExportDialog
 from skitter.ui.widgets.wheel_guard import install_wheel_guard
@@ -85,6 +86,7 @@ class MainWindow(QMainWindow):
         self.video_action.triggered.connect(self.open_video_export)
         mosaic_menu.addAction(self.video_action)
         self.step(AnimateStep).export_requested.connect(self.open_video_export)
+        self.step(MatchingStep).export_requested.connect(self.open_export)
         session = self.session
         for signal in session.export_signals():
             signal.connect(self._update_actions)

@@ -146,6 +146,146 @@ def test_matching_step_runs_and_shows_mosaic(sliced, photos, qapp):
     assert window.tabs.isTabEnabled(window.tabs.count() - 1)
 
 
+def test_matching_shows_the_run_in_progress(sliced, photos, qapp):
+    import threading
+
+    from PySide6.QtCore import Qt
+
+    from skitter.core.matching.matcher import PreviewStage
+
+    window = sliced
+    build_library(window, photos)
+    window.show()
+    window.tabs.setCurrentWidget(matching_step(window))
+    session, step = window.session, matching_step(window)
+    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1, max_uses=1)
+    step.run_matching()
+    session.wait_for_job()
+    old = step._tile_layer
+    assert old is not None
+
+    # Hold the next run once every region has a tile (in the worker thread).
+    release, held = threading.Event(), threading.Event()
+
+    def hold(preview):
+        if preview.stage is PreviewStage.COMPLETE:
+            held.set()
+            release.wait(10)
+
+    session.matching_preview.connect(hold, Qt.ConnectionType.DirectConnection)
+    try:
+        step.run_matching()
+        assert held.wait(10)
+        qapp.processEvents()  # the previews so far
+        step._builder.wait(10)
+        regions = len(session.project.regions)
+        # The run replaces the mosaic: its last state, all tiles placed, no sketch left.
+        assert step._tile_layer is None and step._heat_layer is None and step._shown is None
+        layers = step.viewer.canvas.layers
+        assert old not in layers and step._run_tiles in layers and step._run_sketch in layers
+        assert len(step._run_tiles.instances) == regions
+        assert len(step._run_sketch.instances) == 0
+        assert layers.index(step._run_sketch) < layers.index(step._run_tiles)
+        assert layers.index(step._run_tiles) < step.overlays.first
+        assert step._detail.text().startswith(PreviewStage.COMPLETE.value)
+        assert f"{regions:,} of {regions:,}" in step._detail.text()
+        assert step._labels["score"].text() == "—"
+        step.display_mode.setCurrentIndex(2)  # source only
+        assert not step._run_tiles.visible and not step._run_sketch.visible
+        step.display_mode.setCurrentIndex(0)
+        assert step._run_tiles.visible
+        run_layers = step._run_tiles, step._run_sketch
+    finally:
+        release.set()
+        session.wait_for_job()
+        session.matching_preview.disconnect(hold)
+
+    # Done: the new mosaic in place of the run.
+    assert step._run_tiles is None and step._run_sketch is None
+    layers = step.viewer.canvas.layers
+    assert step._tile_layer in layers and step._shown is session.scene
+    assert not any(layer in layers for layer in run_layers)
+    assert step._labels["score"].text().startswith("ΔE")
+
+
+def test_indexing_shows_its_own_progress(sliced, photos, qapp):
+    import threading
+
+    from PySide6.QtCore import Qt
+
+    window = sliced
+    build_library(window, photos)
+    window.show()
+    session, step = window.session, matching_step(window)
+    window.tabs.setCurrentWidget(step)
+    assert not step.sub_progress.isVisible() and not step.sub_status.isVisible()
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+
+    release, held = threading.Event(), threading.Event()
+
+    def hold(message, fraction):  # in the worker: stop while describing tile crops
+        if not held.is_set() and fraction > 0:
+            held.set()
+            release.wait(10)
+
+    session.matching_detail.connect(hold, Qt.ConnectionType.DirectConnection)
+    try:
+        step.run_matching()
+        assert held.wait(10)
+        qapp.processEvents()
+        assert step.status.text().startswith("Indexing tiles")
+        assert step.sub_progress.isVisible() and step.sub_status.isVisible()
+        assert step.sub_status.text().startswith("Describing tile crops:")
+        assert step.sub_progress.value() == 1000  # one chunk: all described
+        assert step.sub_progress.height() < step.progress.height()
+    finally:
+        release.set()
+        session.wait_for_job()
+        session.matching_detail.disconnect(hold)
+    assert session.project.matches is not None
+    assert not step.sub_progress.isVisible() and not step.sub_status.isVisible()
+
+    # A cached index reports nothing: the bar stays hidden all run.
+    seen = []
+    session.matching_detail.connect(lambda *report: seen.append(report))
+    step.run_matching()
+    session.wait_for_job()
+    assert not seen and not step.sub_progress.isVisible()
+
+
+def test_run_frames_show_target_colors_then_tiles(sliced, photos):
+    from skitter.ui.render.match_preview import build_frame
+
+    window = sliced
+    build_library(window, photos)
+    session = window.session
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0, max_uses=1)
+    previews = []
+    session.matching_preview.connect(previews.append)
+    session.start_matching()
+    session.wait_for_job()
+    library, ctx = session.library, session.slice_context
+    regions = len(session.project.regions)
+
+    sketch = build_frame(previews[0], library, ctx, None)  # target colors only
+    assert sketch.tiles is None and sketch.pages is None and sketch.placed == 0
+    instances = sketch.sketch.instances
+    assert len(instances) == sketch.needed == regions
+    assert sketch.sketch.textures.shape == (1, 1, 1, 4) and (sketch.sketch.textures == 255).all()
+    np.testing.assert_allclose(instances["tint"][:, :3], previews[0].target, atol=1e-6)
+    assert (instances["tint"][:, 3] == 1).all()
+
+    assigned = next(p for p in previews if p.result is not None and (p.result.tile < 0).any())
+    frame = build_frame(assigned, library, ctx, None)
+    waiting = int((assigned.result.tile < 0).sum())
+    assert len(frame.sketch.instances) == waiting and frame.placed == regions - waiting
+    assert frame.pages is not None and len(frame.tiles) == frame.placed
+    # A later frame whose tiles the atlas already holds reuses its pages.
+    again = build_frame(assigned, library, ctx, frame.atlas)
+    assert again.pages is None and again.atlas is frame.atlas
+    np.testing.assert_array_equal(again.tiles, frame.tiles)
+
+
 def test_reslicing_clears_the_mosaic(sliced, photos):
     window = sliced
     build_library(window, photos)
@@ -167,14 +307,17 @@ def test_reslicing_clears_the_mosaic(sliced, photos):
 def test_export_image_from_the_mosaic_menu(sliced, photos, tmp_path):
     window = sliced
     session = window.session
-    assert not window.export_action.isEnabled()
+    button = matching_step(window).export_button
+    assert not window.export_action.isEnabled() and not button.isEnabled()
     build_library(window, photos)
     session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
     session.wait_for_job()
-    assert window.export_action.isEnabled()
+    assert window.export_action.isEnabled() and button.isEnabled()
 
-    dialog = window.open_export()
+    button.click()  # the Matching panel's button opens the same window as the menu
+    dialog = window.export_dialog
+    assert dialog is not None and dialog is window.open_export()
     assert dialog.isVisible() and dialog.export_button.isEnabled()
     target = tmp_path / "out" / "mosaic.png"
     target.parent.mkdir()
