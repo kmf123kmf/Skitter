@@ -9,6 +9,7 @@ from skitter.core.slicing.base import (
     check_region_count,
     operation_from_dict,
 )
+from skitter.core.slicing.mask import mask_regions
 from skitter.core.slicing.operations import GridSlicer
 from skitter.core.slicing.regions import RegionSet
 
@@ -68,8 +69,9 @@ class SlicingPlan:
         return results
 
     def regions(self, ctx: SliceContext) -> RegionSet:
+        """The plan's regions that touch the visible picture (see mask.py)."""
         results = self.evaluate(ctx)
-        return results[-1].regions if results else ctx.canvas()
+        return mask_regions(results[-1].regions if results else ctx.canvas(), ctx)
 
     def to_dict(self) -> dict:
         return {

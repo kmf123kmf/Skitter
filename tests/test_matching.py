@@ -23,7 +23,7 @@ from skitter.core.matching.index import (
 from skitter.core.matching.matcher import MatchCancelled, Matcher, PreviewStage
 from skitter.core.matching.quality import evaluate, target_raster
 from skitter.core.matching.settings import MatchSettings
-from skitter.core.slicing import MosaicLayout, RegionSet, SliceContext
+from skitter.core.slicing import MosaicLayout, RegionSet, SliceContext, mask_regions
 from skitter.core.slicing.operations import GridSlicer
 from skitter.core.tiles.descriptors import DIM, MEAN, dim_weights
 from skitter.core.tiles.library import TileLibrary
@@ -430,6 +430,29 @@ def test_matcher_end_to_end(library):
     assert tinted.quality.score < result.quality.score
     shift = tinted.tinted_mean() - tinted.tile_mean
     assert shift.shape == (len(regions), 3) and np.abs(shift).max() > 0
+
+
+def test_matcher_on_a_transparent_source_matches_only_the_picture(library):
+    # 16 x 12 tiles of 20 mosaic units (2 per source pixel). Hidden pixels hold
+    # magenta; the picture starts at x = 75 px (150 units), inside the column of
+    # tiles at 140..160, which overhangs the mask's edge and must match what shows.
+    image = np.zeros((120, 160, 4), np.uint8)
+    image[..., :3] = target_image()
+    image[:, :75, :3] = (255, 0, 255)
+    image[:, 75:, 3] = 255
+    ctx = flat_ctx(image, columns=16, tile=20)
+    regions = mask_regions(GridSlicer().apply(ctx.canvas(), ctx), ctx)
+    assert len(regions) == 9 * 12  # columns from 140 units on
+    settings = MatchSettings(tint="none", max_uses=8, refine_seconds=0.5)
+    result = Matcher(library).run(regions, ctx, settings)
+    assert (result.tile >= 0).all()
+    edge = regions.center[:, 0] < 160
+    top = regions.center[:, 1] < ctx.height / 2
+    magenta = rgb8_to_oklab((255, 0, 255))
+    for rows, color in ((edge & top, (230, 40, 40)), (edge & ~top, (30, 40, 220))):
+        got = result.tile_mean[rows]
+        near = np.linalg.norm(got - rgb8_to_oklab(color), axis=1)
+        assert np.all(near < np.linalg.norm(got - magenta, axis=1))
 
 
 def test_matcher_previews_the_run_without_changing_it(library):

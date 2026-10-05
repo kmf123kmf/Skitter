@@ -12,9 +12,10 @@ MAX_COVERAGE_TESTS = 4_000_000  # point-in-region tests per coverage estimate
 
 
 def coverage(
-    regions: RegionSet, width: float, height: float, spacing: float
+    regions: RegionSet, width: float, height: float, spacing: float, ctx: SliceContext | None = None
 ) -> tuple[float, np.ndarray]:
-    """Estimate the fraction of the canvas (0, 0, width, height) covered by regions.
+    """Estimate the fraction of the canvas (0, 0, width, height) covered by regions
+    (with ctx, of its visible part: samples on hidden pixels don't count).
 
     Divides the canvas into sample cells about `spacing` apart (wider if
     needed to stay within MAX_COVERAGE_TESTS) and tests one point per cell at
@@ -65,14 +66,21 @@ def coverage(
     half = regions.size[owner] / 2
     inside = (np.abs(lx) <= half[:, 0]) & (np.abs(ly) <= half[:, 1])
     covered[iy[inside], ix[inside]] = True
-    return float(covered.mean()), covered
+    if ctx is None or ctx.visible is None:
+        return float(covered.mean()), covered
+    gx, gy = np.meshgrid(np.arange(nx), np.arange(ny))
+    h, w = ctx.visible.shape
+    px = np.clip(np.floor((gx + jitter[..., 0]) * sx / ctx.scale), 0, w - 1).astype(np.int64)
+    py = np.clip(np.floor((gy + jitter[..., 1]) * sy / ctx.scale), 0, h - 1).astype(np.int64)
+    seen = ctx.visible[py, px]
+    return float(covered[seen].mean()) if seen.any() else 0.0, covered
 
 
 @dataclass(frozen=True)
 class SliceSummary:
     count: int
-    grid_tiles: float  # base tiles that fit on the canvas (canvas area / tile area)
-    coverage: float  # estimated fraction of the canvas covered, 0..1
+    grid_tiles: float  # base tiles that fit on the visible canvas (its area / tile area)
+    coverage: float  # estimated fraction of the visible canvas covered, 0..1
     smallest: tuple[float, float]  # region (w, h) in mosaic units, by area
     median: tuple[float, float]
     largest: tuple[float, float]
@@ -93,10 +101,11 @@ def summarize(regions: RegionSet, ctx: SliceContext) -> SliceSummary:
         w, h = regions.size[order[i]]
         return (float(w), float(h))
 
-    fraction, _ = coverage(regions, ctx.width, ctx.height, spacing=min(tile_w, tile_h) / 8)
+    fraction, _ = coverage(regions, ctx.width, ctx.height, spacing=min(tile_w, tile_h) / 8, ctx=ctx)
+    shown = 1.0 if ctx.visible is None else float(ctx.visible.mean())
     return SliceSummary(
         count=len(regions),
-        grid_tiles=ctx.width * ctx.height / (tile_w * tile_h),
+        grid_tiles=shown * ctx.width * ctx.height / (tile_w * tile_h),
         coverage=fraction,
         smallest=size_at(0),
         median=size_at(len(order) // 2),

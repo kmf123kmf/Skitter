@@ -18,7 +18,7 @@ from skitter.core.slicing import MosaicLayout, RegionSet, SlicingPlan
 @dataclass
 class Project:
     source_path: Path | None = None
-    source_original: np.ndarray | None = None  # (H, W, 3) uint8 RGB, as loaded
+    source_original: np.ndarray | None = None  # (H, W, 4) uint8 RGBA, as loaded
     source_edits: list[Edit] = field(default_factory=list)
     source_image: np.ndarray | None = None  # original with edits applied
     # Read-only snapshot of source_image taken when the user finishes the Source

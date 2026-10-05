@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 )
 
 from skitter.core.edits import Crop, Edit, FlipHorizontal, FlipVertical, Rotate90
-from skitter.core.imaging import IMAGE_EXTENSIONS, load_image
+from skitter.core.imaging import IMAGE_EXTENSIONS, load_image, visible_mask
 from skitter.ui import icons
 from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.widgets.crop_overlay import CropOverlay
@@ -184,6 +184,11 @@ class SourceStep(StepPage):
         self._size = QLabel("—")
         self._megapixels = QLabel("—")
         self._file_size = QLabel("—")
+        self._transparent = QLabel("—")
+        self._transparent.setToolTip(
+            "Pixels less than half opaque lie outside the picture, as if past its border: "
+            "no tiles go there, and tiles at the edge overhang it."
+        )
         group = QGroupBox("Image")
         form = QFormLayout(group)
         for label, widget in (
@@ -192,6 +197,7 @@ class SourceStep(StepPage):
             ("Current:", self._size),
             ("Megapixels:", self._megapixels),
             ("File size:", self._file_size),
+            ("Transparent:", self._transparent),
         ):
             widget.setTextFormat(Qt.TextFormat.PlainText)
             widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
@@ -275,6 +281,12 @@ class SourceStep(StepPage):
     def advance(self) -> bool:
         """Finish the Source step: freeze the edited image for later steps."""
         if not self.can_advance():
+            return False
+        visible = visible_mask(self.session.project.source_image)
+        if visible is not None and not visible.any():
+            self.status_message.emit(
+                "The image is entirely transparent: nothing to make a mosaic of"
+            )
             return False
         if self.session.commit_source():
             h, w = self.session.project.source_final.shape[:2]
@@ -405,6 +417,10 @@ class SourceStep(StepPage):
         h, w = project.source_image.shape[:2]
         self._megapixels.setText(f"{w * h / 1e6:.1f}")
         self._file_size.setText(_format_bytes(path.stat().st_size))
+        visible = visible_mask(project.source_image)
+        hidden = 0.0 if visible is None else 1.0 - float(visible.mean())
+        share = f"{hidden:.0%}" if hidden >= 0.005 or hidden == 0 else "under 1%"
+        self._transparent.setText("None" if visible is None else f"{share} of the image")
 
         self._history.clear()
         if project.source_edits:

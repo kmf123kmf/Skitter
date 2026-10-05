@@ -29,6 +29,7 @@ from typing import ClassVar
 
 import numpy as np
 
+from skitter.core.imaging import fill_hidden, visible_mask
 from skitter.core.slicing.layout import TILE_UNIT, MosaicLayout
 from skitter.core.slicing.params import Configurable
 from skitter.core.slicing.regions import Region, RegionSet
@@ -73,6 +74,14 @@ class SliceContext:
     default, or one unit per source pixel (1 px tiles) when no layout is
     given, which tests use.
 
+    The image may be RGBA (sources are; see imaging.py). Its alpha is a
+    mask: `visible` marks pixels at least half opaque (None: all of them),
+    and hidden ones lie outside the picture, as if past its border. `image`
+    is RGB with every hidden pixel taking the nearest visible one's color,
+    as samples past the border take the nearest edge pixel, so everything
+    reading the image treats the mask's edge like the border. Plans drop
+    the regions that touch no visible pixel (mask.py).
+
     One context is created per final image and layout and reused across
     evaluations, so derived data (like luminance) is computed once.
     """
@@ -83,7 +92,11 @@ class SliceContext:
         layout: MosaicLayout | None = None,
         tile_width: float | None = None,
     ):
-        self.image = image  # (H, W, 3) uint8 RGB, read-only
+        self.visible = visible_mask(image)  # (H, W) bool, or None: all visible
+        rgb = image[..., :3]
+        if self.visible is not None:
+            rgb = fill_hidden(rgb, self.visible)
+        self.image = np.ascontiguousarray(rgb)  # (H, W, 3) uint8 RGB, read-only
         h, w = image.shape[:2]
         if tile_width is None:
             tile_width = 1.0 if layout is None else TILE_UNIT
@@ -113,6 +126,19 @@ class SliceContext:
     def canvas(self) -> RegionSet:
         """One region covering the whole canvas: where every plan starts."""
         return RegionSet.covering(self.width, self.height)
+
+    @cached_property
+    def visible_table(self) -> np.ndarray | None:
+        """(H + 1, W + 1) int32 summed-area table of `visible` (None without a mask):
+        visible pixels in [j0, j1) x [i0, i1) are t[j1, i1] - t[j0, i1] - t[j1, i0] + t[j0, i0]."""
+        if self.visible is None:
+            return None
+        h, w = self.visible.shape
+        table = np.zeros((h + 1, w + 1), np.int32)
+        np.cumsum(self.visible, axis=0, dtype=np.int32, out=table[1:, 1:])
+        np.cumsum(table[1:, 1:], axis=1, out=table[1:, 1:])
+        table.setflags(write=False)
+        return table
 
     @cached_property
     def luminance(self) -> np.ndarray:

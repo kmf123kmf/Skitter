@@ -185,3 +185,17 @@ def test_save_png_and_jpeg(tmp_path):
     with Image.open(tmp_path / "a.jpg") as jpg:
         assert jpg.format == "JPEG" and jpg.size == (64, 64)
     assert check_size((70_000, 10), settings) and not check_size((70_000, 10), ExportSettings())
+
+
+def test_transparent_source_exports_only_the_picture(tmp_path):
+    from skitter.core.slicing import SlicingPlan
+
+    image = np.zeros((8, 20, 4), np.uint8)
+    image[:, 10:, 3] = 255  # the left half is hidden
+    ctx = SliceContext(image, MosaicLayout(1.0, 20), 1.0)  # 1 x 1 tiles
+    regions = SlicingPlan.default().regions(ctx)
+    assert len(regions) == 10 * 8
+    files = tile_files(tmp_path, [np.full((8, 8, 3), 200, np.uint8)])
+    out, _ = render(result_for(regions, [0] * len(regions)), ctx, files, background="transparent")
+    assert out.shape == (8, 20, 4)  # the frame is still the whole image
+    assert (out[:, :10, 3] == 0).all() and (out[:, 10:, 3] == 255).all()

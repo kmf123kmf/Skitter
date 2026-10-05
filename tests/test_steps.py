@@ -82,7 +82,7 @@ def test_editing_after_commit_locks_slicing_until_next(window, source):
 
     source.rotate_right_action.trigger()
     window.next_button.click()
-    assert window.session.project.source_final.shape == (40, 30, 3)
+    assert window.session.project.source_final.shape == (40, 30, 4)
     assert window.tabs.currentIndex() == 1
 
 
@@ -143,7 +143,7 @@ def test_crop_mode_applies_overlay_box(source):
     source.apply_crop()
     assert not source.is_cropping()
     assert source.session.project.source_edits == [Crop(5, 4, 20, 10)]
-    assert source.viewer.image.shape == (10, 20, 3)
+    assert source.viewer.image.shape == (10, 20, 4)
 
 
 def test_crop_fields_respect_aspect(source):
@@ -386,3 +386,44 @@ def test_range_rows_never_widen_a_settings_panel(qapp):
     single.setRange(0.0, 20.0)
     single.setSuffix(" turns")
     assert row.minimumSizeHint().width() < 2 * single.minimumSizeHint().width()
+
+
+def test_transparent_source_slices_only_the_picture(window, tmp_path):
+    from PIL import Image
+
+    from skitter.ui.steps.slicing import SlicingStep
+    from skitter.ui.steps.source import SourceStep
+
+    image = np.zeros((40, 40, 4), np.uint8)
+    image[..., :3] = 120
+    image[:, 20:, 3] = 255  # the right half shows
+    path = tmp_path / "half.png"
+    Image.fromarray(image, "RGBA").save(path)
+    source = window.step(SourceStep)
+    source.load_file(path)
+    assert source._transparent.text() == "50% of the image"
+    window.next_button.click()
+    assert window.tabs.currentWidget() is window.step(SlicingStep)
+    project = window.session.project
+    assert project.source_final.shape == (40, 40, 4)
+    x0 = project.regions.center[:, 0] - project.regions.size[:, 0] / 2
+    width = window.session.mosaic_size()[0]
+    assert len(project.regions) and x0.min() >= width / 2 - 1e-9  # nothing on the hidden half
+    assert window.session.slicing_summary.coverage == pytest.approx(1.0)
+
+
+def test_entirely_transparent_source_cannot_go_on(window, tmp_path):
+    from PIL import Image
+
+    from skitter.ui.steps.source import SourceStep
+
+    path = tmp_path / "clear.png"
+    Image.fromarray(np.zeros((20, 20, 4), np.uint8), "RGBA").save(path)
+    source = window.step(SourceStep)
+    source.load_file(path)
+    assert source._transparent.text() == "100% of the image"
+    messages = []
+    source.status_message.connect(messages.append)
+    assert not source.advance()
+    assert window.session.project.source_final is None
+    assert "transparent" in messages[-1]

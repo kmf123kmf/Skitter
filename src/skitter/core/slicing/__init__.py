@@ -19,6 +19,7 @@ from skitter.core.slicing.base import (
     register_operation,
 )
 from skitter.core.slicing.layout import TILE_ASPECTS, TILE_UNIT, MosaicLayout
+from skitter.core.slicing.mask import mask_regions, touching
 from skitter.core.slicing.params import (
     BoolParam,
     ChoiceParam,
@@ -74,6 +75,7 @@ __all__ = [
     "coverage",
     "get_operation_type",
     "get_pattern",
+    "mask_regions",
     "operation_from_dict",
     "operation_types",
     "operations",
@@ -82,4 +84,5 @@ __all__ = [
     "register_pattern",
     "summarize",
     "tile_pattern",
+    "touching",
 ]

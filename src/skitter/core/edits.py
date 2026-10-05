@@ -2,7 +2,9 @@
 
 Each edit is a small immutable value applied to an (H, W, C) array. A project
 keeps the original image plus its list of edits, so edits can be undone,
-redone, and saved alongside the project.
+redone, and saved alongside the project. Sources are RGBA (see imaging.py):
+geometric edits move the alpha mask with the picture, and a mask edit (a
+shape drawn in the app) would only change the alpha channel.
 """
 
 from dataclasses import dataclass

@@ -48,7 +48,8 @@ def test_heic_is_a_known_image_type(tmp_path, heic):
 
 def test_heic_source_loads_upright(heic):
     image = load_image(heic)
-    assert image.shape == (400, 200, 3)
+    assert image.shape == (400, 200, 4)  # RGBA, opaque
+    assert (image[..., 3] == 255).all()
     # Upright, the stored left half (red) is on top.
     assert image[20, 100, 0] > 200 and image[20, 100, 2] < 60
     assert image[380, 100, 2] > 200 and image[380, 100, 0] < 60

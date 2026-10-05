@@ -28,6 +28,7 @@ from skitter.core.slicing import (
     SliceSummary,
     SlicingError,
     StageResult,
+    mask_regions,
     summarize,
 )
 from skitter.core.tiles.library import OK, TileLibrary, UpdateReport, default_library_folder
@@ -191,8 +192,8 @@ class Session(QObject):
             else:
                 self.slicing_error = None
                 ctx = self._slice_context
-                project.regions = (
-                    self._slicing_cache[-1].regions if self._slicing_cache else ctx.canvas()
+                project.regions = mask_regions(
+                    self._slicing_cache[-1].regions if self._slicing_cache else ctx.canvas(), ctx
                 )
                 if project.regions:
                     self.slicing_summary = summarize(project.regions, ctx)
