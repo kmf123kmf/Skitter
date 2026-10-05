@@ -12,8 +12,10 @@ from skitter.core.animation import (
     TossTimeline,
     choreography_types,
     get_choreography,
+    landing_times,
 )
 from skitter.core.animation.assemble import ORDERS, AssembleChoreography
+from skitter.core.animation.deal import DealChoreography, DealTimeline
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing import MosaicLayout, RegionSet, SliceContext
@@ -102,6 +104,15 @@ CONFIGS = [(cls, {}) for cls in choreography_types()] + [
     (AssembleChoreography, {"order": "random"}),
     (AssembleChoreography, {"order": "random", "motion": "drop"}),
     (AssembleChoreography, {"motion": "drop", "bounce": (0.1, 0.7), "wobble": (4.0, 10.0)}),
+    (DealChoreography, {"face_down": True, "spin": (1.0, 2.0)}),
+    (DealChoreography, {"decks": 3, "order": "random"}),
+    (DealChoreography, {"decks": 4, "arrangement": "side", "order": "far"}),
+    (DealChoreography, {"position": "center", "decks": 2, "neatness": 0.0}),
+    (DealChoreography, {"position": "top_right", "offset": -0.2, "order": "reading"}),
+    (DealChoreography, {"position": "orbit", "face_down": True}),
+    (DealChoreography, {"position": "orbit", "decks": 3, "orbit_turns": 2.5, "order": "far"}),
+    (DealChoreography, {"position": "orbit", "radius": 0.2, "orbit_direction": "counter"}),
+    (DealChoreography, {"position": "orbit", "decks": 2, "order": "random", "orbit_turns": 0}),
 ]
 CONFIG_IDS = [
     f"{cls.id}{'-' + '-'.join(map(str, kw.values())) if kw else ''}" for cls, kw in CONFIGS
@@ -358,7 +369,8 @@ def test_assemble_fits_short_durations():
 @pytest.mark.parametrize("motion", ["toss", "glide"])
 def test_assemble_lands_tiles_at_an_even_pace(make, motion):
     scene = make()
-    timeline = AssembleChoreography(duration=8, travel=1.5, motion=motion).timeline(scene)
+    make = AssembleChoreography(duration=8, travel=1.5, motion=motion, wind_down=0)
+    timeline = make.timeline(scene)
     settle = getattr(timeline, "settle", np.zeros(len(scene)))  # Toss: bounces and wobble
     assert timeline.duration == pytest.approx(8)  # the last tile comes to rest at the end
     impact = timeline.delay + timeline.travel
@@ -366,6 +378,49 @@ def test_assemble_lands_tiles_at_an_even_pace(make, motion):
     landing = np.sort(impact)
     assert landing[0] == pytest.approx(1.5)
     np.testing.assert_allclose(np.diff(landing), np.diff(landing).mean(), atol=1e-9)  # even
+
+
+@pytest.mark.parametrize("make", [grid_scene, pile_scene])
+@pytest.mark.parametrize("motion", ["toss", "glide"])
+def test_assemble_winds_down_to_the_last_gap(make, motion):
+    scene = make()
+    choreography = AssembleChoreography(
+        duration=8, travel=1.5, motion=motion, wind_down=0.3, last_gap=0.8
+    )
+    timeline = choreography.timeline(scene)
+    settle = getattr(timeline, "settle", np.zeros(len(scene)))
+    impact = timeline.delay + timeline.travel
+    assert (impact + settle).max() == pytest.approx(8)  # still fits the duration
+    gaps = np.diff(np.sort(impact))
+    assert gaps[-1] == pytest.approx(0.8, rel=0.15)  # about, as the window is fitted
+    assert np.all(np.diff(gaps[-5:]) > 0)  # slowing down to the end
+    assert gaps[0] < gaps[-1] / 2
+
+
+def test_landing_times_pace():
+    times = landing_times(2000, 6.0, 1.2, 0.25)
+    gaps = np.diff(times)
+    assert times[0] == 0 and times[-1] == 6.0
+    assert np.all(gaps >= 0)
+    assert gaps[-1] == pytest.approx(0.25)  # exactly the last gap
+    steady = times < 6.0 - 1.2
+    np.testing.assert_allclose(gaps[steady[1:]], gaps[0], rtol=1e-6)  # even until the wind-down
+    assert np.all(np.diff(gaps[~steady[:-1]]) > -1e-12)  # then slowing down
+
+
+@pytest.mark.parametrize(
+    ("n", "wind_down", "last_gap"),
+    [(500, 0.0, 0.25), (500, 1.2, 0.0), (10, 1.2, 0.25), (1, 1.2, 0.25), (0, 1.2, 0.25)],
+)
+def test_landing_times_even_without_a_wind_down(n, wind_down, last_gap):
+    # No wind-down, no gap, or landings already further apart than the last gap.
+    expected = np.linspace(0.0, 6.0, n) if n > 1 else np.zeros(n)
+    np.testing.assert_allclose(landing_times(n, 6.0, wind_down, last_gap), expected)
+
+
+def test_landing_times_last_gap_is_at_most_half_the_wind_down():
+    gaps = np.diff(landing_times(1000, 6.0, 0.4, 3.0))
+    assert gaps[-1] == pytest.approx(0.2)
 
 
 @pytest.mark.parametrize(("cls", "settings"), CONFIGS, ids=CONFIG_IDS)
@@ -830,3 +885,173 @@ def test_backs_show_the_back_color_shaded():
     assert tint[0, 3] == 0  # face up and flat: the photo as it is
     assert tint[1, 3] == pytest.approx(FLIP_SHADE) and tint[1, :3].tolist() == [0, 0, 0]  # edge-on
     np.testing.assert_allclose(tint[2], [0.9, 0.8, 0.7, 1.0])  # back up and flat: the back color
+
+
+# Deal
+
+
+@pytest.mark.parametrize("make", [grid_scene, pile_scene])
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"decks": 3},
+        {"order": "random", "face_down": True},
+        {"position": "orbit"},
+        {"position": "orbit", "decks": 4, "orbit_turns": 3, "order": "center"},
+    ],
+)
+def test_deal_fits_the_duration_and_starts_at_once(make, settings):
+    scene = make()
+    timeline = DealChoreography(duration=6, slide=1.2, **settings).timeline(scene)
+    assert isinstance(timeline, DealTimeline)
+    assert timeline.duration == pytest.approx(6)
+    assert timeline.depart.min() == pytest.approx(0, abs=1e-6)  # dealing starts at once
+    assert np.all(timeline.depart >= 0)
+    assert timeline.slide.max() == pytest.approx(1.2, rel=1e-3)  # the farthest one
+    land = timeline.depart + timeline.slide
+    lower, upper = scene.overlaps.T
+    assert np.all(land[lower] < land[upper])  # bottom first
+
+
+def test_deal_starts_with_every_tile_in_its_nearest_deck():
+    scene = grid_scene()
+    choreography = DealChoreography(decks=4, neatness=1.0)
+    spots = choreography.deck_spots(scene)
+    timeline = choreography.timeline(scene)
+    start = timeline.frame(0.0)
+    nearest = np.argmin(np.linalg.norm(scene.center[:, None] - spots[None], axis=2), axis=1)
+    np.testing.assert_allclose(start.center, spots[nearest], atol=1e-9)
+    assert not start.at_rest().any()
+    # Each deck draws bottom card first, and its top card is the first of it to leave.
+    order = start.draw_order()
+    for d in range(4):
+        mine = [i for i in order if nearest[i] == d]
+        assert np.all(np.diff(timeline.depart[mine]) <= 1e-12)
+
+
+def test_deal_deck_positions():
+    scene = grid_scene()  # bounds 0..60 x 0..40, extent 60
+    spot = DealChoreography(position="bottom", offset=0.5).deck_spots(scene)
+    np.testing.assert_allclose(spot, [[30, 40 + 30]])
+    spot = DealChoreography(position="top_left", offset=0.0).deck_spots(scene)
+    np.testing.assert_allclose(spot, [[0, 0]], atol=1e-9)
+    around = DealChoreography(position="left", offset=0.0, decks=2).deck_spots(scene)
+    np.testing.assert_allclose(around, [[0, 20], [60, 20]], atol=1e-9)
+    side = DealChoreography(position="bottom", offset=0.0, decks=3, arrangement="side")
+    np.testing.assert_allclose(side.deck_spots(scene), [[10, 40], [30, 40], [50, 40]])
+    middle = DealChoreography(position="center", decks=1).deck_spots(scene)
+    np.testing.assert_allclose(middle, [[30, 20]])
+    # Side by side needs an edge: a corner deals around the mosaic.
+    corner = DealChoreography(position="top_left", decks=2, arrangement="side", offset=0.0)
+    np.testing.assert_allclose(corner.deck_spots(scene), [[0, 0], [60, 40]], atol=1e-9)
+    assert not DealChoreography.arrangement.is_available(corner, "side")
+
+
+def test_deal_nearest_first_lands_near_tiles_first():
+    scene = grid_scene(12, 8)
+    choreography = DealChoreography(order="near", spread=0.0)
+    timeline = choreography.timeline(scene)
+    reach = np.linalg.norm(scene.center - choreography.deck_spots(scene)[0], axis=1)
+    land = timeline.depart + timeline.slide
+    assert np.corrcoef(np.argsort(np.argsort(land)), np.argsort(np.argsort(reach)))[0, 1] > 0.95
+
+
+def test_deal_face_down_cards_turn_face_up_on_arrival():
+    scene = grid_scene()
+    timeline = DealChoreography(face_down=True).timeline(scene)
+    assert np.all(timeline.frame(0.0).facings() == -1)  # backs up in the deck
+    for t in np.linspace(0, timeline.duration, 50):
+        frame = timeline.frame(t)
+        landed = frame.at_rest()
+        assert np.all(frame.facings()[landed] == 1)
+        assert np.all(frame.heights()[landed] == 0)
+        # Turned over as it leaves the deck, as a dealer does: face up for the rest.
+        turned = t >= timeline.depart + np.minimum(0.3, 0.4 * timeline.slide)
+        assert np.all(frame.facings()[turned] == pytest.approx(1.0))
+        waiting = t <= timeline.depart
+        assert np.all(frame.facings()[waiting] == -1)
+
+
+def test_deal_cards_stay_on_top_of_their_deck_until_clear():
+    # A card leaving never draws below a card still in its deck while over it.
+    scene = grid_scene(12, 8)
+    timeline = DealChoreography(order="far", spread=0.0).timeline(scene)
+    diagonal = np.hypot(*scene.size.T)
+    for t in np.linspace(0, timeline.duration, 200):
+        frame = timeline.frame(t)
+        moving = (t > timeline.depart) & ~frame.at_rest()
+        waiting = t <= timeline.depart
+        if not moving.any() or not waiting.any():
+            continue
+        rank = np.empty(len(scene), np.int64)
+        rank[frame.draw_order()] = np.arange(len(scene))
+        near = np.linalg.norm(frame.center - timeline.deck_center, axis=1) < 0.99 * diagonal
+        top = rank[waiting].max()
+        assert np.all(rank[moving & near] > top)
+
+
+@pytest.mark.parametrize("spin", [(0.0, 0.0), (0.3, 0.7), (1.2, 3.4)])
+def test_deal_tiles_arrive_at_their_rotation_without_a_jump(spin):
+    scene = grid_scene()
+    timeline = DealChoreography(spin=spin, neatness=0.3, deck_angle=40).timeline(scene)
+    land = timeline.depart + timeline.slide
+    before = timeline.frame(float(land.max()) - 1e-6)
+    moving = np.flatnonzero(land == land.max())
+    off = (before.rotation[moving] - scene.rotation[moving] + math.pi) % math.tau - math.pi
+    np.testing.assert_allclose(off, 0.0, atol=1e-4)  # already turned to its final angle
+    # The extra spin is close to what each tile drew, in its own direction.
+    turned = np.abs(timeline.end_rotation - timeline.deck_rotation) / math.tau
+    assert np.all(turned <= spin[1] + 0.5 + 1e-9)
+    assert np.all(turned >= max(spin[0] - 0.5, 0.0) - 1e-9)
+
+
+def test_deal_orbiting_decks_circle_the_middle_evenly_spaced():
+    scene = grid_scene()  # middle (30, 20), extent 60
+    choreography = DealChoreography(position="orbit", radius=1.0, decks=3, start_angle=90)
+    path = choreography.deck_path(scene)
+    np.testing.assert_allclose(path.spots[0], [90, 20], atol=1e-9)  # 90°: right of the middle
+    for t in (0.0, 1.3, 5.0):
+        center, rotation = path.at(np.arange(3), t)
+        np.testing.assert_allclose(np.hypot(*(center - [30, 20]).T), 60.0)
+        angles = np.sort(np.arctan2(center[:, 0] - 30, -(center[:, 1] - 20)) % math.tau)
+        np.testing.assert_allclose(np.diff(angles), math.tau / 3)  # evenly spaced
+    # One turn over the duration, clockwise: a quarter of the way in, at the bottom.
+    center, rotation = path.at(0, choreography.duration / 4)
+    np.testing.assert_allclose(center, [30, 80], atol=1e-9)
+    assert rotation == pytest.approx(math.pi)  # turned with it: bottom toward the middle
+    counter = DealChoreography(position="orbit", radius=1.0, start_angle=90,
+                               orbit_direction="counter").deck_path(scene)  # fmt: skip
+    np.testing.assert_allclose(counter.at(0, choreography.duration / 4)[0], [30, -40], atol=1e-9)
+
+
+def test_deal_tiles_ride_their_orbiting_deck_until_they_leave():
+    scene = grid_scene()
+    timeline = DealChoreography(position="orbit", decks=2, neatness=1.0).timeline(scene)
+    path = timeline.path
+    for t in np.linspace(0, timeline.duration, 30):
+        frame = timeline.frame(t)
+        waiting = np.flatnonzero(t < timeline.depart)
+        center, rotation = path.at(timeline.deck[waiting], t)
+        np.testing.assert_allclose(frame.center[waiting], center, atol=1e-9)
+        np.testing.assert_allclose(frame.rotation[waiting], rotation, atol=1e-9)
+    # Leaving is seamless: just before and just after, in the same place.
+    for i in range(0, len(scene), 5):
+        before = timeline.frame(timeline.depart[i] - 1e-7)
+        after = timeline.frame(timeline.depart[i] + 1e-7)
+        np.testing.assert_allclose(before.center[i], after.center[i], atol=1e-4)
+
+
+def test_deal_orbiting_decks_deal_what_they_pass():
+    # Nearest first, one deck, one turn: tiles land in the order the deck sweeps by.
+    scene = grid_scene(16, 12)
+    choreography = DealChoreography(position="orbit", spread=0.0, radius=0.6)
+    timeline = choreography.timeline(scene)
+    out = scene.center - timeline.path.middle
+    angle = (np.arctan2(out[:, 0], -out[:, 1]) - math.radians(180)) % math.tau
+    land = timeline.depart + timeline.slide
+    assert np.corrcoef(np.argsort(np.argsort(land)), np.argsort(np.argsort(angle)))[0, 1] > 0.9
+    # And each leaves from the deck nearest it at the time, while it is close by.
+    spots = timeline.path.all_at(timeline.depart)
+    gaps = np.linalg.norm(scene.center[:, None] - spots, axis=2)
+    np.testing.assert_array_equal(timeline.deck, np.argmin(gaps, axis=1))

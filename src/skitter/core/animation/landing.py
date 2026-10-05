@@ -14,10 +14,13 @@ order, for two kinds of ordering:
   next to it, so random piles came out clumpy (a landing with another one
   nearby within 0.15 s 92% of the time, against 50% by chance).
 
-Choreographies then choose when the k-th tile lands (for example, evenly
-spaced). A new ordering must say which kind it is; tests check random
-orderings against chance (tests/test_animation.py).
+Choreographies then choose when the k-th tile lands: `landing_times` paces
+them evenly, slowing down at the end so the last few land one by one. A new
+ordering must say which kind it is; tests check random orderings against
+chance (tests/test_animation.py).
 """
+
+import math
 
 import numpy as np
 from numba import njit
@@ -66,6 +69,49 @@ def _conditioned_keys(keys, below_start, below, above_start, above, sweeps, seed
             for k in range(above_start[i], above_start[i + 1]):
                 hi = min(hi, keys[above[k]])
             keys[i] = lo + np.random.random() * (hi - lo)
+
+
+def landing_times(n: int, window: float, wind_down: float = 0.0,
+                  last_gap: float = 0.0) -> np.ndarray:  # fmt: skip
+    """(N,) when the k-th landing happens, from 0 (the first) to `window` (the last).
+
+    Landings come at a steady pace, then over the last `wind_down` seconds the
+    pace slows down exponentially, so that the last two land `last_gap`
+    seconds apart (at most half the wind-down). Evenly spaced landings at any
+    frame rate land a fixed number of tiles per frame: in the last frames,
+    with little else moving, the last tiles would visibly land all at once.
+    Evenly spaced if there's no wind-down, or if they are already at least
+    `last_gap` apart.
+    """
+    even = np.linspace(0.0, window, n) if n > 1 else np.zeros(n)
+    tail = min(max(float(wind_down), 0.0), float(window))
+    gap = min(max(float(last_gap), 0.0), tail / 2)
+    if n < 2 or tail <= 0 or gap * (n - 1) <= window:
+        return even
+    steady = window - tail
+    # The pace (landings per second) over the wind-down, s in [0, tail]: rate e^(-k s / tail),
+    # ending at rate e^-k with exactly one landing in the last `gap` seconds. Find the
+    # decay k that fits the n - 1 landings after the first into the window.
+
+    def shape(k: float) -> tuple[float, float]:
+        end = k / (tail * math.expm1(k * gap / tail))  # one landing in the last gap
+        rate = end * math.exp(k)
+        return rate, rate * (steady + tail * -math.expm1(-k) / k)
+
+    lo, hi = 1e-9, 1.0
+    while shape(hi)[1] < n - 1 and hi < 600:
+        lo, hi = hi, hi * 2
+    for _ in range(100):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if shape(mid)[1] < n - 1 else (lo, mid)
+    k = (lo + hi) / 2
+    rate = shape(k)[0]
+    count = np.arange(n, dtype=np.float64)
+    late = np.maximum(count - rate * steady, 0.0)  # landings into the wind-down
+    into = -tail / k * np.log(np.maximum(1.0 - late * k / (rate * tail), 1e-300))
+    times = np.where(count <= rate * steady, count / rate, steady + np.minimum(into, tail))
+    times[-1] = window
+    return np.maximum.accumulate(times)
 
 
 def landing_gap(n: int) -> int:

@@ -1,7 +1,7 @@
 """Top-level application window: one tab per workflow step."""
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QAction, QCursor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
@@ -28,7 +28,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         install_wheel_guard()  # the wheel never changes a setting by accident
         self.setWindowTitle("Skitter")
-        self.resize(1280, 800)
+        self._fit_to_screen()
 
         self.session = Session(self)
         self.steps: list[StepPage] = [cls(self.session) for cls in STEPS]
@@ -57,6 +57,20 @@ class MainWindow(QMainWindow):
         self._build_menus()
         self._update_navigation()
         self.statusBar().showMessage("Choose a source image to begin")
+
+    def _fit_to_screen(self, fraction: float = 0.8) -> None:
+        """Size the window to a share of the screen it opens on, centred there."""
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+        if screen is None:
+            self.resize(1280, 800)
+            return
+        available = screen.availableGeometry()  # excludes the taskbar
+        size = QSize(round(available.width() * fraction), round(available.height() * fraction))
+        self.setGeometry(
+            QStyle.alignedRect(
+                Qt.LayoutDirection.LeftToRight, Qt.AlignmentFlag.AlignCenter, size, available
+            )
+        )
 
     def step(self, cls: type[StepPage]) -> StepPage:
         return next(s for s in self.steps if isinstance(s, cls))

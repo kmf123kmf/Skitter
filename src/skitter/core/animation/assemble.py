@@ -14,7 +14,7 @@ from skitter.core.animation.base import (
     cover_after_impact,
     register_choreography,
 )
-from skitter.core.animation.landing import landing_order, random_landing_order
+from skitter.core.animation.landing import landing_order, landing_times, random_landing_order
 from skitter.core.animation.look import NEAR, AnimationLook, clear_of_axis, scene_extent
 from skitter.core.easing import ease_out_back, ease_out_cubic
 from skitter.core.scene import MosaicScene
@@ -35,6 +35,35 @@ ORDERS = (
     ("light", "Light to dark"),
     ("random", "Random"),
 )
+
+
+def order_key(scene: MosaicScene, order: str, rng: np.random.Generator) -> np.ndarray:
+    """(N,) each tile's preference for one of ORDERS (lower lands first)."""
+    if order == "center":
+        return scene.distance
+    if order == "edges":
+        return -scene.distance
+    if order == "reading":
+        return scene.reading_order.astype(np.float64)
+    if order == "dark":
+        return scene.lightness
+    if order == "light":
+        return -scene.lightness
+    return rng.random(len(scene))
+
+
+def landing_ranks(scene: MosaicScene, key, spread: float, seed: int,
+                  rng: np.random.Generator) -> np.ndarray:  # fmt: skip
+    """(N,) each tile's place in a bottom-first landing sequence: by `key` (lower
+    first), each tile's place loosened by `spread` (a share of the sequence); or,
+    with no key, a uniformly random one (see landing.py)."""
+    if key is None:
+        return random_landing_order(scene, seed)
+    n = len(scene)
+    preferred = np.empty(n)
+    preferred[np.argsort(key, kind="stable")] = np.linspace(0.0, 1.0, n) if n else []
+    preferred += rng.uniform(-1.0, 1.0, n) * spread
+    return landing_order(scene, preferred)
 
 
 @register_choreography
@@ -69,6 +98,17 @@ class AssembleChoreography(Choreography):
         0.15, "Spread", min=0.0, max=1.0, step=0.05,
         when=lambda c: c.order not in RANDOM_ORDERS,
         help="Randomness in the landing order, as a share of the whole sequence.",
+    )  # fmt: skip
+    wind_down = FloatParam(
+        0.15, "Wind-down", min=0.0, max=0.5, step=0.05, suffix=" × duration",
+        help="Landings slow down over this last share of the duration, so the last "
+             "few tiles land one by one instead of all in the same moment (0: an even "
+             "pace to the end).",
+    )  # fmt: skip
+    last_gap = FloatParam(
+        0.25, "Last gap", min=0.0, max=5.0, step=0.05, suffix=" s",
+        when=lambda c: c.wind_down > 0,
+        help="Time between the last two landings (at most half the wind-down).",
     )  # fmt: skip
     distance = FloatParam(
         1.5, "Distance", min=0.0, max=10.0, step=0.25, suffix=" × mosaic",
@@ -153,16 +193,15 @@ class AssembleChoreography(Choreography):
 
         # Preferred place in the sequence (0..1), loosened by the spread; overlapping
         # tiles still land bottom first. Landings are evenly paced.
-        if self.order in RANDOM_ORDERS:  # uniformly random among bottom-first orders
-            order = random_landing_order(scene, self.seed)
-        else:
-            key = self._order_key(scene, rng)
-            preferred = np.empty(n)
-            preferred[np.argsort(key, kind="stable")] = np.linspace(0.0, 1.0, n) if n else []
-            preferred += rng.uniform(-1.0, 1.0, n) * self.spread
-            order = landing_order(scene, preferred)
-        place = order / max(n - 1, 1)  # 0: lands first, 1: last
+        key = None if self.order in RANDOM_ORDERS else self._order_key(scene, rng)
+        order = landing_ranks(scene, key, self.spread, self.seed, rng)
         window = max(self.duration - travel, 0.0)  # when the last tile lands, after the first
+
+        def pace(window: float) -> np.ndarray:  # 0: lands first, 1: last
+            times = landing_times(n, window, self.wind_down * self.duration, self.last_gap)
+            return times[order] / window if window > 0 else order / max(n - 1, 1)
+
+        place = pace(window)
         if tossed:  # each tile's own bounce and rocking, drawn from the ranges
             bounce = params.bounce.draw(self.bounce, rng, n)
             wobble = (rng.choice([-1.0, 1.0], n)  # rocking either way first
@@ -184,6 +223,9 @@ class AssembleChoreography(Choreography):
                 return max(min(window, float((room[tiles] / place[tiles]).min())), 0.0)
 
             windows = (fit(~covered), fit(np.ones(n, bool)))
+            if self.wind_down > 0 and 0 < windows[0] < window:  # pace the window it gets
+                place = pace(windows[0])
+                windows = (fit(~covered), fit(np.ones(n, bool)))
         delay = place * window
 
         x0, y0, x1, y1 = scene.bounds
@@ -246,17 +288,7 @@ class AssembleChoreography(Choreography):
         return final.center + reach[:, None] * way
 
     def _order_key(self, scene: MosaicScene, rng: np.random.Generator) -> np.ndarray:
-        if self.order == "center":
-            return scene.distance
-        if self.order == "edges":
-            return -scene.distance
-        if self.order == "reading":
-            return scene.reading_order.astype(np.float64)
-        if self.order == "dark":
-            return scene.lightness
-        if self.order == "light":
-            return -scene.lightness
-        return rng.random(len(scene))
+        return order_key(scene, self.order, rng)
 
     def summary(self) -> str:
         return f"{dict(ORDERS)[self.order]}, {self.duration:g} s"
