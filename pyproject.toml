@@ -41,7 +41,7 @@ testpaths = ["tests"]
 
 # For editors that run Pylint: let it import compiled extensions to see their names.
 [tool.pylint.main]
-extension-pkg-allow-list = ["PySide6", "moderngl", "faiss"]
+extension-pkg-allow-list = ["PySide6", "moderngl", "faiss", "numba"]
 
 [tool.ruff]
 line-length = 100
