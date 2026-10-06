@@ -2,6 +2,7 @@
 
 import logging
 import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -24,8 +25,10 @@ from skitter.core.project import Project
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing import (
     MosaicLayout,
+    RegionSet,
     SliceContext,
     SliceSummary,
+    SlicingCancelled,
     SlicingError,
     StageResult,
     mask_regions,
@@ -37,6 +40,17 @@ from skitter.ui.render.tile_textures import DetailRequest, TileTextures
 from skitter.ui.render.video_export import VideoJob, run_video_job
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class _Sliced:
+    """What a slicing run produced: stage results, final regions and their summary,
+    or an error (a SlicingError's message, or an unexpected failure)."""
+
+    results: list = field(default_factory=list)
+    regions: RegionSet | None = None
+    summary: SliceSummary | None = None
+    error: str | None = None
 
 
 class Session(QObject):
@@ -51,6 +65,10 @@ class Session(QObject):
     source_committed = Signal()  # project.source_final changed; later steps must refresh
     layout_changed = Signal()  # project.layout changed (tile size, aspect, columns)
     slicing_changed = Signal()  # project.regions recomputed (see slicing_error, slicing_summary)
+    # A slicing run began (in the background): project.regions are out of date until
+    # slicing_changed; meanwhile slicing_progress reports (message, 0..1).
+    slicing_started = Signal()
+    slicing_progress = Signal(str, float)
     library_changed = Signal()  # tile library opened, updated, or its folders changed
     library_progress = Signal(str, float)  # (message, fraction; -1 unknown) while updating
     matching_changed = Signal()  # project.matches replaced, or matching failed or stopped
@@ -73,6 +91,9 @@ class Session(QObject):
     video_progress = Signal(str, float)
     video_finished = Signal(str, object, object)  # (path, VideoReport, error); cancelled: both None
 
+    # Slicing runs in a worker thread (tests run it inline: tests/conftest.py).
+    slice_in_background = True
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.project = Project()
@@ -83,6 +104,8 @@ class Session(QObject):
         self._slicing_cache: list[StageResult] = []
         self.slicing_error: str | None = None
         self.slicing_summary: SliceSummary | None = None
+        self._slicing_job: Job | None = None
+        self._slicing_run = 0  # numbers runs: only the latest one's result is kept
 
         self.library: TileLibrary | None = None
         self.matcher: Matcher | None = None
@@ -133,7 +156,7 @@ class Session(QObject):
         self.project.source_final = final
         self._committed_key = self._source_key()
         self._rebuild_slice_context()
-        self._evaluate_slicing()
+        self._evaluate_slicing(fresh=True)
         self.source_committed.emit()
         return True
 
@@ -146,7 +169,7 @@ class Session(QObject):
         self.project.layout = layout
         self._rebuild_slice_context()  # first, so listeners see the new mosaic size
         self.layout_changed.emit()
-        self._evaluate_slicing()
+        self._evaluate_slicing(fresh=True)
 
     def mosaic_size(self) -> tuple[float, float] | None:
         """Canvas size in mosaic units, once the source is committed."""
@@ -170,35 +193,90 @@ class Session(QObject):
             self._slice_context = SliceContext(final, self.project.layout)
         self._slicing_cache = []
 
-    def _evaluate_slicing(self) -> None:
+    @property
+    def slicing_running(self) -> bool:
+        """A slicing run is under way: project.regions are out of date until it ends."""
+        return self._slicing_job is not None
+
+    def wait_for_slicing(self, timeout: float | None = None) -> None:
+        """Block until the current slicing run ends and its result is in (tests, scripts)."""
+        job = self._slicing_job
+        while job is not None:
+            job.wait(timeout)
+            if self._slicing_job is job:  # timed out
+                return
+            job = self._slicing_job
+
+    def _evaluate_slicing(self, fresh: bool = False) -> None:
+        """Re-slice in the background, replacing any run under way.
+
+        fresh: the image or layout changed, so the current regions don't fit
+        it: they go at once (else they stay shown until the new ones are in).
+        Plan, context and cached stages are captured now, so editing the plan
+        while it runs is safe; only the latest run's result is kept.
+        """
         project = self.project
-        self.slicing_summary = None
-        if self._slice_context is None:
+        if self._slicing_job is not None:
+            self._slicing_job.cancel()  # it may finish its current step; its result is ignored
+            self._slicing_job = None
+        self._slicing_run += 1
+        run = self._slicing_run
+        ctx = self._slice_context
+        if ctx is None or fresh:  # the current regions don't fit: they go now
             project.regions = None
-        else:
+            self.slicing_summary = None
+            self._drop_stale_matches()
+            self.slicing_changed.emit()
+            if ctx is None:
+                return
+        plan, cache = project.slicing_plan.copy(), list(self._slicing_cache)
+
+        def work(progress, cancelled) -> _Sliced:
             try:
-                self._slicing_cache = project.slicing_plan.evaluate(
-                    self._slice_context, self._slicing_cache
-                )
-            except Exception as exc:
+                results = plan.evaluate(ctx, cache, progress, cancelled)
+            except SlicingError as exc:
+                return _Sliced(error=str(exc))
+            regions = mask_regions(results[-1].regions if results else ctx.canvas(), ctx)
+            return _Sliced(results, regions, summarize(regions, ctx) if regions else None)
+
+        def done(sliced: _Sliced | None, failure: str | None) -> None:
+            if run != self._slicing_run:
+                return  # a newer run replaced this one
+            self._slicing_job = None
+            if sliced is None and failure is None:
+                return  # cancelled (the app is closing)
+            if failure is not None:
                 # Any failure must reach the UI; otherwise the preview silently goes stale.
-                if isinstance(exc, SlicingError):
-                    self.slicing_error = str(exc)
-                else:
-                    logger.exception("slicing plan failed")
-                    self.slicing_error = f"Slicing failed: {type(exc).__name__}: {exc}"
-                self._slicing_cache = []
-                project.regions = None
+                sliced = _Sliced(error=f"Slicing failed: {failure}")
+            self.slicing_error = sliced.error
+            self._slicing_cache = sliced.results
+            project.regions = sliced.regions
+            self.slicing_summary = sliced.summary
+            self._drop_stale_matches()
+            self.slicing_changed.emit()
+
+        if not self.slice_in_background:
+            self.slicing_started.emit()
+            try:
+                sliced = work(lambda *_: None, lambda: False)
+            except Exception as exc:
+                logger.exception("slicing plan failed")
+                done(None, f"{type(exc).__name__}: {exc}")
             else:
-                self.slicing_error = None
-                ctx = self._slice_context
-                project.regions = mask_regions(
-                    self._slicing_cache[-1].regions if self._slicing_cache else ctx.canvas(), ctx
-                )
-                if project.regions:
-                    self.slicing_summary = summarize(project.regions, ctx)
-        self._drop_stale_matches()
-        self.slicing_changed.emit()
+                done(sliced, None)
+            return
+        job = Job(work, (SlicingCancelled,), self)
+        job.progress.connect(
+            lambda message, fraction: (
+                run == self._slicing_run and self.slicing_progress.emit(message, fraction)
+            )
+        )
+        job.finished.connect(lambda sliced: done(sliced, None))
+        job.failed.connect(lambda message: done(None, message))
+        job.cancelled.connect(lambda: done(None, None))
+        self._slicing_job = job
+        job.start()
+        self.slicing_started.emit()
 
     # Source edits
 
@@ -268,6 +346,10 @@ class Session(QObject):
     def shutdown(self, timeout: float = 10) -> None:
         """Stop all background work (the app is closing)."""
         self.cancel_job()
+        slicing = self._slicing_job
+        if slicing is not None:
+            slicing.cancel()
+            slicing.wait(timeout)
         if self.textures is not None:
             self.textures.cancel()
             self.textures.wait(timeout)
@@ -367,7 +449,10 @@ class Session(QObject):
     @property
     def can_match(self) -> bool:
         return (
-            bool(self.project.regions) and self._slice_context is not None and (self.library_ready)
+            bool(self.project.regions)
+            and self._slice_context is not None
+            and not self.slicing_running
+            and self.library_ready
         )
 
     def start_matching(self, keep_picks: bool = False) -> Job:

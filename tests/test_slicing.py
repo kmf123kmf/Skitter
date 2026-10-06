@@ -165,7 +165,7 @@ def test_register_custom_operation_roundtrips():
         id = "test-halve"
         name = "Halve"
 
-        def subdivide(self, region, ctx):
+        def subdivide(self, region, ctx, progress=None):
             return RegionSet.grid(region.width, region.height, 2, 1)
 
     try:
@@ -206,7 +206,7 @@ def test_evaluate_reuses_unchanged_prefix():
     class Counting(SplitSlicer):
         id = "test-counting"
 
-        def apply(self, regions, ctx):
+        def apply(self, regions, ctx, progress=None):
             calls.append(self.across)
             return super().apply(regions, ctx)
 
@@ -230,7 +230,7 @@ def test_too_many_regions_across_parents_fails_before_finishing():
     calls = []
 
     class Counting(SplitSlicer):
-        def subdivide(self, region, ctx):
+        def subdivide(self, region, ctx, progress=None):
             calls.append(region)
             return super().subdivide(region, ctx)
 
@@ -356,7 +356,7 @@ def test_subdivider_keeps_parent_stack_positions():
         id = "test-overlapping"
         name = "Overlapping"
 
-        def subdivide(self, region, ctx):
+        def subdivide(self, region, ctx, progress=None):
             # Two parts; the first is given the higher local z (on top).
             return RegionSet.from_rects([0, 0], [0, 0], region.width, region.height, z=[1, 0])
 

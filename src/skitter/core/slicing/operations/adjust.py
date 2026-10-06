@@ -2,7 +2,13 @@
 
 import numpy as np
 
-from skitter.core.slicing.base import SliceContext, SlicingOperation, register_operation
+from skitter.core.slicing.base import (
+    NO_PROGRESS,
+    Progress,
+    SliceContext,
+    SlicingOperation,
+    register_operation,
+)
 from skitter.core.slicing.params import ChoiceParam, FloatParam, IntParam
 from skitter.core.slicing.regions import RegionSet
 
@@ -25,7 +31,9 @@ class JitterAdjust(SlicingOperation):
     )  # fmt: skip
     seed = IntParam(1, "Seed", min=0, max=999_999)
 
-    def apply(self, regions: RegionSet, ctx: SliceContext) -> RegionSet:
+    def apply(
+        self, regions: RegionSet, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         rng = np.random.default_rng(self.seed)
         n = len(regions)
         shift = rng.uniform(-1, 1, (n, 2)) * self.offset * regions.size
@@ -60,7 +68,9 @@ class StackingAdjust(SlicingOperation):
     )
     seed = IntParam(1, "Seed", min=0, max=999_999, when=lambda op: op.order == "random")
 
-    def apply(self, regions: RegionSet, ctx: SliceContext) -> RegionSet:
+    def apply(
+        self, regions: RegionSet, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         if self.order == "random":
             key = np.random.default_rng(self.seed).random(len(regions))
         elif self.order == "small_on_top":

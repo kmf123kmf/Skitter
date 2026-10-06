@@ -9,7 +9,10 @@ from skitter.core.slicing import operations  # registers the built-in operations
 from skitter.core.slicing.analysis import SliceSummary, coverage, summarize
 from skitter.core.slicing.base import (
     CATEGORIES,
+    NO_PROGRESS,
+    Progress,
     SliceContext,
+    SlicingCancelled,
     SlicingError,
     SlicingOperation,
     Subdivider,
@@ -46,6 +49,7 @@ from skitter.core.slicing.regions import REGION_DTYPE, Region, RegionSet
 __all__ = [
     "CATEGORIES",
     "MAX_REGIONS",
+    "NO_PROGRESS",
     "REGION_DTYPE",
     "TILE_ASPECTS",
     "TILE_UNIT",
@@ -58,12 +62,14 @@ __all__ = [
     "IntParam",
     "MosaicLayout",
     "Param",
+    "Progress",
     "PatternBuilder",
     "PatternUnit",
     "Region",
     "RegionSet",
     "SliceContext",
     "SliceSummary",
+    "SlicingCancelled",
     "SlicingError",
     "SlicingOperation",
     "SlicingPlan",

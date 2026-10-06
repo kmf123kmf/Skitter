@@ -2,7 +2,13 @@
 
 import math
 
-from skitter.core.slicing.base import SliceContext, Subdivider, register_operation
+from skitter.core.slicing.base import (
+    NO_PROGRESS,
+    Progress,
+    SliceContext,
+    Subdivider,
+    register_operation,
+)
 from skitter.core.slicing.params import FloatParam, IntParam, TileSizeParam
 from skitter.core.slicing.regions import Region, RegionSet
 
@@ -26,7 +32,9 @@ class QuadtreeSlicer(Subdivider):
     )  # fmt: skip
     max_depth = IntParam(4, "Maximum depth", min=1, max=12)
 
-    def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
+    def subdivide(
+        self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         samples, scale = ctx.patch(region)
         min_w, min_h = (self.min_size * size for size in ctx.tile_size)
         leaves: list[tuple[float, float, float, float]] = []

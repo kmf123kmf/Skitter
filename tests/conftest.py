@@ -21,3 +21,19 @@ def qapp():
     from PySide6.QtWidgets import QApplication
 
     return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture(autouse=True)
+def _inline_slicing(monkeypatch):
+    """Slice inline, so tests see results at once (test_background_slicing.py covers the
+    worker thread: use the `background_slicing` fixture)."""
+    from skitter.ui.session import Session
+
+    monkeypatch.setattr(Session, "slice_in_background", False)
+
+
+@pytest.fixture
+def background_slicing(monkeypatch):
+    from skitter.ui.session import Session
+
+    monkeypatch.setattr(Session, "slice_in_background", True)

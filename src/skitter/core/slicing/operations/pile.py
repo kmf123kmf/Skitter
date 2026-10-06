@@ -5,6 +5,8 @@ import math
 import numpy as np
 
 from skitter.core.slicing.base import (
+    NO_PROGRESS,
+    Progress,
     SliceContext,
     Subdivider,
     check_region_count,
@@ -60,7 +62,9 @@ class PileSlicer(Subdivider):
         r = (short / 2) / (math.cos(theta) + math.sin(theta))
         return self.spread * 2 * r / (1 + 2 * JITTER)
 
-    def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
+    def subdivide(
+        self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         # Seed per region (by position) so neighbors don't get identical piles.
         rng = region_rng(self.seed, region)
         spacing = self.spacing(ctx)

@@ -109,14 +109,14 @@ def test_layout_before_commit_is_kept_and_used(session):
     assert len(session.project.regions) == 2  # 2 columns x 1 row
 
 
-def test_unexpected_slicing_failure_is_reported(session):
+def test_unexpected_slicing_failure_is_reported(session, monkeypatch):
     session.commit_source()
     operation = session.project.slicing_plan.stages[0].operation
 
-    def fail(regions, ctx):
+    def fail(self, regions, ctx, progress):
         raise RuntimeError("boom")
 
-    operation.apply = fail
+    monkeypatch.setattr(type(operation), "apply", fail)
     operation.cell_size = 2.0  # new key, so the stage re-runs
     sliced = record(session.slicing_changed)
     session.slicing_edited()
@@ -133,7 +133,7 @@ def test_layout_change_reslices_and_announces_new_size(session):
     sliced = record(session.slicing_changed)
     session.set_layout(MosaicLayout(tile_aspect=1.5, columns=3))
     assert seen == [(300.0, 150.0)]  # listeners already see the new size
-    assert len(sliced) == 1
+    assert len(sliced) == 2  # the old regions cleared at once, then the new ones
     assert session.slicing_summary.count == 3 * 3  # 2.25 rows of 3:2 tiles -> 3, overhanging
     session.set_layout(MosaicLayout(tile_aspect=1.5, columns=3))  # unchanged: no-op
     assert len(seen) == 1

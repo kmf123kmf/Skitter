@@ -1,6 +1,8 @@
 """Split: divide each region into a fixed number of equal pieces."""
 
 from skitter.core.slicing.base import (
+    NO_PROGRESS,
+    Progress,
     SliceContext,
     Subdivider,
     check_region_count,
@@ -36,7 +38,9 @@ class SplitSlicer(Subdivider):
         piece_w = width / self.across
         return max(1, round(height * tile_aspect / piece_w))
 
-    def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
+    def subdivide(
+        self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         w, h = region.width, region.height
         down = self.down_for(w, h, ctx.tile_aspect)
         check_region_count(self.across * down, self.name)

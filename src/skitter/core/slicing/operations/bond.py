@@ -4,7 +4,14 @@ import math
 
 import numpy as np
 
-from skitter.core.slicing.base import SliceContext, Subdivider, region_rng, register_operation
+from skitter.core.slicing.base import (
+    NO_PROGRESS,
+    Progress,
+    SliceContext,
+    Subdivider,
+    region_rng,
+    register_operation,
+)
 from skitter.core.slicing.params import ChoiceParam, FloatParam, IntParam, TileSizeParam
 from skitter.core.slicing.regions import Region, RegionSet
 
@@ -64,7 +71,9 @@ class BondSlicer(Subdivider):
         step = self.step if self.bond == "custom" else BOND_STEPS[self.bond]
         return ((np.arange(count) + first) * step) % 1.0
 
-    def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
+    def subdivide(
+        self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         cell_w, cell_h = (self.cell_size * size for size in ctx.tile_size)
         vertical = self.orientation == VERTICAL
         # Work in course coordinates: u along the courses, v across them.

@@ -16,6 +16,11 @@ or `SlicingOperation` (anything else), set `id`, `name`, `category` and
 be deterministic for given parameters and image (take a seed parameter for
 randomness) and must not modify their inputs.
 
+Plans may run in the background. Operations get a `Progress` to report
+their share done to and that stops them (raises SlicingCancelled) once the
+run is cancelled: call it at natural points if a stage can take a while
+(Subdivider does, between regions, and hands each region its slice).
+
 Regions may overlap; their z values decide which lies on top (see
 regions.py). Operations that only move or resize regions should keep z as
 it is (RegionSet.replace does). Operations that create overlap or change it
@@ -28,6 +33,7 @@ from functools import cached_property
 from typing import ClassVar
 
 import numpy as np
+from scipy import ndimage
 
 from skitter.core.imaging import fill_hidden, visible_mask
 from skitter.core.slicing.layout import TILE_UNIT, MosaicLayout
@@ -38,10 +44,52 @@ from skitter.core.slicing.regions import Region, RegionSet
 CATEGORIES = ("Subdivide", "Adjust", "Filter", "Other")
 
 MAX_REGIONS = 250_000
+ANTIALIAS = 0.7  # blur before sampling, in sample spacings (see SliceContext.patch)
 
 
 class SlicingError(Exception):
     """A plan could not be evaluated (for example, it produced too many regions)."""
+
+
+class SlicingCancelled(Exception):
+    """A plan's evaluation was cancelled (a newer one replaces it)."""
+
+
+class Progress:
+    """An operation's progress (0..1) toward its caller's report, and its cancel check.
+
+    Calling it with the share done checks for cancellation (raising
+    SlicingCancelled) and reports, at most every REPORT_STEP of progress.
+    `part(lo, hi)` is a Progress for one piece of the work, mapped onto
+    [lo, hi] of this one.
+    """
+
+    REPORT_STEP = 0.01
+
+    def __init__(self, report=None, cancelled=None, lo: float = 0.0, hi: float = 1.0):
+        self._report = report  # fraction -> None
+        self._cancelled = cancelled  # () -> bool
+        self._lo, self._hi = lo, hi
+        self._last = [-1.0]  # shared with parts: reports go out in steps
+
+    def __call__(self, fraction: float) -> None:
+        if self._cancelled is not None and self._cancelled():
+            raise SlicingCancelled
+        if self._report is None:
+            return
+        done = self._lo + (self._hi - self._lo) * min(max(float(fraction), 0.0), 1.0)
+        if done - self._last[0] >= self.REPORT_STEP or done >= 1.0 > self._last[0]:
+            self._last[0] = done
+            self._report(done)
+
+    def part(self, lo: float, hi: float) -> "Progress":
+        span = self._hi - self._lo
+        piece = Progress(self._report, self._cancelled, self._lo + span * lo, self._lo + span * hi)
+        piece._last = self._last
+        return piece
+
+
+NO_PROGRESS = Progress()
 
 
 def check_region_count(count: int, name: str) -> None:
@@ -83,7 +131,9 @@ class SliceContext:
     the regions that touch no visible pixel (mask.py).
 
     One context is created per final image and layout and reused across
-    evaluations, so derived data (like luminance) is computed once.
+    evaluations, so derived data (like luminance, or the filled-in image) is
+    computed once, when first needed: building a context is cheap, and the
+    work happens where slicing runs (in the background).
     """
 
     def __init__(
@@ -92,12 +142,11 @@ class SliceContext:
         layout: MosaicLayout | None = None,
         tile_width: float | None = None,
     ):
+        self._source = image
+        self._smoothed: dict[float, np.ndarray] = {}  # luminance by blur (see patch)
         self.visible = visible_mask(image)  # (H, W) bool, or None: all visible
-        rgb = image[..., :3]
-        if self.visible is not None:
-            rgb = fill_hidden(rgb, self.visible)
-        self.image = np.ascontiguousarray(rgb)  # (H, W, 3) uint8 RGB, read-only
         h, w = image.shape[:2]
+        self.source_height, self.source_width = h, w
         if tile_width is None:
             tile_width = 1.0 if layout is None else TILE_UNIT
         self.layout = layout or MosaicLayout(columns=w)
@@ -106,13 +155,13 @@ class SliceContext:
         self.height = self.width * h / w
         self.scale = self.width / w  # mosaic units per source pixel
 
-    @property
-    def source_width(self) -> int:
-        return self.image.shape[1]
-
-    @property
-    def source_height(self) -> int:
-        return self.image.shape[0]
+    @cached_property
+    def image(self) -> np.ndarray:
+        """(H, W, 3) uint8 RGB, hidden pixels filled in (see the class docstring)."""
+        rgb = self._source[..., :3]
+        if self.visible is not None:
+            rgb = fill_hidden(rgb, self.visible)
+        return np.ascontiguousarray(rgb)
 
     @property
     def tile_size(self) -> tuple[float, float]:
@@ -148,8 +197,23 @@ class SliceContext:
         lum.setflags(write=False)
         return lum
 
+    def smoothed_luminance(self, sigma: float) -> np.ndarray:
+        """luminance blurred by sigma source pixels (cached per sigma, to 0.1 px)."""
+        sigma = round(sigma, 1)
+        if sigma <= 0:
+            return self.luminance
+        if sigma not in self._smoothed:
+            blurred = ndimage.gaussian_filter(self.luminance, sigma)
+            blurred.setflags(write=False)
+            self._smoothed[sigma] = blurred
+        return self._smoothed[sigma]
+
     def patch(
-        self, region: Region, source: str = "luminance", max_samples: int = 4_000_000
+        self,
+        region: Region,
+        source: str = "luminance",
+        max_samples: int = 4_000_000,
+        antialias: bool = False,
     ) -> tuple[np.ndarray, float]:
         """Sample the source image inside a (canvas) region, aligned with its frame.
 
@@ -157,12 +221,25 @@ class SliceContext:
         local point ((i + 0.5) / scale, (j + 0.5) / scale), so scale is samples
         per mosaic unit. It gives about one sample per source pixel, fewer if
         that would exceed max_samples. Points outside the image take the
-        nearest edge pixel. source is "luminance" or "rgb".
+        nearest edge pixel. source is "luminance", "rgb" or "visible" (the mask:
+        bool, all True without one).
+
+        antialias (luminance): sampling coarser than the image, blur it first
+        (by ANTIALIAS of the sample spacing), so detail finer than the samples
+        averages out instead of aliasing into false patterns (moire).
         """
-        image = self.luminance if source == "luminance" else self.image
         scale = min(1.0 / self.scale, math.sqrt(max_samples / max(region.area, 1.0)))
         pw = max(1, math.ceil(region.width * scale))
         ph = max(1, math.ceil(region.height * scale))
+        if source == "visible":
+            if self.visible is None:
+                return np.ones((ph, pw), bool), scale
+            image = self.visible
+        elif source == "luminance":
+            spacing = 1.0 / (scale * self.scale)  # source pixels per sample
+            image = self.smoothed_luminance(ANTIALIAS * spacing) if antialias else self.luminance
+        else:
+            image = self.image
         u = (np.arange(pw) + 0.5) / scale
         v = (np.arange(ph) + 0.5) / scale
         src_w, src_h = self.source_width, self.source_height
@@ -199,7 +276,9 @@ class SlicingOperation(Configurable, ABC):
         return {"type": self.id, "params": self.values()}
 
     @abstractmethod
-    def apply(self, regions: RegionSet, ctx: SliceContext) -> RegionSet:
+    def apply(
+        self, regions: RegionSet, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         """Return the transformed regions (in image coordinates)."""
 
 
@@ -220,12 +299,14 @@ class Subdivider(SlicingOperation):
 
     category = "Subdivide"
 
-    def apply(self, regions: RegionSet, ctx: SliceContext) -> RegionSet:
+    def apply(
+        self, regions: RegionSet, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         parent_rank = regions.stacking_rank()
         parts, parent_keys, part_keys = [], [], []
-        total = 0
+        total, n = 0, len(regions)
         for index, region in enumerate(regions):
-            local = self.subdivide(region, ctx)
+            local = self.subdivide(region, ctx, progress.part(index / n, (index + 1) / n))
             total += len(local)
             check_region_count(total, self.name)
             parts.append(local.to_world(region))
@@ -237,8 +318,11 @@ class Subdivider(SlicingOperation):
         return result.restacked(np.concatenate(parent_keys), np.concatenate(part_keys))
 
     @abstractmethod
-    def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
-        """Split region; return the parts in its local frame."""
+    def subdivide(
+        self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
+        """Split region; return the parts in its local frame. Report to progress (and
+        so check for cancellation) at natural points if it can take a while."""
 
 
 # Registry
