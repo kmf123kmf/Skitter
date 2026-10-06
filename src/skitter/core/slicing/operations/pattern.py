@@ -8,7 +8,13 @@ To add a pattern, write a build function and decorate it with
 
 import math
 
-from skitter.core.slicing.base import SliceContext, Subdivider, register_operation
+from skitter.core.slicing.base import (
+    NO_PROGRESS,
+    Progress,
+    SliceContext,
+    Subdivider,
+    register_operation,
+)
 from skitter.core.slicing.params import (
     BoolParam,
     ChoiceParam,
@@ -112,7 +118,9 @@ class PatternSlicer(Subdivider):
         builder = PatternBuilder(tuple(self.cell_size * size for size in ctx.tile_size))
         return pattern.build(builder, **{name: getattr(self, name) for name in pattern.options})
 
-    def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
+    def subdivide(
+        self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         turn = math.radians(self.angle) + (math.pi / 2 if self.orientation == VERTICAL else 0.0)
         return tile_pattern(
             self.unit(ctx), region.width, region.height, anchor=self.anchor, rotation=turn

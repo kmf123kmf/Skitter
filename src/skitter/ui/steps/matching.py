@@ -99,7 +99,7 @@ class MatchingStep(StepPage):
         )
         session.source_committed.connect(self._sync_image)
         session.layout_changed.connect(self._sync_image)
-        for signal in (session.slicing_changed, session.library_changed,
+        for signal in (session.slicing_started, session.slicing_changed, session.library_changed,
                        session.matching_changed, session.busy_changed):  # fmt: skip
             signal.connect(self._refresh)
         session.matching_progress.connect(self._on_progress)

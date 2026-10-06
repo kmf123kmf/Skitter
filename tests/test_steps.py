@@ -427,3 +427,40 @@ def test_entirely_transparent_source_cannot_go_on(window, tmp_path):
     assert not source.advance()
     assert window.session.project.source_final is None
     assert "transparent" in messages[-1]
+
+
+def test_show_structure_draws_what_contour_rows_follows(window, source):
+    from skitter.core.slicing.operations import ContourSlicer
+    from skitter.ui.steps.slicing import SlicingStep
+
+    window.next_button.click()
+    slicing = window.step(SlicingStep)
+    slicing.show_structure.setChecked(True)
+    assert not slicing.show_structure.isEnabled() and not slicing.structure.shown  # a grid
+    slicing.add_stage(ContourSlicer())  # added after the grid, and selected
+    window.session.slicing_edited()
+    assert slicing.show_structure.isEnabled() and slicing.structure.shown
+    slicing.show_structure.setChecked(False)
+    assert not slicing.structure.shown
+    slicing.show_structure.setChecked(True)
+    assert slicing.structure.shown
+
+    # Only for the selected stage: selecting the grid hides it, though Contour Rows
+    # is still in the plan.
+    slicing._stages.setCurrentRow(0)
+    assert not slicing.structure.shown and not slicing.show_structure.isEnabled()
+    slicing._stages.setCurrentRow(1)
+    assert slicing.structure.shown
+
+    # A disabled stage isn't doing anything: nothing to show.
+    slicing._stages.item(1).setCheckState(Qt.CheckState.Unchecked)
+    window.session.slicing_edited()
+    assert not slicing.structure.shown and not slicing.show_structure.isEnabled()
+    slicing._stages.item(1).setCheckState(Qt.CheckState.Checked)
+    window.session.slicing_edited()
+    assert slicing.structure.shown
+
+    slicing.remove_stage()
+    window.session.slicing_edited()
+    assert not slicing.structure.shown and not slicing.show_structure.isEnabled()
+    assert slicing.show_structure.isChecked()  # remembered for next time

@@ -16,7 +16,7 @@ A photo mosaic generator with an animated graphical interface.
 
 - A `SpriteLayer` holds:
   - a stack of same-sized textures (a GL texture array)
-  - a structured numpy array with one row per sprite: `pos`, `size`, `rotation`, `alpha`, `layer`, `tint`
+  - a structured numpy array with one row per sprite: `pos`, `size`, `rotation`, `alpha`, `layer`, `tint`, `uv` (the texture rect shown, e.g. an atlas cell) and `offset` (an OKLab shift of every texel, matching's tint)
 - Animations are functions `f(seconds) -> keep_running`, registered with `canvas.add_animation`.
   - Each frame they write directly into the instance arrays and call `layer.mark_dirty()`.
   - The canvas uploads changed arrays and redraws once per vsync while any animation is running, and stays idle otherwise.
@@ -60,6 +60,10 @@ A photo mosaic generator with an animated graphical interface.
 
 To add a step: subclass `StepPage`, set `title`, implement `is_complete()` (and `advance()` if it has work to commit), and append the class to `STEPS`.
 
+### Preferences
+
+Display choices that belong to the user rather than the project (the Slicing tab's line color, line opacity and Show structure, the Animate tab's Show export frame, and the folders the export dialogs last used) are stored with `QSettings` in an INI file, through `ui/preferences.settings()`. `tests/conftest.py` redirects that file to a temp folder, so tests never read or write the real one.
+
 ## Slicing
 
 Slicing divides the final image into regions for tile matching. The result is always a `RegionSet`: rectangles with a center, size, rotation (radians, clockwise on screen) and stacking order, stored as parallel numpy arrays (`skitter.core.slicing`, Qt-free).
@@ -80,10 +84,12 @@ Slicing divides the final image into regions for tile matching. The result is al
 
 ### Plans and operations
 
-- A **slicing operation** transforms regions: `apply(regions, ctx) -> regions`.
+- A **slicing operation** transforms regions: `apply(regions, ctx, progress) -> regions`. `progress` (a `Progress`) is optional to use: call it with the share done at natural points if a stage can take a while; it reports to the UI and raises `SlicingCancelled` once the run is replaced. `Subdivider` calls it between regions and hands each `subdivide` its slice (`progress.part`).
 - A **plan** (`project.slicing_plan`) is an ordered list of stages, each an operation plus an enabled flag. It starts from one region covering the whole canvas.
   - Splitting, adjusting, filtering and hand-drawn regions all fit this one interface, and operations nest: a grid inside jittered regions gives rotated cells.
 - `Session` re-evaluates the plan when it, the layout, or the final image changes, reusing cached results for unchanged leading stages.
+  - **In the background:** each run is a `Job` on a snapshot (`plan.copy()`, the context, the cached stages), so editing while it runs is safe. A new edit cancels the run under way (it stops at its next progress call) and starts another; only the latest run's result is installed (`_slicing_run` numbers them). Plan edits keep the current regions shown until the new ones are in; a new image or layout clears them at once (they don't fit). `slicing_started` / `slicing_progress` / `slicing_changed` tell the UI; while `slicing_running`, the Slicing tab shows progress and Next and matching wait. The context's heavy derived data (the transparency fill, luminance) is computed on first use, in the run. A 65,000-tile Contour Rows run (3.5 s) pauses the UI at most about 0.2 s, when the regions are installed, against 3.7 s inline.
+  - Tests slice inline (`Session.slice_in_background`, off in `tests/conftest.py`); `tests/test_background_slicing.py` covers the worker thread through the `background_slicing` fixture.
 - The Slicing tab lists the stages (add from a menu grouped by category, reorder, enable/disable, remove), generates a settings form from the selected operation's parameters, and draws the regions on the GPU.
 - Built-in operations:
   - **Grid**: cells of the Mosaic tile shape (scaled by Cell size), with centered overhang. Its only sizes are in base tiles, so the Mosaic box alone sets tile size and shape.
@@ -92,6 +98,11 @@ Slicing divides the final image into regions for tile matching. The result is al
   - **Brick Pattern**: repeating patterns that mix brick directions: herringbone (any tile shape, any rotation; 45° gives diagonal herringbone) and basketweave. Bricks lying the other way are base tiles turned 90°, so regions keep the tile shape.
   - **Quadtree**: splits where the image has detail, down to a minimum in tiles. Use after a Grid.
   - **Photo Pile**: overlapping rotated photos in the tile shape. Spread 1.0 guarantees coverage.
+  - **Contour Rows**: tiles in rows that follow the image's edges and outlines and ripple outward from them, like a Roman mosaic (opus vermiculatum). Every tile keeps the base tile shape (matching indexes one aspect class), its long side along its row, turned to whichever way with the same footprint is nearest upright (`upright`: a row has no direction, so tiles traced "backwards" would otherwise show their photos upside down; rectangles end within ±90°, squares within ±45°). Three layers, Qt-free:
+    - `slicing/structure.py` analyzes the region's patch at 8 samples per row height: thin edges (blurred by **Smoothness**, non-maximum suppressed, at least **Edge strength** of the 99th-percentile gradient, fragments shorter than **Shortest edge** dropped) plus the mask's edge are the guides; `rows` is each sample's distance to the nearest guide in row heights (no guides: straight rows from the top); **Background** (**Outline rows**, default 3; 0: rows ripple everywhere): past that many rows from any guide, and everywhere when there is none, rows run straight at **Background angle** (the `straight` row field), a plain background around halos of outline rows, as in Roman mosaics (opus tessellatum around opus vermiculatum). **Texture** (**Follow texture**): the image's grain is measured at fine scale (structure tensor, about half a sample of blur, averaged over a row, leaving out gradients within half a row of an outline so an outline's own strength doesn't make a band of texture beside it); where it is strong (at least Edge strength of the image's strong gradients) and clear, at least a row from any guide, patches of 4 tiles or more are texture, and tiles there follow the grain instead of rippling across it (stripes, bands, a shoreline). The patch is antialiased (`ctx.patch(..., antialias=True)`: blurred by 0.7 sample spacings before sampling, cached per blur), and strength is judged against the image before that blur, so detail finer than the samples neither aliases into a false grain (moire) nor counts. `flow` is a smooth direction everywhere: the grain in texture; elsewhere the rows' where they're clear and the grain where they aren't, averaged as doubled angles.
+    - `slicing/rows.py` (numba) traces each row's centerline (rows = k + 1/2), nearest the guides first, stepping a tile length along the level set and back onto it, laying a tile on each chord; a row stops at **Overlap** with tiles already laid, a sharp turn, where rows meet, or on hidden samples. Outline rows keep out of texture and the background; the background gets straight rows the same way (`_level_rows` lays both; the field extends linearly past the patch, so rows overhanging its border stay true). Then flow rows, traced along the flow the same way, fill texture first and then whatever room outline rows left, each seeded from the uncovered samples nearest what is laid, its first tile nudged up to half a height across the flow to fit. Fillers turned along the flow cover what is left. Stacking: outline rows (nearer guides on top), background rows, flow rows, then fillers. Slivers under 5% of a tile are left as grout: covering them all would nearly double the count.
+    - **Show structure** (Slicing tab, Display): draws what tiles follow, over the regions: edges found in the image yellow, the mask's edge cyan, texture magenta, and white strokes about a row apart for the flow (`ui/widgets/structure_overlay.py`, one RGBA sprite over the canvas). It shows only the selected stage, while it is enabled and follows structure (it helps tune the settings being edited); operations opt in by implementing `structure(region, ctx)` (the `FollowsStructure` protocol in `structure.py`), which `ContourSlicer.subdivide` uses too, so the picture is exactly what slicing sees (computed over the whole canvas: exact for a first stage). Edges count only on visible samples: the filled-in colors of hidden ones have seams that are no edges.
+    - `operations/contour.py` is a `Subdivider`, so it fills each region it's given (rotated ones too, after Pile or Split). About 0.8 s for 17,000 tiles, 3 s for 65,000 (in the background, like all slicing); numba compiles once (about 3 s, then cached).
   - **Jitter**, **Stacking Order**.
 
 ### Overlap and stacking
@@ -104,6 +115,7 @@ Slicing divides the final image into regions for tile matching. The result is al
   - **Stacked:** regions draw bottom to top, each filled with the image pixels at its position, so upper regions hide the outlines of lower ones. Optional dimming of uncovered areas.
   - **Outlines:** every region's full extent is visible.
   - **Hidden.**
+- **Line color** (a preset list) and **Line opacity** (10 to 100%) restyle the outlines live (`RegionOverlay.set_line_color` / `set_line_alpha`, through the sprite shader's `u_line_alpha`). They apply to the outline and its dark inner edge only: the image fill stays opaque and the hover highlight keeps its color. Both are remembered between runs (see Preferences below).
 - Hovering highlights the topmost region under the cursor (its full extent) and shows its size, rotation and stack layer.
 
 ### Writing a new operation
@@ -125,7 +137,7 @@ class Stripes(Subdivider):
 ```
 
 - Subclass `Subdivider` to split each region independently in its local frame (the framework handles position and rotation). Subclass `SlicingOperation` and implement `apply` for anything else.
-- Parameters (`IntParam`, `FloatParam`, `BoolParam`, `ChoiceParam`) give validation, the generated settings form, and saving. `when=` greys a parameter out depending on others. A new `Param` type needs an editor factory: `@register_editor` in `ui/widgets/param_form.py`.
+- Parameters (`IntParam`, `FloatParam`, `TileSizeParam`, `RangeParam`, `BoolParam`, `ChoiceParam`, `ColorParam`) give validation, the generated settings form, and saving. `when=` greys a parameter out depending on others. A new `Param` type needs an editor factory: `@register_editor` in `ui/widgets/param_form.py`.
 - Sizes: use `TileSizeParam` for lengths and convert with `ctx.tile_size` (base tile in mosaic units). `ctx.width/height` is the canvas. Never use absolute lengths: they would change meaning with the export size.
 - `ctx.image` / `ctx.luminance` give the read-only final image in source pixels. `ctx.patch(region)` samples the source inside a (possibly rotated) canvas region on a grid aligned with it.
 - Operations must be deterministic (take a seed parameter for randomness) and must not modify inputs. Set `z` when the regions you create overlap (see above). RegionSets are immutable: build new ones with `replace`, `from_arrays`, `from_rects`, `grid`, `concat`.
@@ -139,7 +151,7 @@ class Stripes(Subdivider):
   - `thumbs.u8`: a memory-mapped array of 32 px analysis thumbnails, about 3 KB per tile (1.5 GB at 500,000 tiles), paged in as needed.
 - **Update** is incremental. It reads only new or changed files, records unreadable ones (not retried until they change) and marks vanished ones missing. `version` changes with each update, so derived data is cached by it.
 - Ingest (`core/tiles/ingest.py`) decodes JPEGs at reduced scale and HEIC photos from their embedded preview (`Image.draft`; about 7 ms per 12 MP iPhone photo, or about 350 ms if a HEIC has no preview) in a process pool. Progress and cancel go through callbacks.
-- Long work runs off the UI thread as a `ui/jobs.Job`, one at a time, started through `Session` (`update_library`, `start_matching`). Its signals arrive on the UI thread.
+- Long work runs off the UI thread as a `ui/jobs.Job`, one at a time, started through `Session` (`update_library`, `start_matching`, `start_export`, `start_video_export`). Its signals arrive on the UI thread.
 
 ## Matching
 
@@ -221,7 +233,7 @@ Groundwork for animating the tiles into the finished mosaic (`core/animation/`):
 src/skitter/
   app.py            entry point
   core/             numpy-only image processing and mosaic logic
-    imaging.py      load/save/resize/crop helpers
+    imaging.py      load/save helpers, the transparency mask (visible_mask, fill_hidden)
     easing.py       vectorized easing curves
     edits.py        non-destructive edits: flip, rotate, crop
     geometry.py     rectangle math for interactive tools (crop box)
@@ -256,7 +268,10 @@ src/skitter/
       plan.py       SlicingPlan, stages, cached evaluation
       analysis.py   coverage, density and size summary
       patterns.py   brick pattern framework (repeating units, tiler)
-      operations/   built-ins: grid, split, bond, pattern, quadtree, pile, jitter, stacking
+      mask.py       drops regions that touch no visible pixel (transparency mask)
+      structure.py  edge, texture and flow analysis that contour rows follow
+      rows.py       numba row tracing for contour rows
+      operations/   built-ins: grid, split, bond, pattern, quadtree, pile, contour, jitter, stacking
   ui/
     main_window.py  tabbed window, Back/Next footer, step gating, menus
     session.py      observable Project wrapper shared by steps
@@ -272,11 +287,14 @@ src/skitter/
       tile_picker.py  picking tiles by hand: side panel, canvas overlays, crop reader
       animate.py    step 5: choreography settings, playback and scrubbing of the build animation
     jobs.py         background jobs with progress and cancel
+    preferences.py  per-user display preferences (QSettings INI)
     style.py        shared looks: muted and warning text, progress bars
     widgets/
       image_viewer.py  canvas + scrollbars + zoom bar + edit transitions
       crop_overlay.py  interactive crop box over a canvas
-      region_overlay.py  stacked GPU preview of a RegionSet (fill, outlines, hover)
+      region_overlay.py  stacked GPU preview of a RegionSet (fill, outlines, hover; adjustable line color and opacity)
+      structure_overlay.py  what contour rows follow (edges, mask edge, texture, flow), drawn over the canvas
+      wheel_guard.py   keeps the mouse wheel from changing a setting by accident
       param_form.py    settings form generated from Params
       candidate_grid.py  grid of tile candidates to pick from
     canvas.py       GPU canvas widget: layers, animations, navigation

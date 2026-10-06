@@ -36,9 +36,10 @@ from skitter.core.slicing import (
     Stage,
     operation_types,
 )
+from skitter.core.slicing.structure import FollowsStructure
 from skitter.ui import preferences
 from skitter.ui.steps.base import StepPage, side_panel
-from skitter.ui.style import WARNING_STYLE, muted
+from skitter.ui.style import WARNING_STYLE, muted, progress_bar, show_progress
 from skitter.ui.widgets.image_viewer import ImageViewer
 from skitter.ui.widgets.param_form import ParamForm
 from skitter.ui.widgets.region_overlay import (
@@ -48,6 +49,7 @@ from skitter.ui.widgets.region_overlay import (
     STACKED,
     RegionOverlay,
 )
+from skitter.ui.widgets.structure_overlay import StructureOverlay
 
 UNCOVERED_DIMMING = 0.6
 MIN_LINE_OPACITY, DEFAULT_LINE_OPACITY = 10, 100  # percent
@@ -72,6 +74,7 @@ class SlicingStep(StepPage):
         super().__init__(session, parent)
         self.viewer = ImageViewer()
         self.overlay = RegionOverlay(self.viewer.canvas)
+        self.structure = StructureOverlay(self.viewer.canvas)  # above the regions
 
         # Coalesce bursts of edits (e.g. holding a spin box arrow) into one run.
         self._recompute = QTimer(self)
@@ -100,6 +103,8 @@ class SlicingStep(StepPage):
         session.source_committed.connect(self._on_source_committed)
         session.layout_changed.connect(self._on_layout_changed)
         session.slicing_changed.connect(self._on_slicing_changed)
+        session.slicing_started.connect(self._on_slicing_started)
+        session.slicing_progress.connect(self._on_slicing_progress)
         self.viewer.canvas.cursor_moved.connect(self._on_hover)
         self.viewer.canvas.cursor_left.connect(lambda: self._on_hover(None, None))
         self._refresh_stages(select=0)
@@ -227,9 +232,14 @@ class SlicingStep(StepPage):
         self._error.setWordWrap(True)
         self._error.setStyleSheet(WARNING_STYLE)
         self._error.hide()
+        self._running = muted(QLabel())  # what a slicing run in progress is doing
+        self._running_bar = progress_bar()
 
         group = QGroupBox("Result")
         form = QFormLayout(group)
+        form.addRow(self._running)
+        form.addRow(self._running_bar)
+        self._show_running(False)
         form.addRow("Regions:", self._count)
         form.addRow("Density:", self._density)
         form.addRow("Coverage:", self._coverage)
@@ -253,6 +263,14 @@ class SlicingStep(StepPage):
         self.dim_uncovered.toggled.connect(self._apply_display)
 
         prefs = preferences.settings()
+        self.show_structure = QCheckBox("Show structure")
+        self.show_structure.setToolTip(
+            "Draw what tiles follow: edges found in the image (yellow), the mask's edge "
+            "(cyan), texture where tiles follow the grain (magenta) and which way tiles "
+            "run (white). For the selected stage, when it is one like Contour Rows."
+        )
+        self.show_structure.setChecked(prefs.value("slicing/show_structure", False, type=bool))
+        self.show_structure.toggled.connect(self._refresh_structure)
         self.line_color = QComboBox()
         for color_id, label, rgb in LINE_COLORS:
             swatch = QPixmap(14, 14)
@@ -283,6 +301,7 @@ class SlicingStep(StepPage):
         form.addRow("Line color:", self.line_color)
         form.addRow("Line opacity:", opacity_row)
         form.addRow(self.dim_uncovered)
+        form.addRow(self.show_structure)
         return group
 
     def _apply_display(self) -> None:
@@ -297,6 +316,27 @@ class SlicingStep(StepPage):
         # Dimming only reads correctly when regions repaint the image they cover.
         dim = stacked and self.dim_uncovered.isChecked()
         self.viewer.set_dimming(UNCOVERED_DIMMING if dim else 0.0)
+
+    def _structure_stage(self) -> Stage | None:
+        """The stage whose structure to show: the selected one, if it is enabled and
+        follows structure (the overlay helps tune the settings being edited)."""
+        stages = self.plan.stages
+        row = self.current_row()
+        if not 0 <= row < len(stages):
+            return None
+        stage = stages[row]
+        return stage if stage.enabled and isinstance(stage.operation, FollowsStructure) else None
+
+    def _refresh_structure(self) -> None:
+        stage = self._structure_stage()
+        self.show_structure.setEnabled(stage is not None)
+        preferences.settings().setValue("slicing/show_structure", self.show_structure.isChecked())
+        ctx = self.session.slice_context
+        if stage is None or ctx is None or not self.show_structure.isChecked():
+            self.structure.hide()
+            return
+        # Over the whole canvas: exact when the stage fills it (as a first stage does).
+        self.structure.show(*stage.operation.structure(ctx.canvas()[0], ctx))
 
     def _apply_line_style(self) -> None:
         color_id = self.line_color.currentData()
@@ -401,6 +441,7 @@ class SlicingStep(StepPage):
         self._remove_button.setEnabled(operation is not None)
         self._up_button.setEnabled(row > 0)
         self._down_button.setEnabled(0 <= row < len(stages) - 1)
+        self._refresh_structure()
 
     def _on_stage_toggled(self, item: QListWidgetItem) -> None:
         stage = self.plan.stages[self._stages.row(item)]
@@ -444,7 +485,23 @@ class SlicingStep(StepPage):
         else:  # no regions (a slicing error): just the image, not the last slicing's area
             self.viewer.set_content_bounds(None)
 
+    def _show_running(self, running: bool) -> None:
+        self._running.setVisible(running)
+        self._running_bar.setVisible(running)
+
+    def _on_slicing_started(self) -> None:
+        """A run began: until its regions are in, the ones shown are out of date."""
+        self._running.setText("Slicing…")
+        show_progress(self._running_bar, -1.0)
+        self._show_running(self.session.slicing_running)
+        self.state_changed.emit()  # Next waits for the new regions
+
+    def _on_slicing_progress(self, message: str, fraction: float) -> None:
+        self._running.setText(f"Slicing: {message}…")
+        show_progress(self._running_bar, fraction)
+
     def _on_slicing_changed(self) -> None:
+        self._show_running(self.session.slicing_running)
         regions = self.session.project.regions
         summary = self.session.slicing_summary
         self.overlay.set_regions(regions)
@@ -471,6 +528,7 @@ class SlicingStep(StepPage):
                 label.setText("—")
             self._coverage.setStyleSheet("")
         self._hover.setText("—")
+        self._refresh_structure()
         self.state_changed.emit()
 
     def _on_hover(self, x: float | None, y: float | None) -> None:
@@ -497,4 +555,4 @@ class SlicingStep(StepPage):
         return f"{width / tile_w:,.2f} × {height / tile_h:,.2f} tiles"
 
     def is_complete(self) -> bool:
-        return bool(self.session.project.regions)
+        return bool(self.session.project.regions) and not self.session.slicing_running

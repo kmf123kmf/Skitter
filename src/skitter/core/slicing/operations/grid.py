@@ -3,6 +3,8 @@
 import math
 
 from skitter.core.slicing.base import (
+    NO_PROGRESS,
+    Progress,
     SliceContext,
     Subdivider,
     check_region_count,
@@ -30,7 +32,9 @@ class GridSlicer(Subdivider):
         help="Where the grid is pinned; overhang goes to the opposite edges.",
     )  # fmt: skip
 
-    def subdivide(self, region: Region, ctx: SliceContext) -> RegionSet:
+    def subdivide(
+        self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
+    ) -> RegionSet:
         w, h = region.width, region.height
         cell_w, cell_h = (self.cell_size * size for size in ctx.tile_size)
         columns = max(1, math.ceil(w / cell_w - 1e-9))
