@@ -8,13 +8,8 @@ import numpy as np
 import pytest
 from test_video import gpu, render_setup  # noqa: F401 (fixture, helper)
 
-from skitter.core.animation.camera import PullBackMove, Shot, StaticMove, home_shot
-from skitter.core.animation.keyframes import (
-    CameraKey,
-    CameraTrack,
-    KeyTime,
-    video_camera_path,
-)
+from skitter.core.animation.camera import Shot, home_shot
+from skitter.core.animation.keyframes import CameraKey, CameraTrack, KeyTime
 from skitter.core.animation.video import ClockedTimeline, VideoClock, VideoSettings, plan_video
 
 CLOCK = VideoClock(hold_start=1.0, duration=8.0, hold_end=2.0)  # 11 s of video
@@ -141,19 +136,6 @@ def test_tracks_edit_into_new_tracks_and_round_trip():
     data["keys"][2]["motion"] = "warp"
     loaded = CameraTrack.from_dict(data, problems)
     assert len(loaded.keys) == 2 and loaded.keys[1].motion == "smooth" and problems
-
-
-def test_keys_take_over_from_the_camera_move():
-    scene = SimpleNamespace(bounds=(0.0, 0.0, 100.0, 80.0), canvas=(100.0, 80.0))
-    timeline = SimpleNamespace(duration=CLOCK.duration)
-    move = PullBackMove(zoom=4.0, timing=(0.0, 100.0))
-    plain = video_camera_path(CameraTrack(), move, scene, timeline, BASE, CLOCK)
-    assert plain.shot(0.5).zoom == pytest.approx(4.0)  # the move, still during the start hold
-    assert plain.shot(9.0).zoom == pytest.approx(1.0) == plain.shot(10.5).zoom
-    keyed = video_camera_path(track(key(10.0, zoom=2.0)), move, scene, timeline, BASE, CLOCK)
-    assert keyed.shot(0.5).zoom == 2.0
-    still = video_camera_path(CameraTrack(), StaticMove(), scene, timeline, BASE, CLOCK)
-    assert still.shot(3.0) == home_shot(BASE)
 
 
 # The video clock

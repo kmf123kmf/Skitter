@@ -34,11 +34,11 @@ keys it shows the video's framing.
 
 import cmath
 import math
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 
 import numpy as np
 
-from skitter.core.animation.camera import CameraMove, CameraPath, Shot, StillPath, home_shot
+from skitter.core.animation.camera import CameraPath, Shot, StillPath, home_shot
 from skitter.core.animation.video import VideoClock
 
 PARTS = ("lead", "body", "tail")
@@ -91,6 +91,11 @@ class CameraTrack:
 
     keys: tuple[CameraKey, ...] = ()  # in time order (see _in_order)
     stretch: bool = True
+
+    @classmethod
+    def of(cls, keys, stretch: bool = True) -> "CameraTrack":
+        """A track of these keys (put in time order)."""
+        return cls(_in_order(keys), stretch)
 
     def times(self, clock: VideoClock) -> np.ndarray:
         return np.array([k.time.seconds(clock, self.stretch) for k in self.keys])
@@ -273,28 +278,3 @@ class KeyframePath(CameraPath):
     def max_zoom(self) -> float:
         times = np.linspace(self.times[0], self.times[-1], PATH_SAMPLES)
         return max([k.shot.zoom for k in self.keys] + [self.shot(float(t)).zoom for t in times])
-
-
-@dataclass(frozen=True)
-class AnimationTimePath(CameraPath):
-    """A path planned on animation time, followed on the video clock (still during the
-    holds): how the camera moves of camera.py run until they become keys."""
-
-    path: CameraPath
-    clock: VideoClock = field(default_factory=lambda: VideoClock(0.0, 0.0, 0.0))
-
-    def shot(self, t: float) -> Shot:
-        return self.path.shot(float(self.clock.animation_time(t)))
-
-    @property
-    def max_zoom(self) -> float:
-        return self.path.max_zoom
-
-
-def video_camera_path(track: CameraTrack, move: CameraMove, scene, timeline, base,
-                      clock: VideoClock) -> CameraPath:  # fmt: skip
-    """The camera over the whole video: the track's keys, or while it has none, the
-    camera move (planned on animation time). base: the video's framing (zoom 1)."""
-    if track.keys:
-        return track.path(clock, base)
-    return AnimationTimePath(move.path(scene, timeline, base), clock)

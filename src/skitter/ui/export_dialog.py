@@ -181,6 +181,7 @@ class ExportDialog(QDialog):
         if name == "format":
             self._match_extension()
         self._refresh()
+        self.session.settings_edited.emit()
 
     def _size_problem(self) -> str | None:
         session = self.session

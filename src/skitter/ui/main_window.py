@@ -5,16 +5,21 @@ Open Recent, Save, Save As. The title shows the project and `*` while it has
 unsaved changes; New, Open and closing ask before dropping them.
 """
 
+import threading
+import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from PySide6.QtCore import QSize, Qt
+from PySide6.QtCore import QEventLoop, QSize, Qt
 from PySide6.QtGui import QAction, QCursor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
+    QApplication,
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QMainWindow,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
     QStyle,
     QTabWidget,
@@ -22,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from skitter.core.project_file import EXTENSION, ProjectFileError
+from skitter.core.project_file import EXTENSION, ProjectFileError, load_project
 from skitter.ui import preferences
 from skitter.ui.export_dialog import ExportDialog
 from skitter.ui.session import Session
@@ -70,6 +75,7 @@ class MainWindow(QMainWindow):
             session.project_replaced, session.source_changed, session.source_edited,
             session.source_committed, session.layout_changed, session.slicing_changed,
             session.matching_changed, session.mosaic_edited, session.animation_changed,
+            session.settings_edited,
         ):  # fmt: skip
             signal.connect(self._update_title)
 
@@ -102,6 +108,7 @@ class MainWindow(QMainWindow):
 
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
+        file_menu.aboutToShow.connect(self._update_title)  # Save follows unsaved changes
 
         def add(text, slot, shortcut=None) -> QAction:
             action = QAction(text, self)
@@ -169,7 +176,10 @@ class MainWindow(QMainWindow):
         if ask and not self._may_replace_project():
             return False
         try:
-            self.session.open_project(path)
+            with self._busy(f"Opening {Path(path).name}…"):
+                loaded = self._in_background(lambda: load_project(path))
+                self.session.open_project(path, loaded)
+                self._until_drawn()
         except (ProjectFileError, OSError) as exc:
             QMessageBox.warning(self, "Open Project", str(exc))
             self._forget_recent(path)
@@ -187,6 +197,56 @@ class MainWindow(QMainWindow):
                                     + "\n".join(f"• {note}" for note in notes))  # fmt: skip
         self.statusBar().showMessage(f"Opened {Path(path).name}", 10_000)
         return True
+
+    @contextmanager
+    def _busy(self, text: str):
+        """A modal dialog with a bouncing bar while the work inside runs (it bounces
+        whenever events are processed, see _in_background and _until_drawn)."""
+        dialog = QProgressDialog(text, None, 0, 0, self)
+        dialog.setWindowTitle("Skitter")
+        dialog.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dialog.setWindowFlag(Qt.WindowType.WindowCloseButtonHint, False)  # it can't stop the work
+        dialog.setMinimumDuration(0)
+        dialog.setMinimumWidth(360)
+        dialog.show()
+        self._pump()
+        try:
+            yield
+        finally:
+            dialog.close()
+            dialog.deleteLater()
+
+    def _pump(self, seconds: float = 0.05) -> None:
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.AllEvents, round(seconds * 1000))
+
+    def _in_background(self, work):
+        """work() in a thread while the UI keeps going; its result (or its error)."""
+        result = {}
+
+        def run():
+            try:
+                result["value"] = work()
+            except BaseException as exc:  # handed to the caller
+                result["error"] = exc
+
+        thread = threading.Thread(target=run, daemon=True, name="skitter-open")
+        thread.start()
+        while thread.is_alive():
+            self._pump()
+            thread.join(0.02)
+        if "error" in result:
+            raise result["error"]
+        return result["value"]
+
+    def _until_drawn(self) -> None:
+        """Keep the UI going until the opened project is in: its slicing run (if it
+        had no regions) and its tile textures."""
+        session = self.session
+        while session.slicing_running or (session.textures is not None
+                                           and session.textures.loading):  # fmt: skip
+            self._pump()
+            time.sleep(0.01)
+        self._pump()
 
     def save_project(self) -> bool:
         path = self.session.project_path
@@ -395,6 +455,7 @@ class MainWindow(QMainWindow):
         else:
             name = None
         self.setWindowTitle(f"Skitter — {name}[*]" if name else "Skitter[*]")
-        self.setWindowModified(session.project.has_source and session.modified)
-        self.save_action.setEnabled(session.project.has_source)
+        unsaved = session.project.has_source and session.modified
+        self.setWindowModified(unsaved)
+        self.save_action.setEnabled(unsaved)
         self.save_as_action.setEnabled(session.project.has_source)

@@ -316,7 +316,7 @@ class CameraKeys(QObject):
             return
         noun = "key" if len(keys) == 1 else "keys"
         self.count.setText(f"{len(keys)} {noun}" + ("" if keys else
-                           ": the camera move below runs (keys replace it)."))  # fmt: skip
+                           ": the camera shows the video's framing."))  # fmt: skip
         self.stretch.blockSignals(True)
         self.stretch.setChecked(track.stretch)
         self.stretch.blockSignals(False)
@@ -329,8 +329,8 @@ class CameraKeys(QObject):
             hint = ("Looking through the camera: drag to pan, wheel to zoom, Shift+wheel to "
                     "turn, then Add Key (K).")  # fmt: skip
         elif not keys:
-            hint = ("Look through camera (C) to frame a shot, or Add Key (K) to key what the "
-                    "camera shows now.")  # fmt: skip
+            hint = ("Look through camera (C) to frame a shot and Add Key (K), or write a "
+                    "ready-made move's keys under Camera Moves.")  # fmt: skip
         else:
             hint = "Click a key on the timeline to select it; drag it to retime it."
         self.hint.setText(hint)

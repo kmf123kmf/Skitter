@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from skitter.core.animation import Choreography, choreography_types
-from skitter.core.animation.camera import CameraMove, camera_move_types
+from skitter.core.animation.camera_moves import CameraMove, camera_move_types
 from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.video import VideoSettings
@@ -41,12 +41,13 @@ class Project:
         default_factory=lambda: {cls.id: cls() for cls in choreography_types()}
     )
     choreography_id: str = "assemble"
-    # Camera moves (core/animation/camera.py): one settings object per move, the chosen one.
+    # The camera: its keyframes (keyframes.py). Ready-made moves (camera_moves.py) write
+    # keys; their settings are kept, with the one last chosen, for next time.
+    camera_track: CameraTrack = field(default_factory=CameraTrack)
     camera_moves: dict[str, CameraMove] = field(
         default_factory=lambda: {cls.id: cls() for cls in camera_move_types()}
     )
-    camera_move_id: str = "static"
-    camera_track: CameraTrack = field(default_factory=CameraTrack)  # keyframes (keyframes.py)
+    camera_move_id: str = "follow"
     animation_look: AnimationLook = field(default_factory=AnimationLook)
     video_settings: VideoSettings = field(default_factory=VideoSettings)
 

@@ -151,7 +151,7 @@ class VideoRenderer:
     def render(self, timeline: Timeline, k: int, path: CameraPath | None = None) -> np.ndarray:
         """Frame k as (height, width, 4) uint8 RGBA (straight alpha; opaque unless plan.alpha).
 
-        path: the camera on the video clock (keyframes.video_camera_path); each moment
+        path: the camera on the video clock (keyframes.CameraTrack.path); each moment
         blended into the frame is seen through its own shot, so camera motion blurs
         too. None: the plan's view throughout.
         """

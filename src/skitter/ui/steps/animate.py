@@ -2,16 +2,20 @@
 
 Pick a choreography (core/animation), edit its settings and the background,
 then play or scrub its timeline, and export it as a video (Export
-Animation). The choreographies, the camera moves, the look and the video
+Animation). The choreographies, the camera's keys, the look and the video
 settings live in the project, so the export renders exactly what this tab
-shows. The Video group edits the settings that decide what the video shows
+shows.
+
+The camera is its keyframes (camera_keys.py: the Look through camera
+viewfinder, keys on the timeline, the Keyframes group); the Camera Moves
+group writes a ready-made move's keys (camera_moves.py), to edit like any
+other. The Video group edits the settings that decide what the video shows
 (size and framing; the Export Animation window edits the same settings, and
 both stay in step); "Show export frame" outlines what the video shows at the
-current moment (the camera move's shot) and dims the rest, and "Follow
-camera" keeps the view on it (panning or zooming by hand stops following).
-A new mosaic opens on its finished state; Play runs from the start. Playback
-controls sit under the view (ui/widgets/transport.py); camera keyframes and
-the Look through camera viewfinder are in camera_keys.py.
+current moment and dims the rest, and "Follow camera" keeps the view on it
+(panning or zooming by hand stops following). A new mosaic opens on its
+finished state; Play runs from the start. Playback controls sit under the
+view (ui/widgets/transport.py).
 """
 
 import math
@@ -24,13 +28,14 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from skitter.core.animation.camera import CameraPath, Shot, home_shot
-from skitter.core.animation.keyframes import video_camera_path
+from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.animation.look import TableCamera
 from skitter.core.animation.video import ClockedTimeline, VideoClock, output_size, view_rect
 from skitter.core.scene import MosaicScene
@@ -157,16 +162,54 @@ class AnimateStep(StepPage):
         self.camera_description = muted(QLabel())
         self.camera_description.setWordWrap(True)
         self.camera_form = ParamForm()
-        self.camera_form.changed.connect(lambda _: self.session.animation_edited())
-        group = QGroupBox("Camera")
+        self.camera_form.changed.connect(lambda _: self.session.settings_edited.emit())
+        self.write_keys_button = QPushButton("Write Keys")
+        self.write_keys_button.setToolTip("Write this move's keys, replacing the camera's keys.")
+        self.write_keys_button.clicked.connect(lambda: self.write_move_keys())
+        self.clear_keys_button = QPushButton("Clear Keys")
+        self.clear_keys_button.setToolTip("Remove every key: the camera shows the video's framing.")
+        self.clear_keys_button.clicked.connect(lambda: self.clear_keys())
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.write_keys_button)
+        buttons.addWidget(self.clear_keys_button)
+        group = QGroupBox("Camera Moves")
         layout = QVBoxLayout(group)
         top = QFormLayout()
         top.addRow("Move:", self.camera_box)
         layout.addLayout(top)
         layout.addWidget(self.camera_description)
         layout.addWidget(self.camera_form)
+        layout.addLayout(buttons)
         self._show_camera_move()
         return group
+
+    def write_move_keys(self, confirm: bool = True) -> bool:
+        """Replace the camera's keys with the chosen move's (asking first, if there are
+        keys and confirm)."""
+        if self.scene is None or self.player.timeline is None:
+            return False
+        track = self.project.camera_track
+        move = self.project.camera_move
+        question = f"Replace the camera's {len(track.keys)} keys with {move.name}'s keys?"
+        if confirm and track.keys and not self._ask(question):
+            return False
+        base, _ = self._frame_rect()
+        keys = self.project.camera_move.keys(self.scene, self.player.timeline.timeline, base)
+        self.keys.selected = -1
+        self.session.set_camera_track(CameraTrack.of(keys, track.stretch))
+        return True
+
+    def clear_keys(self, confirm: bool = True) -> bool:
+        track = self.project.camera_track
+        if not track.keys or (confirm and not self._ask(f"Remove all {len(track.keys)} keys?")):
+            return False
+        self.keys.selected = -1
+        self.session.set_camera_track(CameraTrack((), track.stretch))
+        return True
+
+    def _ask(self, question: str) -> bool:
+        answer = QMessageBox.question(self, "Camera Keys", question)
+        return answer == QMessageBox.StandardButton.Yes
 
     def _build_video_group(self) -> QGroupBox:
         self.show_frame = QCheckBox("Show export frame")
@@ -298,7 +341,7 @@ class AnimateStep(StepPage):
     def _on_camera_move(self) -> None:
         self.project.camera_move_id = self.camera_box.currentData()
         self._show_camera_move()
-        self.session.animation_edited()
+        self.session.settings_edited.emit()
 
     def _on_animation_changed(self) -> None:
         """Choreography, camera, look or video settings edited (here or in Export Animation)."""
@@ -341,10 +384,7 @@ class AnimateStep(StepPage):
             self.camera_path = None
             return
         base, _ = self._frame_rect()
-        project = self.project
-        self.camera_path = video_camera_path(project.camera_track, project.camera_move,
-                                             self.scene, timeline.timeline, base,
-                                             timeline.clock)  # fmt: skip
+        self.camera_path = self.project.camera_track.path(timeline.clock, base)
 
     # Look and export frame
 

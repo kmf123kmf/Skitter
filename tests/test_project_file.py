@@ -56,8 +56,7 @@ def sample_project(alpha=True) -> Project:
     project.video_settings.update(frame_rate="24")
     project.choreography_id = "deal"
     project.choreographies["deal"].update(decks=3)
-    project.camera_move_id = "pull_back"
-    project.camera_moves["pull_back"].update(zoom=6.0, timing=(10.0, 70.0), ease="out")
+    project.camera_moves["follow"].update(count=12, room=2.0)
     project.camera_track = CameraTrack((
         CameraKey(KeyTime("lead", 0.5), Shot((10.0, 20.0), 3.0, 0.25)),
         CameraKey(KeyTime("body", 0.4), Shot((30.0, 25.0), 1.5), stop=False, motion="linear"),
@@ -80,7 +79,7 @@ def test_a_project_survives_a_round_trip(tmp_path):
     for name in ("center", "size", "rotation", "z"):
         np.testing.assert_array_equal(getattr(again.regions, name), getattr(project.regions, name))
     assert again.choreography.id == "deal" and again.choreographies["deal"].decks == 3
-    assert again.camera_move.id == "pull_back" and again.camera_move.timing == (10.0, 70.0)
+    assert again.camera_move.id == "follow" and again.camera_move.count == 12
     assert again.camera_track == project.camera_track
     assert not again.slicing_plan.stages[1].enabled
     assert not (tmp_path / "test.skitter.part").exists()
@@ -215,15 +214,32 @@ def test_save_new_and_open_restore_the_whole_session(sliced, photos, tmp_path): 
     assert app._save_to(path)
     assert path.exists() and not session.modified and not app.isWindowModified()
     assert app.windowTitle() == "Skitter — work.skitter[*]"
+    # Save is there only for unsaved changes (Save As always), even ones nothing redraws for.
+    assert not app.save_action.isEnabled() and app.save_as_action.isEnabled()
+    animate = app.step(AnimateStep)
+    animate.camera_form.editor("count").widget.setValue(11)
+    assert app.save_action.isEnabled() and app.isWindowModified()
+    assert app._save_to(path) and not app.save_action.isEnabled()
 
     assert app.new_project()  # nothing unsaved: no question asked
     assert not session.project.has_source and session.project.matches is None
     assert app.tabs.currentWidget() is app.step(SourceStep)
     assert not app.tabs.isTabEnabled(1)
 
+    from PySide6.QtWidgets import QProgressDialog
+
+    shown = []  # a bouncing bar shows while the project opens, and is gone after
+    session.matching_changed.connect(
+        lambda: shown.extend(
+            (d.isVisible(), d.maximum(), d.isModal()) for d in app.findChildren(QProgressDialog)
+        )
+    )
     assert app.open_project(path)
+    assert (True, 0, True) in shown
+    assert not [d for d in app.findChildren(QProgressDialog) if d.isVisible()]
     project = session.project
     assert app.tabs.currentWidget() is app.step(MatchingStep)
+    assert session.textures is not None and not session.textures.loading
     assert session.source_is_committed and session.mosaic_is_valid and session.matching_is_current
     np.testing.assert_array_equal(project.matches.tile, tiles)
     assert session.manual_picks == 1 and session.missing_tiles == 0
@@ -255,3 +271,31 @@ def test_steps_have_stable_unique_ids():
     ids = [step.id for step in STEPS]
     assert all(ids) and len(set(ids)) == len(ids)
     assert ids == ["source", "slicing", "tiles", "matching", "animate"]  # saved in projects
+
+
+def test_projects_that_ran_a_camera_move_get_its_keys(sliced, photos, tmp_path):  # noqa: F811
+    """Before moves wrote keys, a project's camera ran its chosen move live: opening one
+    writes that move's keys, so it plays as it did."""
+    app = sliced
+    session = app.session
+    app.next_button.click()  # to Tiles
+    build_library(app, photos)
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    matching_step(app).run_matching()
+    session.wait_for_job()
+    session.project.camera_moves["follow"].update(count=5)
+    path = tmp_path / "old.skitter"
+    assert app._save_to(path)
+
+    def old_style(doc):  # what such a project held: a chosen move and no keys
+        doc["camera_move"] = "follow"
+        doc.pop("camera_track")
+
+    rewrite(path, old_style)
+    assert load_project(path).camera_from_move == "follow"
+    assert app.open_project(path)
+    assert len(session.project.camera_track.keys) == 5  # the move, as keys
+    # A project with keys, or whose move is gone (Static, the simple moves), is left alone.
+    for gone in ("static", "pull_back"):
+        rewrite(path, lambda doc, gone=gone: doc.update(camera_move=gone))
+        assert load_project(path).camera_from_move is None

@@ -9,8 +9,14 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
-from skitter.core.animation.keyframes import video_camera_path
-from skitter.core.animation.video import check_video, plan_video, sync_size
+from skitter.core.animation.keyframes import CameraTrack
+from skitter.core.animation.video import (
+    check_video,
+    output_size,
+    plan_video,
+    sync_size,
+    view_rect,
+)
 from skitter.core.assembly import (
     ExportCancelled,
     ExportReport,
@@ -25,7 +31,7 @@ from skitter.core.matching.candidates import Pins
 from skitter.core.matching.matcher import MatchCancelled, Matcher, MatchResult
 from skitter.core.matching.saved import restore, saved_mosaic
 from skitter.core.project import Project
-from skitter.core.project_file import document, load_project, save_project
+from skitter.core.project_file import ProjectFile, document, load_project, save_project
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing import (
     MosaicLayout,
@@ -102,6 +108,9 @@ class Session(QObject):
     )  # (path, ExportReport, error); cancelled: both None
     busy_changed = Signal()  # a background job started or stopped
     animation_changed = Signal()  # choreography, look or video settings edited
+    # Saved settings changed that nothing redraws for (export settings, camera moves):
+    # the project now differs from its file (see modified).
+    settings_edited = Signal()
     video_progress = Signal(str, float)
     video_finished = Signal(str, object, object)  # (path, VideoReport, error); cancelled: both None
 
@@ -186,19 +195,25 @@ class Session(QObject):
         self.project_path = Path(path)
         self._saved_state = self._state()
 
-    def open_project(self, path: str | Path) -> None:
+    def open_project(self, path: str | Path, loaded: ProjectFile | None = None) -> None:
         """Replace the project with the one in path (ProjectFileError if it isn't
-        one). load_problems and missing_tiles report what couldn't be restored."""
-        loaded = load_project(path)
-        problems = self._replace_project(loaded.project, loaded.committed, loaded.mosaic)
+        one). load_problems and missing_tiles report what couldn't be restored.
+        loaded: path already read (load_project), e.g. off the UI thread."""
+        if loaded is None:
+            loaded = load_project(path)
+        problems = self._replace_project(loaded.project, loaded.committed, loaded.mosaic,
+                                         loaded.camera_from_move)  # fmt: skip
         self.project_path = Path(path)
         self.load_problems = loaded.problems + problems
         self.opened_view = loaded.view
         self._saved_state = self._state()
 
-    def _replace_project(self, project: Project, committed: bool, mosaic) -> list[str]:
+    def _replace_project(
+        self, project: Project, committed: bool, mosaic, camera_from_move: str | None = None
+    ) -> list[str]:
         """Make project the session's, replaying what it holds; returns problems met
-        restoring its mosaic."""
+        restoring its mosaic. camera_from_move: write that move's keys once the mosaic
+        shows (older projects ran camera moves live)."""
         if self.busy:
             raise RuntimeError(f"a {self.busy} job is running")
         if self._slicing_job is not None:
@@ -233,9 +248,20 @@ class Session(QObject):
                 self.slicing_changed.emit()
                 if mosaic is not None:
                     problems += self._restore_mosaic(mosaic)
+        if camera_from_move is not None and self.scene is not None:
+            self._keys_from_move(camera_from_move)
         self.matching_changed.emit()
         self.animation_edited()
         return problems
+
+    def _keys_from_move(self, move_id: str) -> None:
+        """Write a camera move's keys for the current mosaic (as the Animate tab would)."""
+        project, scene = self.project, self.scene
+        timeline = project.choreography.timeline(scene, project.animation_look)
+        width, height = output_size(project.video_settings, scene)
+        base = view_rect(scene, width, height, project.video_settings)
+        keys = project.camera_moves[move_id].keys(scene, timeline, base)
+        project.camera_track = CameraTrack.of(keys)
 
     def _restore_mosaic(self, mosaic) -> list[str]:
         """Show a saved mosaic over the current regions; returns what went wrong."""
@@ -767,7 +793,6 @@ class Session(QObject):
             raise RuntimeError(problems[0])
         project, scene = self.project, self.scene
         choreography = project.choreography.copy()
-        camera = project.camera_move.copy()
         settings = project.video_settings.copy()
         background = project.animation_look.background
         look = project.animation_look.copy()
@@ -775,10 +800,9 @@ class Session(QObject):
         plan = plan_video(scene, timeline.duration, settings, background)
         # Tiles show largest at the camera's closest: their textures need that detail.
         track = project.camera_track
-        closest = video_camera_path(track, camera, scene, timeline, plan.view,
-                                    plan.video_clock).max_zoom  # fmt: skip
+        closest = track.path(plan.video_clock, plan.view).max_zoom
         job = VideoJob(
-            path=Path(path), scene=scene, choreography=choreography, camera=camera,
+            path=Path(path), scene=scene, choreography=choreography,
             track=track, settings=settings, background=background, look=look, plan=plan,
             # Read here: the library isn't threadsafe.
             request=DetailRequest.for_scene(scene, TileFiles.read(self.library, scene.slot),

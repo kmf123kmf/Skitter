@@ -1139,6 +1139,8 @@ def test_texture_budget_gives_up_the_boost_before_full_size():
 
 
 def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos):
+    from skitter.core.animation.camera import Shot, home_shot
+    from skitter.core.animation.keyframes import CameraKey, CameraTrack, KeyTime
     from skitter.ui.steps.animate import AnimateStep
 
     window = sliced
@@ -1153,13 +1155,22 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     animate.show_frame.setChecked(True)
     animate.follow.setChecked(True)
     base, _ = animate._frame_rect()
-    assert animate.camera_box.currentData() == "static" and animate.shot().zoom == 1.0
+    assert not session.project.camera_track.keys and animate.shot().zoom == 1.0  # no keys: still
+    assert not animate.clear_keys(confirm=False)  # nothing to clear
 
-    # Pull back: the export frame starts small (close up) and ends on the whole video view.
-    animate.camera_box.setCurrentIndex(animate.camera_box.findData("pull_back"))
-    assert session.project.camera_move_id == "pull_back" and animate.camera_form._rows
-    animate.camera_form.editor("zoom").widget.setValue(4.0)
-    assert session.project.camera_move.zoom == 4.0
+    # Follow the action writes its keys (settings alone write nothing).
+    assert session.project.camera_move_id == "follow" and animate.camera_form._rows
+    animate.camera_form.editor("count").widget.setValue(5)
+    assert session.project.camera_move.count == 5 and not session.project.camera_track.keys
+    assert animate.write_move_keys(confirm=False)
+    assert len(session.project.camera_track.keys) == 5 and session.modified
+    assert len(animate.transport.timeline.keys) == 5
+
+    # A pull back: the export frame starts small (close up), ends on the whole view.
+    home = home_shot(base)
+    pull_back = [CameraKey(KeyTime("body", 0.0), Shot(home.center, 4.0)),
+                 CameraKey(KeyTime("body", 0.8), home)]  # fmt: skip
+    session.set_camera_track(CameraTrack.of(pull_back))
     animate.player.seek(0.0)
     w = animate._frame_line.instances["size"][0][0]
     assert w == pytest.approx(base[2] / 4) and animate.shot().zoom == pytest.approx(4.0)
@@ -1179,15 +1190,17 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     assert camera.zoom == zoom
     assert animate._frame_line.instances["size"][0][0] == pytest.approx(base[2])
 
-    # Rotate: the frame is drawn turned, and a following view turns with it.
-    animate.camera_box.setCurrentIndex(animate.camera_box.findData("rotate"))
-    animate.camera_form.editor("angle").widget.setValue(45.0)
+    # Turned keys: the frame is drawn turned, and a following view turns with it.
+    turned = [CameraKey(KeyTime("body", 0.0), Shot(home.center, 1.5, -math.pi / 4)),
+              CameraKey(KeyTime("body", 0.8), home)]  # fmt: skip
+    session.set_camera_track(CameraTrack.of(turned))
     animate.follow.setChecked(True)
     animate.player.seek(0.0)
     assert animate._frame_line.instances["rotation"][0] == pytest.approx(-math.pi / 4)
     assert animate.canvas.camera.rotation == pytest.approx(-math.pi / 4)
     animate.player.seek(animate.player.duration)
     assert animate.canvas.camera.rotation == pytest.approx(0.0)
+    assert animate.clear_keys(confirm=False) and not session.project.camera_track.keys
 
 
 def test_transport_bar_steps_jumps_loops_and_changes_speed(sliced, photos, qapp):
@@ -1262,12 +1275,19 @@ def test_timeline_strip_scrubs_and_drags_keys(qapp):
     from skitter.ui.widgets.timeline_strip import TimelineStrip
 
     strip = TimelineStrip()
-    strip.resize(420, 40)
+    strip.resize(420, 46)
     strip.set_timing(10.0, (1.0, 8.0))
     strip.set_keys([(2.0, True, "smooth"), (6.0, False, "hold")])
     assert strip.time_at(strip.x_of(3.5)) == pytest.approx(3.5)
-    y = int(strip.height() / 2 + 10)
+    y = round(strip.key_y())
     assert strip.key_at(strip.x_of(6.0) + 3, y) == 1 and strip.key_at(strip.x_of(4.0), y) == -1
+    track = 19  # the track, right above a key: it scrubs, never grabs
+    assert strip.key_at(strip.x_of(2.0), track) == -1
+
+    QTest.mouseMove(strip, QPoint(round(strip.x_of(2.0)), y))
+    assert strip.cursor().shape() == Qt.CursorShape.OpenHandCursor and strip.hovered == 0
+    QTest.mouseMove(strip, QPoint(round(strip.x_of(2.0)), track))
+    assert strip.cursor().shape() == Qt.CursorShape.ArrowCursor and strip.hovered == -1
 
     events = []
     strip.scrubbed.connect(lambda t: events.append(("scrub", round(t, 2))))
@@ -1275,13 +1295,16 @@ def test_timeline_strip_scrubs_and_drags_keys(qapp):
     strip.key_moved.connect(lambda i, t: events.append(("move", i, round(t, 1))))
     strip.key_menu.connect(lambda i, pos: events.append(("menu", i)))
     QTest.mouseClick(strip, Qt.MouseButton.LeftButton, pos=QPoint(round(strip.x_of(4.0)), y))
+    QTest.mouseClick(strip, Qt.MouseButton.LeftButton, pos=QPoint(round(strip.x_of(2.0)), track))
     key = QPoint(round(strip.x_of(2.0)), y)
     QTest.mousePress(strip, Qt.MouseButton.LeftButton, pos=key)
+    assert strip.cursor().shape() == Qt.CursorShape.ClosedHandCursor
     QTest.mouseMove(strip, QPoint(round(strip.x_of(3.0)), y))
     QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, pos=QPoint(round(strip.x_of(3.0)), y))
     QTest.mouseClick(strip, Qt.MouseButton.RightButton, pos=QPoint(round(strip.x_of(6.0)), y))
     assert events[0][0] == "scrub" and events[0][1] == pytest.approx(4.0, abs=0.05)
-    assert events[1:] == [("click", 0), ("move", 0, 3.0), ("menu", 1)]
+    assert events[1][0] == "scrub" and events[1][1] == pytest.approx(2.0, abs=0.05)
+    assert events[2:] == [("click", 0), ("move", 0, 3.0), ("menu", 1)]
 
 
 def test_camera_keys_through_the_viewfinder(sliced, photos, qapp):

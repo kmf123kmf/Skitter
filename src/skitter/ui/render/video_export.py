@@ -12,9 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from skitter.core.animation import Choreography
-from skitter.core.animation.camera import CameraMove
 from skitter.core.animation.encode import VideoWriter
-from skitter.core.animation.keyframes import CameraTrack, video_camera_path
+from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.animation.look import AnimationLook, TableCamera
 from skitter.core.animation.video import VideoPlan, VideoSettings
 from skitter.core.scene import MosaicScene
@@ -31,7 +30,6 @@ class VideoJob:
     path: Path
     scene: MosaicScene
     choreography: Choreography  # a copy
-    camera: CameraMove  # a copy
     track: CameraTrack  # the camera's keys (immutable)
     settings: VideoSettings  # a copy
     background: str  # "#rrggbb" or "transparent"
@@ -61,8 +59,7 @@ def run_video_job(job: VideoJob, progress, cancelled) -> VideoReport:
     plan, settings = job.plan, job.settings
     fmt = settings.video_format
     timeline = job.choreography.timeline(job.scene, job.look)
-    path = video_camera_path(job.track, job.camera, job.scene, timeline, plan.view,
-                             plan.video_clock)  # fmt: skip
+    path = job.track.path(plan.video_clock, plan.view)
 
     def report_textures(message, fraction):
         progress(message, None if fraction is None else 0.08 * fraction)

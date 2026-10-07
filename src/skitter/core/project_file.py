@@ -34,7 +34,7 @@ import numpy as np
 from PIL import Image
 
 from skitter.core.animation import choreography_types
-from skitter.core.animation.camera import camera_move_types
+from skitter.core.animation.camera_moves import camera_move_types
 from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.video import VideoSettings
@@ -63,6 +63,9 @@ class ProjectFile:
     committed: bool  # the source was committed: regions (and a mosaic) belong to it
     mosaic: SavedMosaic | None = None  # restore with matching.saved.restore
     problems: list[str] = field(default_factory=list)  # what was skipped while loading
+    # A camera move this project ran live, before moves wrote keys: the app writes its
+    # keys once the mosaic is shown (they need the scene). None: nothing to convert.
+    camera_from_move: str | None = None
     view: dict = field(default_factory=dict)  # how the app showed it (see save_project)
 
 
@@ -163,7 +166,19 @@ def load_project(path) -> ProjectFile:
         except (KeyError, TypeError, ValueError) as exc:
             problems.append(f"The matched mosaic could not be read ({exc}); match again")
     view = doc.get("view")
-    return ProjectFile(project, committed, saved, problems, view if isinstance(view, dict) else {})
+    return ProjectFile(
+        project, committed, saved, problems, view=view if isinstance(view, dict) else {},
+        camera_from_move=_camera_from_move(doc, project),
+    )  # fmt: skip
+
+
+def _camera_from_move(doc: dict, project: Project) -> str | None:
+    """The move an older project's camera ran (no keys yet), if any."""
+    move = doc.get("camera_move")
+    keyed = isinstance(doc.get("camera_track"), dict) and doc["camera_track"].get("keys")
+    if move in project.camera_moves and not keyed:
+        return move
+    return None
 
 
 def _project(doc: dict, source: np.ndarray, problems: list[str]) -> Project:

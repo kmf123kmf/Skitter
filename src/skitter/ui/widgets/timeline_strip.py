@@ -1,11 +1,13 @@
 """A timeline strip: a time ruler, the video's holds, the playhead and keys.
 
-It replaces a plain slider under a player. Clicking or dragging on empty
-ground scrubs (`scrubbed`); keys show as marks along the bottom (a diamond
-where the camera stops, a circle where it passes through), and a key can be
-clicked (`key_clicked`), dragged to a new time (`key_moved`, on release) or
-right-clicked (`key_menu`). Times map to x the same way for everything, so
-keys and the playhead always line up.
+It replaces a plain slider under a player. It has two lanes: the ruler and
+track on top, where clicking or dragging scrubs (`scrubbed`) even right above
+a key, and the keys' row below. Keys show there as marks (a diamond where the
+camera stops, a circle where it passes through); a key can be clicked
+(`key_clicked`), dragged to a new time (`key_moved`, on release) or
+right-clicked (`key_menu`), and the cursor turns to a hand over one. Empty
+ground in the keys' row scrubs too. Times map to x the same way for
+everything, so keys and the playhead always line up.
 """
 
 import math
@@ -17,6 +19,9 @@ from PySide6.QtWidgets import QSizePolicy, QWidget
 PAD = 10  # px at each end, so marks at the ends show whole
 HIT = 7  # px around a key that pick it
 KEY = 5.5  # key mark half size, px
+TRACK_Y = 19  # px from the top: the middle of the track (the ruler is above it)
+KEY_LANE = 11  # px from the bottom: the middle of the keys' row
+HEIGHT = 46
 TICKS = (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300)  # ruler steps, seconds
 MIN_LABEL_GAP = 64  # px between labelled ticks
 
@@ -37,11 +42,12 @@ class TimelineStrip(QWidget):
         self._dragging_key = -1
         self._drag_time = 0.0
         self._scrubbing = False
-        self.setMinimumHeight(38)
+        self.hovered = -1  # the key under the mouse
+        self.setMinimumHeight(HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
-        self.setToolTip("Click or drag to move through the video; drag a key to retime it, "
-                        "right-click it for its options.")  # fmt: skip
+        self.setToolTip("Click or drag to move through the video; drag a key (bottom row) "
+                        "to retime it, right-click it for its options.")  # fmt: skip
 
     # State
 
@@ -67,9 +73,14 @@ class TimelineStrip(QWidget):
         width = max(self.width() - 2 * PAD, 1)
         return min(max((x - PAD) / width * self.duration, 0.0), self.duration)
 
+    def key_y(self) -> float:
+        """The middle of the keys' row."""
+        return self.height() - KEY_LANE
+
     def key_at(self, x: float, y: float) -> int:
-        """The key under (x, y), the nearest if several (-1: none)."""
-        if y < self.height() / 2 - HIT:
+        """The key under (x, y), the nearest if several (-1: none). Only the keys' row
+        picks keys; the track above always scrubs."""
+        if abs(y - self.key_y()) > HIT:
             return -1
         best, best_d = -1, HIT + 1
         for i, (t, _, _) in enumerate(self.keys):
@@ -91,6 +102,7 @@ class TimelineStrip(QWidget):
             return
         if i >= 0:
             self._dragging_key, self._drag_time = i, self.keys[i][0]
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
             self.key_clicked.emit(i)
         else:
             self._scrubbing = True
@@ -104,8 +116,7 @@ class TimelineStrip(QWidget):
         elif self._scrubbing:
             self.scrubbed.emit(self.time_at(x))
         else:
-            over = self.key_at(x, event.position().y()) >= 0
-            self.setCursor(Qt.CursorShape.SizeHorCursor if over else Qt.CursorShape.ArrowCursor)
+            self._hover(self.key_at(x, event.position().y()))
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if self._dragging_key >= 0:
@@ -115,6 +126,20 @@ class TimelineStrip(QWidget):
                 self.key_moved.emit(i, t)
             self.update()
         self._scrubbing = False
+        pos = event.position()
+        self._hover(self.key_at(pos.x(), pos.y()), force=True)
+
+    def leaveEvent(self, event) -> None:
+        if self._dragging_key < 0:
+            self._hover(-1)
+
+    def _hover(self, i: int, force: bool = False) -> None:
+        """Show which key the mouse is on: an open hand and a highlighted mark."""
+        if i == self.hovered and not force:
+            return
+        self.hovered = i
+        self.setCursor(Qt.CursorShape.OpenHandCursor if i >= 0 else Qt.CursorShape.ArrowCursor)
+        self.update()
 
     # Drawing
 
@@ -127,7 +152,8 @@ class TimelineStrip(QWidget):
         faint.setAlphaF(0.35)
         accent = pal.color(pal.ColorRole.Highlight)
         h = self.height()
-        mid = h / 2
+        mid = TRACK_Y
+        key_y = self.key_y()
 
         # The track, and the holds shaded either side of the animation.
         x0, x1 = self.x_of(0.0), self.x_of(self.duration)
@@ -155,12 +181,15 @@ class TimelineStrip(QWidget):
             if self.keys[i][2] == "hold":
                 pen.setStyle(Qt.PenStyle.DashLine)
             p.setPen(pen)
-            y = mid + 10
-            p.drawLine(QPointF(self.x_of(positions[i]), y), QPointF(self.x_of(positions[i + 1]), y))
+            x0, x1 = self.x_of(positions[i]), self.x_of(positions[i + 1])
+            p.drawLine(QPointF(x0, key_y), QPointF(x1, key_y))
         base = pal.color(pal.ColorRole.Base)
         for i, (_, stop, _) in enumerate(self.keys):
             fill = accent if i == self.selected else base
-            self._draw_key(p, self.x_of(positions[i]), mid + 10, stop, fill, text)
+            grabbed = i in (self.hovered, self._dragging_key)
+            line = accent if grabbed and i != self.selected else text
+            size = KEY * 1.25 if grabbed else KEY
+            self._draw_key(p, self.x_of(positions[i]), key_y, stop, fill, line, size)
 
         # The playhead.
         x = self.x_of(self.time)
@@ -192,13 +221,14 @@ class TimelineStrip(QWidget):
                 p.drawText(QRectF(x + 2, -1, 60, 12), Qt.AlignmentFlag.AlignLeft, label)
 
     @staticmethod
-    def _draw_key(p: QPainter, x: float, y: float, stop: bool, fill: QColor, line: QColor):
-        p.setPen(QPen(line, 1.2))
+    def _draw_key(p: QPainter, x: float, y: float, stop: bool, fill: QColor, line: QColor,
+                  size: float = KEY):  # fmt: skip
+        p.setPen(QPen(line, 1.6 if size > KEY else 1.2))
         p.setBrush(fill)
         if stop:
-            p.drawPolygon(QPolygonF([QPointF(x, y - KEY), QPointF(x + KEY, y),
-                                     QPointF(x, y + KEY), QPointF(x - KEY, y)]))  # fmt: skip
+            p.drawPolygon(QPolygonF([QPointF(x, y - size), QPointF(x + size, y),
+                                     QPointF(x, y + size), QPointF(x - size, y)]))  # fmt: skip
         else:
             path = QPainterPath()
-            path.addEllipse(QPointF(x, y), KEY * 0.8, KEY * 0.8)
+            path.addEllipse(QPointF(x, y), size * 0.8, size * 0.8)
             p.drawPath(path)
