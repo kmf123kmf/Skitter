@@ -218,7 +218,7 @@ class VideoExportDialog(QDialog):
         self.length_label.setText(
             f"{plan.seconds:.1f} s, {plan.frames:,} frames ({samples:,} samples per pixel)"
         )
-        _, scale = detail_sizes(scene.size * plan.scale)
+        _, scale, _ = detail_sizes(scene.size * plan.scale)
         tile_px = plan.scale * scene.tile_size[0]
         text = f"{tile_px:,.0f} px base tiles"
         text += "" if scale >= 1 else f", textures reduced to {scale:.0%} (memory)"

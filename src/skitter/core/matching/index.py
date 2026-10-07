@@ -137,27 +137,41 @@ def scaled(desc: np.ndarray, weights: np.ndarray, tint: float) -> np.ndarray:
 
 
 class SearchIndex:
-    """faiss index over one CandidateSet at reference weights and tint."""
+    """faiss index over one CandidateSet at reference weights and tint.
+
+    Only the dimensions the weights use are indexed (a detail level without
+    some structure blocks has zero weights there).
+    """
 
     def __init__(self, cands: CandidateSet, weights: np.ndarray, tint_ref: float, chunk=262_144,
                  progress: Progress = _quiet):  # fmt: skip
         self.cands = cands
         self.weights = np.asarray(weights, dtype=np.float64)
         self.tint_ref = tint_ref
+        used = np.flatnonzero(self.weights > 0)
+        self.dims = used if len(used) else np.arange(DIM)
+        d = len(self.dims)
         m = len(cands)
         if m <= EXACT_LIMIT:
-            self.index = faiss.IndexFlatL2(DIM)
+            self.index = faiss.IndexFlatL2(d)
             self.exact = True
         else:
             nlist = int(np.clip(4 * math.sqrt(m), 64, 65_536))
-            self.index = faiss.index_factory(DIM, f"IVF{nlist},SQ8")
+            self.index = faiss.index_factory(d, f"IVF{nlist},SQ8")
             sample = np.random.default_rng(0).choice(m, min(m, 64 * nlist, 300_000), False)
-            train_ivf(self.index, scaled(cands.desc[np.sort(sample)], self.weights, tint_ref),
-                      progress)  # fmt: skip
+            train_ivf(self.index, self._scaled(cands.desc[np.sort(sample)]), progress)
             self.exact = False
         for lo in range(0, m, chunk):
             progress(f"Adding tiles to the index: {lo:,} of {m:,}", lo / max(m, 1))
-            self.index.add(scaled(cands.desc[lo : lo + chunk], self.weights, tint_ref))
+            self.index.add(self._scaled(cands.desc[lo : lo + chunk]))
+
+    @property
+    def groups(self) -> int:
+        """How many groups (IVF cells) a search can visit: the most useful effort."""
+        return 1 if self.exact else faiss.extract_index_ivf(self.index).nlist
+
+    def _scaled(self, desc: np.ndarray) -> np.ndarray:
+        return np.ascontiguousarray(scaled(desc, self.weights, self.tint_ref)[:, self.dims])
 
     def search(self, desc: np.ndarray, k: int, nprobe: int = 16, exclude=None) -> np.ndarray:
         """(R, k) candidate indices nearest to target descriptors (-1 where fewer exist).
@@ -165,17 +179,18 @@ class SearchIndex:
         exclude: candidate indices never to return (photos that can't be used anyway).
         """
         if not self.exact:
-            faiss.extract_index_ivf(self.index).nprobe = nprobe
+            faiss.extract_index_ivf(self.index).nprobe = min(nprobe, self.groups)
         k = min(k, len(self.cands))
         if not len(desc) or not k:
             return np.full((len(desc), k), -1, np.int64)
-        x = scaled(desc, self.weights, self.tint_ref)
+        x = self._scaled(desc)
         if exclude is None or not len(exclude):
             return self.index.search(x, k)[1]
         batch = faiss.IDSelectorBatch(np.ascontiguousarray(exclude, dtype=np.int64))
         selector = faiss.IDSelectorNot(batch)  # keeps a pointer to batch: both stay alive here
         params = (faiss.SearchParameters(sel=selector) if self.exact
-                  else faiss.SearchParametersIVF(sel=selector, nprobe=nprobe))  # fmt: skip
+                  else faiss.SearchParametersIVF(sel=selector,
+                                                 nprobe=min(nprobe, self.groups)))  # fmt: skip
         return self.index.search(x, k, params=params)[1]
 
 

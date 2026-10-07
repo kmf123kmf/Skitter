@@ -29,7 +29,8 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from skitter.core.slicing.base import SlicingError
-from skitter.core.slicing.regions import RegionSet, _rotate
+from skitter.core.slicing.frame import PinnedFrame
+from skitter.core.slicing.regions import RegionSet
 
 MAX_CANDIDATES = 4_000_000  # brick copies tested per region
 
@@ -155,15 +156,14 @@ def tile_pattern(
     reduced to (-90°, 90°], which gives the same rectangle, so tiles are
     never drawn upside down.
     """
-    place = np.array([width / 2, height / 2]) if anchor == "center" else np.zeros(2)
+    frame = PinnedFrame(width, height, anchor, rotation)
     pin = unit.center if anchor == "center" else unit.corner
 
     # Shifts t = i*a + j*b whose copy of the unit can reach the area.
-    area = np.array([[0, 0], [width, 0], [width, height], [0, height]], dtype=float)
-    area = _rotate(area - place, -rotation) + pin  # the area in pattern coordinates
+    lo, hi = frame.bounds()  # the area, as the pattern sees it from the pin
     bounds = unit.bricks.bounds()
-    lo = area.min(axis=0) - bounds[:, 2:].max(axis=0)
-    hi = area.max(axis=0) - bounds[:, :2].min(axis=0)
+    lo = lo + pin - bounds[:, 2:].max(axis=0)  # in pattern coordinates
+    hi = hi + pin - bounds[:, :2].min(axis=0)
     box = np.array([[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]])
     ij = np.linalg.solve(unit.period.T, box.T).T
     i0, j0 = np.floor(ij.min(axis=0)).astype(int)
@@ -174,35 +174,7 @@ def tile_pattern(
     ii, jj = np.meshgrid(np.arange(i0, i1 + 1), np.arange(j0, j1 + 1))
     shifts = np.stack([ii.ravel(), jj.ravel()], axis=-1) @ unit.period
     centers = (unit.bricks.center[None, :, :] + shifts[:, None, :]).reshape(-1, 2)
-    centers = place + _rotate(centers - pin, rotation)
-    sizes = np.tile(unit.bricks.size, (len(shifts), 1))
-    turns = _upright(np.tile(unit.bricks.rotation, len(shifts)) + rotation)
-
-    keep = _overlaps_area(centers, sizes, turns, width, height)
-    centers, sizes, turns = centers[keep], sizes[keep], turns[keep]
-    order = np.lexsort((np.round(centers[:, 0], 6), np.round(centers[:, 1], 6)))
-    return RegionSet.from_arrays(centers[order], sizes[order], turns[order])
-
-
-def _upright(rotation: np.ndarray) -> np.ndarray:
-    """The same rectangles with rotations in (-pi/2, pi/2]."""
-    return rotation - math.pi * np.ceil(rotation / math.pi - 0.5 - 1e-9)
-
-
-def _overlaps_area(centers, sizes, rotation, width, height, tol=1e-6) -> np.ndarray:
-    """Which rotated rectangles overlap [0, width] x [0, height] (more than touch).
-
-    A separating-axis test on the area's axes and each rectangle's own axes.
-    """
-    c, s = np.abs(np.cos(rotation)), np.abs(np.sin(rotation))
-    hw, hh = sizes[:, 0] / 2, sizes[:, 1] / 2
-    aw, ah = width / 2, height / 2
-    d = np.array([aw, ah]) - centers
-    # Area axes: the rectangles' bounding boxes against the area.
-    keep = np.abs(d[:, 0]) < c * hw + s * hh + aw - tol
-    keep &= np.abs(d[:, 1]) < s * hw + c * hh + ah - tol
-    # Rectangle axes: the area projected onto each rectangle's sides.
-    cos, sin = np.cos(rotation), np.sin(rotation)
-    keep &= np.abs(d[:, 0] * cos + d[:, 1] * sin) < hw + c * aw + s * ah - tol
-    keep &= np.abs(-d[:, 0] * sin + d[:, 1] * cos) < hh + s * aw + c * ah - tol
-    return keep
+    placed = frame.place(centers - pin, np.tile(unit.bricks.size, (len(shifts), 1)),
+                         np.tile(unit.bricks.rotation, len(shifts)))  # fmt: skip
+    order = np.lexsort((np.round(placed.center[:, 0], 6), np.round(placed.center[:, 1], 6)))
+    return placed[order]

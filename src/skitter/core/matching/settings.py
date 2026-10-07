@@ -50,9 +50,10 @@ class MatchSettings(Configurable):
         help="Nearest tiles kept per region for reranking and the reuse rules.",
     )  # fmt: skip
     search_effort = IntParam(
-        16, "Search effort", min=1, max=1024,
-        help="Index cells searched per region (faiss nprobe). Raised automatically when "
-             "the sampled search error is too high.",
+        16, "Search effort", min=1, max=65_536,
+        help="Index cells searched per region at first (faiss nprobe). Raised automatically "
+             "while the sampled search error is too high and more effort clearly helps, up "
+             "to every cell of the index.",
     )  # fmt: skip
     error_diffusion = BoolParam(
         False, "Error diffusion",

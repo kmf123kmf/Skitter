@@ -13,7 +13,8 @@ from skitter.core.slicing.base import (
     region_rng,
     register_operation,
 )
-from skitter.core.slicing.params import FloatParam, IntParam, TileSizeParam
+from skitter.core.slicing.common import seed_param
+from skitter.core.slicing.params import FloatParam, TileSizeParam
 from skitter.core.slicing.regions import Region, RegionSet
 
 JITTER = 0.25  # center jitter, as a fraction of the cell spacing
@@ -43,11 +44,10 @@ class PileSlicer(Subdivider):
             "piles them deeper."
         ),
     )  # fmt: skip
-    seed = IntParam(1, "Seed", min=0, max=999_999)
+    seed = seed_param()
 
     def photo_dims(self, ctx: SliceContext) -> tuple[float, float]:
-        tile_w, tile_h = ctx.tile_size
-        return self.photo_size * tile_w, self.photo_size * tile_h
+        return ctx.tile_dims(self.photo_size)
 
     def spacing(self, ctx: SliceContext) -> float:
         """Cell spacing; at spread 1.0 it guarantees coverage.

@@ -9,7 +9,8 @@ from skitter.core.slicing.base import (
     SlicingOperation,
     register_operation,
 )
-from skitter.core.slicing.params import ChoiceParam, FloatParam, IntParam
+from skitter.core.slicing.common import seed_param
+from skitter.core.slicing.params import ChoiceParam, FloatParam
 from skitter.core.slicing.regions import RegionSet
 
 
@@ -29,7 +30,7 @@ class JitterAdjust(SlicingOperation):
         0.0, "Scale", min=0.0, max=0.9, step=0.05,
         help="Largest size change, as a fraction of each region's size.",
     )  # fmt: skip
-    seed = IntParam(1, "Seed", min=0, max=999_999)
+    seed = seed_param()
 
     def apply(
         self, regions: RegionSet, ctx: SliceContext, progress: Progress = NO_PROGRESS
@@ -66,7 +67,7 @@ class StackingAdjust(SlicingOperation):
             ("reverse", "Reverse"),
         ],
     )
-    seed = IntParam(1, "Seed", min=0, max=999_999, when=lambda op: op.order == "random")
+    seed = seed_param(when=lambda op: op.order == "random")
 
     def apply(
         self, regions: RegionSet, ctx: SliceContext, progress: Progress = NO_PROGRESS

@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.scene import MosaicScene
+from skitter.ui.render.heat import heat_colors
 from skitter.ui.render.match_preview import PreviewBuilder, PreviewFrame
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import TileTextures
@@ -47,17 +48,8 @@ from skitter.ui.widgets.param_form import ParamForm
 PICK_STYLE = "color: #3b9cff;"
 TILES, HEAT, SOURCE = "tiles", "heat", "source"
 DISPLAY_MODES = ((TILES, "Tiles"), (HEAT, "Error heat map"), (SOURCE, "Source image"))
-HEAT_MAX_DE = 25.0  # ΔE shown fully red
 HEAT_ALPHA = 0.75
 KEEP, DISCARD = True, False
-
-
-def heat_colors(error: np.ndarray) -> np.ndarray:
-    """(N, 3) colors from green (no error) through yellow to red (HEAT_MAX_DE and above)."""
-    t = np.clip(np.nan_to_num(error, nan=0.0) / HEAT_MAX_DE, 0, 1)[:, None]
-    green, yellow, red = np.array([[0.2, 0.75, 0.3], [1.0, 0.85, 0.2], [0.9, 0.2, 0.15]])
-    low = green + (yellow - green) * np.minimum(t * 2, 1)
-    return np.where(t < 0.5, low, yellow + (red - yellow) * (t * 2 - 1))
 
 
 class MatchingStep(StepPage):
@@ -167,8 +159,9 @@ class MatchingStep(StepPage):
                                 "better. About 2 is barely visible."),
             ("scales", "By distance:", "ΔE when blurred over ½, 1 and 2 tiles."),
             ("ssim", "Structure:", "Similarity of light and dark structure (1 = identical)."),
-            ("search", "Search:", "Search accuracy: extra cost of approximate search compared "
-                                  "with trying every tile, on a sample of regions."),
+            ("search", "Search:", "Search accuracy: how much worse (ΔE) the fast search's "
+                                  "best tiles are than trying every tile, on a sample of "
+                                  "regions, and the search effort used."),
             ("tiles", "Tiles used:", "Distinct tile images used, of regions placed."),
             ("uses", "Most uses:", "Most times one tile appears."),
             ("rules", "Rule breaks:", "Regions given a tile against the reuse rules because "
@@ -462,9 +455,9 @@ class MatchingStep(StepPage):
         if all(r.exact for r in result.regret):
             labels["search"].setText("exact (small library)")
         else:
-            worst = max(r.relative for r in result.regret)
+            worst = max(r.extra_de for r in result.regret)
             effort = max(r.effort for r in result.regret)
-            labels["search"].setText(f"{worst * 100:.1f}% regret at effort {effort}")
+            labels["search"].setText(f"+{worst:.2f} ΔE vs exact, effort {effort:,}")
         labels["tiles"].setText(f"{stats['unique_tiles']:,} of {stats['placed']:,}")
         labels["uses"].setText(f"{stats['most_uses']:,}")
         breaks = stats["rule_violations"]

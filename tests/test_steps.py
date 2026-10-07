@@ -223,7 +223,7 @@ def test_param_form_edits_recompute_regions(slicing, qapp):
     from skitter.core.slicing.operations import GridSlicer
 
     # Grid only scales the Mosaic tile: no counts of its own.
-    assert [p.name for p in GridSlicer.params()] == ["cell_size", "anchor"]
+    assert [p.name for p in GridSlicer.params()] == ["cell_size", "angle", "anchor"]
     slicing.form.editor("cell_size").widget.setValue(2.0)
     flush(qapp)
     assert len(slicing.session.project.regions) == 20 * 15

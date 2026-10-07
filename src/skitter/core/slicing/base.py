@@ -168,6 +168,11 @@ class SliceContext:
         """Base tile (width, height) in mosaic units."""
         return (self.tile_width, self.tile_width / self.layout.tile_aspect)
 
+    def tile_dims(self, scale: float = 1.0) -> tuple[float, float]:
+        """A tile of `scale` base tiles: (width, height) in mosaic units."""
+        width, height = self.tile_size
+        return (scale * width, scale * height)
+
     @property
     def tile_aspect(self) -> float:
         return self.layout.tile_aspect

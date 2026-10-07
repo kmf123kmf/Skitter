@@ -9,8 +9,10 @@ from skitter.core.slicing.base import (
     Subdivider,
     register_operation,
 )
-from skitter.core.slicing.params import FloatParam, IntParam, TileSizeParam
+from skitter.core.slicing.params import ChoiceParam, FloatParam
 from skitter.core.slicing.regions import Region, RegionSet
+
+SIZES = {1: "½", 2: "¼", 3: "⅛", 4: "1/16", 5: "1/32", 6: "1/64"}  # by number of splits
 
 
 @register_operation
@@ -26,22 +28,23 @@ class QuadtreeSlicer(Subdivider):
         12.0, "Detail threshold", min=0.5, max=128.0, step=0.5, decimals=1,
         help="Keep splitting while brightness varies more than this (standard deviation).",
     )  # fmt: skip
-    min_size = TileSizeParam(
-        0.25, "Minimum size", min=0.01, max=10.0,
-        help="Never split a cell into parts smaller than this, in base tiles.",
+    # Halving is all a quadtree does, so the only sizes it can reach are the
+    # starting cell over a power of two: the limit is how many times to halve.
+    splits = ChoiceParam(
+        2, "Smallest cell",
+        choices=[(n, f"{SIZES[n]} of the cell ({n} split{'s' if n > 1 else ''})") for n in SIZES],
+        help="How small the detail can split each cell it starts from; ¼ after a base-tile "
+             "Grid gives quarter-tile cells at most.",
     )  # fmt: skip
-    max_depth = IntParam(4, "Maximum depth", min=1, max=12)
 
     def subdivide(
         self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
     ) -> RegionSet:
         samples, scale = ctx.patch(region)
-        min_w, min_h = (self.min_size * size for size in ctx.tile_size)
         leaves: list[tuple[float, float, float, float]] = []
 
         def split(x: float, y: float, w: float, h: float, depth: int) -> None:
-            can_split = depth < self.max_depth and w / 2 >= min_w - 1e-9 and h / 2 >= min_h - 1e-9
-            if can_split:
+            if depth < self.splits:
                 block = samples[
                     int(y * scale) : max(int(y * scale) + 1, math.ceil((y + h) * scale)),
                     int(x * scale) : max(int(x * scale) + 1, math.ceil((x + w) * scale)),
@@ -58,4 +61,4 @@ class QuadtreeSlicer(Subdivider):
         return RegionSet.from_rects(x, y, w, h)
 
     def summary(self) -> str:
-        return f"detail {self.threshold:g}, min {self.min_size:g}× tile"
+        return f"detail {self.threshold:g}, down to {SIZES[self.splits]}"

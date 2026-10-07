@@ -2,9 +2,12 @@
 
 Tiles first show from the library's thumbnails, packed into atlas pages
 straight away. A background job then reads each tile's crop from its
-original file at one texel per mosaic unit (reduced uniformly if the total
-would exceed DETAIL_TEXELS), packs the crops, and replaces the pages; views
-redraw on `changed`. `pages`, `layer` and `uv` always describe the best
+original file at one texel per mosaic unit, packs the crops, and replaces
+the pages; views redraw on `changed`. Tiles smaller than the base tile get
+more (as many texels as a base tile, up to MAX_BOOST times their size), so
+their photos stay sharp when views zoom in. If the total would exceed
+DETAIL_TEXELS, that boost gives way first, then every crop is reduced
+uniformly. `pages`, `layer` and `uv` always describe the best
 textures available, aligned with the scene's tiles (mirroring included).
 
 Manual picks change a few tiles at a time (`set_scene`). With full detail
@@ -31,6 +34,7 @@ from skitter.ui.render.sprites import make_instances
 
 DETAIL_TEXELS = 96 * 2**20  # full-detail budget: about 400 MB of GPU memory (RGBA) + mipmaps
 DETAIL_PAGE = 4096  # atlas page size, texels
+MAX_BOOST = 4.0  # most extra texels per unit (each way) a tile smaller than the base gets
 
 
 @dataclass(frozen=True)
@@ -40,30 +44,70 @@ class TileDetail:
     atlas: PackedAtlas
     scale: float  # texels per mosaic unit (1.0 = full size)
     failed: int  # files that could not be read (their thumbnails are shown)
+    boost: float = 1.0  # most extra density given to small tiles (see boosts)
+    base: tuple[float, float] | None = None  # the base tile, texels (None: no boost)
 
 
-def detail_sizes(sizes, budget: int = DETAIL_TEXELS, page: int = DETAIL_PAGE):
-    """Pixel sizes (w, h) for crops of the given mosaic sizes, and the uniform scale used.
+def boosts(sizes, base, cap: float = MAX_BOOST) -> np.ndarray:
+    """(N,) extra texel density for each crop: a tile smaller than the base tile gets
+    as many texels as the base (up to cap times its own size), so its photo keeps
+    detail when views zoom in. 1 for tiles as large as the base, or with no base."""
+    sizes = np.asarray(sizes, dtype=np.float64).reshape(-1, 2)
+    if base is None:
+        return np.ones(len(sizes))
+    ratio = np.max(sizes / np.asarray(base, dtype=np.float64), axis=1)
+    return np.clip(1.0 / np.maximum(ratio, 1e-9), 1.0, max(cap, 1.0))
 
-    Full size unless the total would exceed budget texels; no crop exceeds page.
+
+def crop_pixels(sizes, scale: float = 1.0, boost: float = 1.0, base=None,
+                page: int = DETAIL_PAGE) -> np.ndarray:  # fmt: skip
+    """(N, 2) texel sizes (w, h) of crops of the given sizes (texels at full size), at
+    `scale`, small ones boosted up to `boost` times; none exceeds page."""
+    sizes = np.asarray(sizes, dtype=np.float64).reshape(-1, 2)
+    scaled = sizes * (scale * boosts(sizes, base, boost))[:, None]
+    scaled *= np.minimum(1.0, page / scaled.max(axis=1, initial=1))[:, None]
+    return np.clip(np.ceil(scaled - 1e-6), 1, page).astype(np.int64)
+
+
+def detail_sizes(sizes, budget: int = DETAIL_TEXELS, page: int = DETAIL_PAGE, base=None):
+    """(pixels, scale, boost): texel sizes (w, h) for crops of the given sizes (texels
+    at full size), the uniform scale and the small-tile boost used (see crop_pixels).
+
+    Full size with small tiles boosted up to MAX_BOOST unless that exceeds budget
+    texels; then the boost gives way first, and only then the scale of every crop.
     """
     sizes = np.asarray(sizes, dtype=np.float64).reshape(-1, 2)
-    area = float(np.prod(np.ceil(sizes), axis=1).sum())
-    scale = min(1.0, (budget / area) ** 0.5) if area else 1.0
-    scaled = sizes * scale
-    scaled *= np.minimum(1.0, page / scaled.max(axis=1, initial=1))[:, None]
-    return np.clip(np.ceil(scaled - 1e-6), 1, page).astype(np.int64), scale
+
+    def area(boost: float) -> float:
+        boosted = np.ceil(sizes * boosts(sizes, base, boost)[:, None] - 1e-6)
+        return float(np.prod(np.maximum(boosted, 1), axis=1).sum())
+
+    scale, boost = 1.0, 1.0
+    if base is not None and area(MAX_BOOST) <= budget:
+        boost = MAX_BOOST
+    elif base is not None and area(1.0) < budget:
+        low, high = 1.0, MAX_BOOST  # area(low) fits, area(high) doesn't
+        for _ in range(20):
+            mid = (low + high) / 2
+            low, high = (mid, high) if area(mid) <= budget else (low, mid)
+        boost = low
+    else:
+        whole = area(1.0)
+        scale = min(1.0, (budget / whole) ** 0.5) if whole else 1.0
+    return crop_pixels(sizes, scale, boost, base, page), scale, boost
 
 
 def build_detail(
-    paths, rects, sizes, thumbs, thumb_size, progress, cancelled, budget: int = DETAIL_TEXELS
-) -> TileDetail:
+    paths, rects, sizes, thumbs, thumb_size, progress, cancelled, budget: int = DETAIL_TEXELS,
+    base=None,
+) -> TileDetail:  # fmt: skip
     """Read and pack full-detail crops (runs in a background job).
 
     paths, rects, sizes describe each distinct crop; thumbs / thumb_size are
     each crop's library thumbnail, shown instead when its file can't be read.
+    base: the base tile in texels, to boost smaller tiles (see boosts); None: no boost.
     """
-    pixels, scale = detail_sizes(sizes, budget)
+    pixels, scale, boost = detail_sizes(sizes, budget, base=base)
 
     def report(done, total):
         progress(f"Loading full-size tiles: {done:,} of {total:,} files", done / max(total, 1))
@@ -75,7 +119,7 @@ def build_detail(
         raise JobCancelled
     images, failed = rendered
     progress("Packing tiles…", None)
-    return TileDetail(pack_images(images, DETAIL_PAGE), scale, len(failed))
+    return TileDetail(pack_images(images, DETAIL_PAGE), scale, len(failed), boost, base)
 
 
 @dataclass(frozen=True)
@@ -93,11 +137,15 @@ class DetailRequest:
     sizes: np.ndarray  # (C, 2) wanted size, texels
     thumbs: np.ndarray
     thumb_size: np.ndarray
+    base: tuple[float, float] | None = None  # base tile, texels: boost smaller tiles
 
     @classmethod
-    def for_scene(cls, scene: MosaicScene, files: TileFiles, scale: float = 1.0):
+    def for_scene(
+        cls, scene: MosaicScene, files: TileFiles, scale: float = 1.0, boost: bool = False
+    ):
         """Crops at `scale` texels per mosaic unit; tiles showing the same crop at the
-        same size share one image."""
+        same size share one image. boost: tiles smaller than the base tile get extra
+        texels (for views that zoom in; see boosts)."""
         size = np.ceil(scene.size * scale - 1e-6)
         keys, image = np.unique(
             np.column_stack([scene.slot, scene.rect.astype(np.float64), size]),
@@ -113,11 +161,12 @@ class DetailRequest:
             sizes=keys[:, 5:7],
             thumbs=files.thumbs[index],
             thumb_size=files.thumb_size[index],
+            base=tuple(float(v) * scale for v in scene.tile_size) if boost else None,
         )
 
     def build(self, progress, cancelled, budget: int = DETAIL_TEXELS) -> TileDetail:
         return build_detail(self.paths, self.rects, self.sizes, self.thumbs, self.thumb_size,
-                            progress, cancelled, budget)  # fmt: skip
+                            progress, cancelled, budget, self.base)  # fmt: skip
 
 
 def scene_instances(scene: MosaicScene, layer: np.ndarray, uv: np.ndarray) -> np.ndarray:
@@ -191,7 +240,7 @@ class TileTextures(QObject):
 
     def _load_detail(self, library: TileLibrary) -> None:
         scene = self.scene
-        request = DetailRequest.for_scene(scene, TileFiles.read(library, scene.slot))
+        request = DetailRequest.for_scene(scene, TileFiles.read(library, scene.slot), boost=True)
         job = Job(request.build, parent=self)
         job.progress.connect(lambda message, _: self._set_status(message))
         job.finished.connect(lambda detail: self._show_detail(detail, request, scene))
@@ -255,10 +304,9 @@ class TileTextures(QObject):
         return np.ceil(scene.size - 1e-6)  # requested texels (at scale 1, as DetailRequest)
 
     def _pixels(self, sizes) -> np.ndarray:
-        """Texel sizes of crops at the loaded detail's scale."""
-        scaled = np.asarray(sizes, np.float64).reshape(-1, 2) * self.detail.scale
-        scaled *= np.minimum(1.0, DETAIL_PAGE / scaled.max(axis=1, initial=1))[:, None]
-        return np.clip(np.ceil(scaled - 1e-6), 1, DETAIL_PAGE).astype(np.int64)
+        """Texel sizes of crops at the loaded detail's scale and boost."""
+        detail = self.detail
+        return crop_pixels(sizes, detail.scale, detail.boost, detail.base)
 
     def _update_detail(self, old, scene, emit: bool) -> None:
         changed = np.flatnonzero(

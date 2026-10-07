@@ -9,13 +9,21 @@ from skitter.core.slicing.base import (
     Progress,
     SliceContext,
     Subdivider,
+    check_region_count,
     region_rng,
     register_operation,
 )
-from skitter.core.slicing.params import ChoiceParam, FloatParam, IntParam, TileSizeParam
+from skitter.core.slicing.common import (
+    VERTICAL,
+    anchor_param,
+    orientation_param,
+    rotation_param,
+    seed_param,
+)
+from skitter.core.slicing.frame import PinnedFrame, span
+from skitter.core.slicing.params import ChoiceParam, FloatParam, TileSizeParam
 from skitter.core.slicing.regions import Region, RegionSet
 
-HORIZONTAL, VERTICAL = "horizontal", "vertical"
 BOND_STEPS = {"running": 1 / 2, "third": 1 / 3, "quarter": 1 / 4}  # shift per course
 
 
@@ -28,10 +36,9 @@ class BondSlicer(Subdivider):
         "along its length. Courses run across (horizontal) or down (vertical)."
     )
 
-    orientation = ChoiceParam(
-        HORIZONTAL, "Courses", choices=[(HORIZONTAL, "Horizontal"), (VERTICAL, "Vertical")],
-        help="Horizontal: rows shift sideways. Vertical: columns shift up and down.",
-    )  # fmt: skip
+    orientation = orientation_param(
+        "Courses", "Horizontal: rows shift sideways. Vertical: columns shift up and down."
+    )
     bond = ChoiceParam(
         "running", "Bond",
         choices=[
@@ -48,17 +55,14 @@ class BondSlicer(Subdivider):
         help="Shift from one course to the next, as a fraction of a brick's length. "
              "0 lines bricks up in a plain grid.",
     )  # fmt: skip
-    seed = IntParam(1, "Seed", min=0, max=999_999, when=lambda op: op.bond == "random")
+    seed = seed_param(when=lambda op: op.bond == "random")
     cell_size = TileSizeParam(
         1.0, "Brick size",
         help="Brick size in base tiles. Partial bricks at the edges become whole, "
              "overhanging bricks.",
     )  # fmt: skip
-    anchor = ChoiceParam(
-        "center", "Anchor",
-        choices=[("center", "Center"), ("top_left", "Top left")],
-        help="Where the pattern is pinned; overhang goes to the opposite edges.",
-    )  # fmt: skip
+    angle = rotation_param("pattern", "45° gives diagonal brickwork")
+    anchor = anchor_param("pattern")
 
     def course_shifts(self, count: int, first: int = 0, region: Region | None = None) -> np.ndarray:
         """Shift of each of count courses, numbered from first, as a fraction of a brick.
@@ -74,34 +78,30 @@ class BondSlicer(Subdivider):
     def subdivide(
         self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
     ) -> RegionSet:
-        cell_w, cell_h = (self.cell_size * size for size in ctx.tile_size)
+        cell_w, cell_h = ctx.tile_dims(self.cell_size)
         vertical = self.orientation == VERTICAL
-        # Work in course coordinates: u along the courses, v across them.
-        w, h = region.width, region.height
-        span_u, span_v = (h, w) if vertical else (w, h)
+        frame = PinnedFrame(region.width, region.height, self.anchor, math.radians(self.angle))
+        lo, hi = frame.bounds()
+        # Course coordinates: u along the courses, v across them.
+        if vertical:
+            lo, hi = lo[::-1], hi[::-1]
         brick_u, brick_v = (cell_h, cell_w) if vertical else (cell_w, cell_h)
-        courses = max(1, math.ceil(span_v / brick_v - 1e-9))
-        origin_u = origin_v = 0.0
-        first = 0
-        if self.anchor == "center":
-            # Center the unshifted grid; the middle course stays unshifted.
-            per_course = max(1, math.ceil(span_u / brick_u - 1e-9))
-            origin_u = (span_u - per_course * brick_u) / 2
-            origin_v = (span_v - courses * brick_v) / 2
-            first = -(courses // 2)
+        # The unshifted grid pinned at the anchor; course 0 there stays unshifted.
+        origin_u, _, _ = span(lo[0], hi[0], brick_u, self.anchor)
+        origin_v, courses, first = span(lo[1], hi[1], brick_v, self.anchor)
+        check_region_count(courses * (math.ceil((hi[0] - lo[0]) / brick_u) + 2), self.name)
 
         us, vs = [], []
         for index, shift in enumerate(self.course_shifts(courses, first, region)):
             start = origin_u + shift * brick_u
-            # Every brick start + [i, i + 1] * brick_u that overlaps (0, span_u).
-            i0 = math.floor(-start / brick_u - 1 + 1e-9) + 1
-            i1 = math.ceil((span_u - start) / brick_u - 1e-9) - 1
+            # Every brick start + [i, i + 1] * brick_u that overlaps (lo_u, hi_u).
+            i0 = math.floor((lo[0] - start) / brick_u - 1 + 1e-9) + 1
+            i1 = math.ceil((hi[0] - start) / brick_u - 1e-9) - 1
             u = start + (np.arange(i0, i1 + 1) + 0.5) * brick_u
             us.append(u)
             vs.append(np.full(len(u), origin_v + (index + 0.5) * brick_v))
         u, v = np.concatenate(us), np.concatenate(vs)
-        center = np.stack([v, u] if vertical else [u, v], axis=-1)
-        return RegionSet.from_arrays(center, (cell_w, cell_h))
+        return frame.place(np.stack([v, u] if vertical else [u, v], axis=-1), (cell_w, cell_h))
 
     def summary(self) -> str:
         if self.bond == "custom":
@@ -110,6 +110,8 @@ class BondSlicer(Subdivider):
             text = dict(BondSlicer.bond.choices)[self.bond].split(" (")[0].lower() + " bond"
         if self.orientation == VERTICAL:
             text += ", vertical"
+        if self.angle:
+            text += f", {self.angle:g}°"
         if self.cell_size != 1:
             text += f", {self.cell_size:g}× tiles"
         return text

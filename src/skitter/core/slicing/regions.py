@@ -263,3 +263,28 @@ class RegionSet:
         if not len(hits):
             return -1
         return int(hits[np.argmax(self.stacking_rank()[hits])])
+
+
+def upright(rotation, period: float = math.pi) -> np.ndarray:
+    """Rotations turned by whole periods into (-period/2, period/2]: a rectangle looks
+    the same turned a half turn (the default), a square a quarter turn. Tiles laid at
+    the result show their photos as near upright as their outline allows."""
+    rotation = np.asarray(rotation, dtype=float)
+    return rotation - period * np.ceil(rotation / period - 0.5 - 1e-9)
+
+
+def overlapping(centers, sizes, rotation, width: float, height: float, tol=1e-6) -> np.ndarray:
+    """(N,) bool: which rotated rectangles overlap [0, width] x [0, height] (more than
+    touch). A separating-axis test on the area's axes and each rectangle's own axes."""
+    c, s = np.abs(np.cos(rotation)), np.abs(np.sin(rotation))
+    hw, hh = sizes[:, 0] / 2, sizes[:, 1] / 2
+    aw, ah = width / 2, height / 2
+    d = np.array([aw, ah]) - centers
+    # Area axes: the rectangles' bounding boxes against the area.
+    keep = np.abs(d[:, 0]) < c * hw + s * hh + aw - tol
+    keep &= np.abs(d[:, 1]) < s * hw + c * hh + ah - tol
+    # Rectangle axes: the area projected onto each rectangle's sides.
+    cos, sin = np.cos(rotation), np.sin(rotation)
+    keep &= np.abs(d[:, 0] * cos + d[:, 1] * sin) < hw + c * aw + s * ah - tol
+    keep &= np.abs(-d[:, 0] * sin + d[:, 1] * cos) < hh + s * aw + c * ah - tol
+    return keep

@@ -35,6 +35,7 @@ from skitter.core.slicing.operations import (
     SplitSlicer,
     StackingAdjust,
 )
+from skitter.core.slicing.regions import upright
 
 
 def blank(width=100, height=60):
@@ -266,7 +267,7 @@ def test_plan_serialization_roundtrip():
 
 
 def test_grid_has_only_tile_settings():
-    assert [p.name for p in GridSlicer.params()] == ["cell_size", "anchor"]
+    assert [p.name for p in GridSlicer.params()] == ["cell_size", "angle", "anchor"]
 
 
 def test_split_keeps_the_tile_shape():
@@ -295,7 +296,7 @@ def test_split_inside_rotated_region_stays_inside():
 def test_quadtree_splits_only_where_detail_is():
     image = np.zeros((64, 64, 3), np.uint8)
     image[:32, 32:] = (np.indices((32, 32)).sum(0) % 2 * 255)[..., None]  # busy top-right
-    regions = QuadtreeSlicer(threshold=5, min_size=4, max_depth=3).apply(
+    regions = QuadtreeSlicer(threshold=5, splits=3).apply(
         RegionSet.covering(64, 64), SliceContext(image)
     )
     sizes = sorted({tuple(s) for s in regions.size.tolist()})
@@ -446,7 +447,7 @@ def test_context_sizes_the_canvas_in_mosaic_units():
 
 def test_slicing_does_not_depend_on_the_unit_size():
     image = np.random.default_rng(0).integers(0, 256, (90, 120, 3), dtype=np.uint8)
-    plan = SlicingPlan([Stage(QuadtreeSlicer(min_size=0.25)), Stage(JitterAdjust())])
+    plan = SlicingPlan([Stage(QuadtreeSlicer(splits=2)), Stage(JitterAdjust())])
     layout = MosaicLayout(tile_aspect=1.5, columns=6)
     small = plan.regions(SliceContext(image, layout, tile_width=10))
     large = plan.regions(SliceContext(image, layout, tile_width=250))
@@ -482,11 +483,14 @@ def test_context_works_in_mosaic_units():
     assert per_px == 0.5 and patch.shape == (1, 1, 3) and patch[0, 0, 0] == 255
 
 
-def test_quadtree_minimum_is_in_tiles():
+@pytest.mark.parametrize("splits", [1, 2, 3])
+def test_quadtree_smallest_cell_is_a_power_of_two_of_the_start(splits):
     image = (np.indices((64, 64)).sum(0) % 2 * 255).astype(np.uint8)[..., None].repeat(3, -1)
     ctx = SliceContext(image, MosaicLayout(columns=4), tile_width=16)  # busy everywhere
-    regions = QuadtreeSlicer(min_size=0.5, max_depth=8).apply(ctx.canvas(), ctx)
-    assert regions.size.min() == 8  # half a 16 px tile, never smaller
+    cells = GridSlicer().apply(ctx.canvas(), ctx)
+    regions = QuadtreeSlicer(threshold=1, splits=splits).apply(cells, ctx)
+    assert len(regions) == len(cells) * 4**splits
+    np.testing.assert_allclose(regions.size, 16 / 2**splits)
 
 
 def test_coverage_estimates():
@@ -517,7 +521,7 @@ def test_tile_size_param_defaults():
     from skitter.core.slicing import TileSizeParam
 
     assert GridSlicer.cell_size.suffix == " × tile"
-    assert isinstance(QuadtreeSlicer.min_size, TileSizeParam)
+    assert isinstance(GridSlicer.cell_size, TileSizeParam)
 
 
 # Brick bonds and patterns
@@ -562,6 +566,68 @@ def test_bond_with_zero_shift_is_the_grid_and_random_is_seeded():
     np.testing.assert_array_equal(a.center, b.center)
     assert not np.array_equal(a.center, c.center) or len(a) != len(c)
     assert np.all(cover_counts(a, 100, 65) == 1)
+
+
+def pattern_frame(regions, pin, degrees):
+    """Brick centers turned back by -degrees about pin (the unturned pattern's frame)."""
+    a = math.radians(degrees)
+    c, s = math.cos(a), math.sin(a)
+    return (regions.center - pin) @ np.array([[c, -s], [s, c]])
+
+
+@pytest.mark.parametrize("degrees", [15.0, 45.0, -30.0, 90.0])
+@pytest.mark.parametrize("anchor", ["center", "top_left"])
+def test_bond_rotation_turns_the_whole_pattern(degrees, anchor):
+    ctx = tiled(100, 60, tile=20, aspect=2.0)  # 20 x 10 bricks
+    regions = BondSlicer(angle=degrees, anchor=anchor).apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(regions.size, [[20, 10]] * len(regions))
+    np.testing.assert_allclose(regions.rotation, float(upright(math.radians(degrees))))
+    assert np.all(cover_counts(regions, 100, 60) == 1)  # covered once, rotated or not
+    # One pattern: in its own frame, courses lie a brick height apart, bricks a brick
+    # length apart along them, each course half a brick on from the last.
+    pin = np.array([50.0, 30.0]) if anchor == "center" else np.zeros(2)
+    u, v = pattern_frame(regions, pin, degrees).T
+    course = np.round((v - v[0]) / 10)
+    np.testing.assert_allclose(v - v[0], course * 10, atol=1e-6)
+    phase = np.mod(u - u[0] - 10 * course + 1e-6, 20)  # running bond: half a brick on
+    np.testing.assert_allclose(phase, 1e-6, atol=1e-5)
+    if anchor == "top_left":  # it turns about the corner: course 0 starts a brick there
+        np.testing.assert_allclose(np.mod(v[0] - 5 + 1e-6, 10), 1e-6, atol=1e-5)
+        first = np.round((v[0] - 5) / 10)  # course of the first brick (shifted that much)
+        np.testing.assert_allclose(np.mod(u[0] - 10 - 10 * first + 1e-6, 20), 1e-6, atol=1e-5)
+
+
+@pytest.mark.parametrize("degrees", [0.0, 20.0, 45.0, -70.0])
+@pytest.mark.parametrize("anchor", ["center", "top_left"])
+def test_grid_rotation_turns_the_whole_grid(degrees, anchor):
+    ctx = tiled(100, 60, tile=20, aspect=2.0)  # 20 x 10 cells
+    regions = GridSlicer(angle=degrees, anchor=anchor).apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(regions.rotation, float(upright(math.radians(degrees))))
+    assert np.all(cover_counts(regions, 100, 60) == 1)
+    pin = np.array([50.0, 30.0]) if anchor == "center" else np.zeros(2)
+    u, v = pattern_frame(regions, pin, degrees).T  # one lattice in its own frame
+    for values, step in ((u, 20), (v, 10)):
+        np.testing.assert_allclose(np.mod(values - values[0] + 1e-6, step), 1e-6, atol=1e-5)
+    if anchor == "top_left":  # pinned at the corner: a cell corner lies on it
+        np.testing.assert_allclose(np.mod(u[0] - 10 + 1e-6, 20), 1e-6, atol=1e-5)
+        np.testing.assert_allclose(np.mod(v[0] - 5 + 1e-6, 10), 1e-6, atol=1e-5)
+
+
+def test_grid_at_zero_degrees_is_the_plain_cells():
+    ctx = tiled(100, 65, tile=10)
+    for anchor in ("center", "top_left"):
+        regions = GridSlicer(anchor=anchor).apply(ctx.canvas(), ctx)
+        columns, rows = 10, 7
+        origin = (0.0, 0.0) if anchor == "top_left" else ((100 - 100) / 2, (65 - 70) / 2)
+        cells = RegionSet.cells(10, 10, columns, rows, origin)
+        np.testing.assert_allclose(regions.center, cells.center, atol=1e-9)
+
+
+def test_vertical_bond_rotates_too():
+    ctx = tiled(80, 80, tile=20, aspect=2.0)
+    regions = BondSlicer(orientation="vertical", bond="third", angle=30.0).apply(ctx.canvas(), ctx)
+    np.testing.assert_allclose(regions.rotation, math.radians(30.0))
+    assert np.all(cover_counts(regions, 80, 80) == 1)
 
 
 def test_random_bond_differs_between_parent_regions():

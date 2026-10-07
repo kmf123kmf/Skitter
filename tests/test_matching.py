@@ -92,6 +92,89 @@ def test_approximate_index_finds_near_neighbors():
     assert (found[:, 0] == np.arange(200)).mean() > 0.9
 
 
+def detailed_candidates(m):
+    """Random candidates varying most in fine detail and texture, as photos do."""
+    cands = random_candidates(m)
+    desc = cands.desc.astype(np.float32)
+    desc[:, 15:] *= 4
+    return CandidateSet(cands.aspect, cands.tile, cands.rect, cands.mirrored, cands.retained,
+                        desc.astype(np.float16))  # fmt: skip
+
+
+def coarse_mask(n):
+    """Masks of regions too small for the 4 x 4 grid and texture (coarse grid only)."""
+    from skitter.core.tiles.descriptors import LEVEL1
+
+    mask = np.zeros((n, DIM), np.float32)
+    mask[:, MEAN] = 1
+    mask[:, LEVEL1] = 1
+    return mask
+
+
+def test_detail_levels_name_the_structure_blocks_regions_use():
+    from skitter.core.matching.targets import FULL_DETAIL, detail_levels, level_weights
+    from skitter.core.tiles.descriptors import LEVEL1, LEVEL2, TEXTURE
+
+    full = np.ones((1, DIM), np.float32)
+    partly_hidden = full.copy()
+    partly_hidden[0, LEVEL2.start] = 0  # one hidden cell still uses the fine grid
+    mean_only = np.zeros((1, DIM), np.float32)
+    mean_only[0, MEAN] = 1
+    masks = np.concatenate([full, partly_hidden, coarse_mask(1), mean_only])
+    assert detail_levels(masks).tolist() == [FULL_DETAIL, FULL_DETAIL, 1, 0]
+    w = level_weights(dim_weights(), 1)
+    assert (w[MEAN] > 0).all() and (w[LEVEL1] > 0).all()
+    assert (w[LEVEL2] == 0).all() and (w[TEXTURE] == 0).all()
+    np.testing.assert_array_equal(level_weights(dim_weights(), FULL_DETAIL), dim_weights())
+
+
+def test_an_index_weighted_for_a_detail_level_ranks_like_its_cost(monkeypatch):
+    import skitter.core.matching.index as index_module
+    from skitter.core.matching.targets import level_weights
+
+    monkeypatch.setattr(index_module, "EXACT_LIMIT", 1000)  # IVF without a huge set
+    cands = detailed_candidates(6000)
+    rng = np.random.default_rng(5)
+    desc = rng.normal(0, 0.1, (64, DIM)).astype(np.float32)
+    desc[:, 15:] = 0  # what targets.py gives regions without fine detail
+    w = region_weights(dim_weights(), coarse_mask(64), 0.0)
+    _, exact = exact_best(cands, desc, w, 0.0)
+
+    def regret(index):
+        _, cs = rerank(cands, index.search(desc, 8, nprobe=index.groups), desc, w, 0.0)
+        return (cs[:, 0] - exact).mean() / np.median(exact)
+
+    full = SearchIndex(cands, dim_weights(), 0.0)
+    coarse = SearchIndex(cands, level_weights(dim_weights(), 1), 0.0)
+    assert len(full.dims) == DIM and len(coarse.dims) == 15  # only the weighted dimensions
+    assert coarse.groups == faiss.extract_index_ivf(coarse.index).nlist > 1
+    assert regret(coarse) < 0.01  # searching every cell of its index finds the true best
+    assert regret(full) > 10 * max(regret(coarse), 0.01)  # ranked on detail the cost ignores
+
+
+def test_calibration_keeps_the_cheaper_effort_when_more_does_not_help(monkeypatch):
+    import skitter.core.matching.index as index_module
+    from skitter.core.matching.run import MatchRun
+
+    monkeypatch.setattr(index_module, "EXACT_LIMIT", 1000)
+    cands = detailed_candidates(6000)
+    rng = np.random.default_rng(6)
+    desc = rng.normal(0, 0.1, (64, DIM)).astype(np.float32)
+    desc[:, 15:] = 0
+    run = SimpleNamespace(
+        settings=MatchSettings(search_effort=4, candidates=8, crop_penalty=0.0),
+        targets=SimpleNamespace(desc=desc),
+        weights=region_weights(dim_weights(), coarse_mask(64), 0.0),
+        report=SimpleNamespace(detail=lambda *a: None),
+    )
+    mismatched = SearchIndex(cands, dim_weights(), 0.0)  # effort can't fix its ranking
+    effort, stats = MatchRun._calibrate(run, cands, mismatched, np.arange(64))
+    assert stats.relative > 0.03 and effort < mismatched.groups  # stopped early, kept cheap
+    run.settings.search_effort = 65_536  # starting effort beyond the index: all its cells
+    effort, stats = MatchRun._calibrate(run, cands, mismatched, np.arange(64))
+    assert effort == mismatched.groups and stats.extra_de > 0
+
+
 # Assignment
 
 
@@ -422,6 +505,13 @@ def test_matcher_end_to_end(library):
         de = np.linalg.norm(result.tile_mean[quad == q] - target, axis=1).mean()
         assert de <= 1.3 * bound + 0.01, (q, de, bound)
     assert result.quality.covered == 1.0
+
+    # Regions too small for fine detail are searched at their own detail level.
+    small = flat_ctx(target_image(), columns=40, tile=20)  # 4 source px per tile
+    small_result = Matcher(library).run(GridSlicer().apply(small.canvas(), small), small,
+                                        MatchSettings(max_uses=0, refine_seconds=0.1))  # fmt: skip
+    assert (small_result.tile >= 0).all() and len(small_result.regret) == 1
+    assert small_result.regret[0].extra_de < 1e-3  # exact search: no regret
 
     # Tinting toward each region's color can only bring the proxy closer.
     tinted = Matcher(library).run(regions, ctx, MatchSettings(tint="custom", tint_strength=0.5,

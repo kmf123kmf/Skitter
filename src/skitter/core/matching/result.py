@@ -39,6 +39,7 @@ class RegretStats:
     relative: float  # mean regret / median exact cost
     effort: int  # search effort (nprobe) finally used
     exact: bool  # the index searched exactly (small library)
+    extra_de: float = 0.0  # mean ΔE (x100 OKLab) of the approximate best over the exact best
 
 
 @dataclass

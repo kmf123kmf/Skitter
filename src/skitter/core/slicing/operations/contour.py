@@ -19,21 +19,13 @@ from skitter.core.slicing.base import (
     register_operation,
 )
 from skitter.core.slicing.params import BoolParam, FloatParam, IntParam, TileSizeParam
-from skitter.core.slicing.regions import Region, RegionSet
+from skitter.core.slicing.regions import Region, RegionSet, upright
 from skitter.core.slicing.rows import place_rows
 from skitter.core.slicing.structure import StructureField, structure_field
 
 SAMPLES_PER_ROW = 8  # analysis resolution: samples across one row (a tile's short side)
 MAX_SAMPLES = 16_000_000
 ANALYSIS_SHARE = 0.5  # of a region's work: finding its structure (then laying the rows)
-
-
-def upright(rotation: np.ndarray, width: float, height: float) -> np.ndarray:
-    """Each rotation turned to the one nearest upright with the same footprint: a row
-    has no direction, so a tile laid along it may as well face up. A rectangle looks
-    the same turned a half turn (so within ±90°), a square a quarter turn (±45°)."""
-    period = math.pi / 2 if math.isclose(width, height) else math.pi
-    return (np.asarray(rotation) + period / 2) % period - period / 2
 
 
 @register_operation
@@ -89,15 +81,12 @@ class ContourSlicer(Subdivider):
         help="Cover what rows leave uncovered with tiles underneath them.",
     )  # fmt: skip
 
-    def tile_dims(self, ctx: SliceContext) -> tuple[float, float]:
-        return tuple(self.tile_size * size for size in ctx.tile_size)
-
     def structure(
         self, region: Region, ctx: SliceContext
     ) -> tuple[StructureField, np.ndarray, float]:
         """(field, visible samples, samples per mosaic unit): what rows follow in a region,
         sampled in its own frame (see structure.py). The Slicing tab draws it."""
-        short = min(self.tile_dims(ctx))
+        short = min(ctx.tile_dims(self.tile_size))
         samples = min(int(region.area * (SAMPLES_PER_ROW / short) ** 2) + 1, MAX_SAMPLES)
         luminance, scale = ctx.patch(region, "luminance", max_samples=samples, antialias=True)
         reference = None
@@ -116,7 +105,7 @@ class ContourSlicer(Subdivider):
     def subdivide(
         self, region: Region, ctx: SliceContext, progress: Progress = NO_PROGRESS
     ) -> RegionSet:
-        tile_w, tile_h = self.tile_dims(ctx)
+        tile_w, tile_h = ctx.tile_dims(self.tile_size)
         long, short = max(tile_w, tile_h), min(tile_w, tile_h)
         check_region_count(math.ceil(1.5 * region.area / (tile_w * tile_h)), self.name)
         progress(0.0)
@@ -127,9 +116,10 @@ class ContourSlicer(Subdivider):
         )
         turn = math.pi / 2 if tile_h > tile_w else 0.0  # the long side along the row
         size = np.broadcast_to([tile_w, tile_h], (len(z), 2))
-        return RegionSet.from_arrays(
-            centers / scale, size, upright(angles + turn, tile_w, tile_h), z
-        )
+        # A row has no direction: tiles along it may as well face as near up as their
+        # outline allows (a square: within a quarter turn either way).
+        period = math.pi / 2 if math.isclose(tile_w, tile_h) else math.pi
+        return RegionSet.from_arrays(centers / scale, size, upright(angles + turn, period), z)
 
     def summary(self) -> str:
         size = "" if self.tile_size == 1 else f"{self.tile_size:g}× tiles, "

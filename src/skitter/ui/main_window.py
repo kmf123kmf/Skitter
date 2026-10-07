@@ -60,16 +60,12 @@ class MainWindow(QMainWindow):
 
     def _fit_to_screen(self, fraction: float = 0.8) -> None:
         """Size the window to a share of the screen it opens on, centred there."""
-        screen = (
-            QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
-        )
+        screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
         if screen is None:
             self.resize(1280, 800)
             return
         available = screen.availableGeometry()  # excludes the taskbar
-        size = QSize(
-            round(available.width() * fraction), round(available.height() * fraction)
-        )
+        size = QSize(round(available.width() * fraction), round(available.height() * fraction))
         self.setGeometry(
             QStyle.alignedRect(
                 Qt.LayoutDirection.LeftToRight,
@@ -154,12 +150,8 @@ class MainWindow(QMainWindow):
         self.back_button.clicked.connect(self.go_back)
 
         self.next_button = QPushButton()
-        self.next_button.setIcon(
-            style.standardIcon(QStyle.StandardPixmap.SP_ArrowForward)
-        )
-        self.next_button.setLayoutDirection(
-            Qt.LayoutDirection.RightToLeft
-        )  # icon after text
+        self.next_button.setIcon(style.standardIcon(QStyle.StandardPixmap.SP_ArrowForward))
+        self.next_button.setLayoutDirection(Qt.LayoutDirection.RightToLeft)  # icon after text
         self.next_button.setDefault(True)
         self.next_button.setShortcut(QKeySequence("Ctrl+Return"))
         self.next_button.clicked.connect(self.go_next)

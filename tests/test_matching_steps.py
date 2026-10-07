@@ -83,12 +83,50 @@ def test_tiles_step_builds_library_in_background(sliced, photos):
     assert step.is_complete() and window.next_button.isEnabled()
     assert step._tiles.text() == "40" and step.folders.count() == 1
     assert "Added 40" in step.status.text()
-    assert step._sample_layer is not None and len(step._sample_layer.instances) == 40
     assert window.tabs.isTabEnabled(3)
 
     step.folders.setCurrentRow(0)
     step.remove_folder()
     assert window.session.library.roots == []
+
+
+def test_tiles_step_shows_what_the_library_can_paint(sliced, photos):
+    from skitter.ui.steps.tiles import COLOR_MAP, ERROR, MAP_CELL, MAP_GAP, PAINTED, SAMPLE
+
+    window = sliced
+    window.next_button.click()  # to Tiles
+    step = build_library(window, photos)
+    step.wait_for_colors(10)
+    assert step._colors is not None and len(step._colors) == 40
+    assert step._photo_size.text().startswith("60 px")
+    assert "portrait" in step._shapes.text() and step._detail.text() == "60 px tiles"
+
+    # Color map: a swatch for every displayable cell, a tile in the cells tiles reach.
+    assert step._shown[0] == COLOR_MAP and len(step._layers) == 2
+    cmap = step._color_map()
+    swatches, tiles = step._layers
+    assert len(swatches.instances) == cmap.shown.sum()
+    assert len(tiles.instances) == cmap.reached.sum() > 0
+    assert "of these colors" in step._summary.text()
+    row, column = np.argwhere(cmap.reached)[0]
+    x = MAP_CELL * (column + 0.5) + (MAP_GAP if column else 0)
+    step.canvas.cursor_moved.emit(float(x), float(MAP_CELL * (row + 0.5)))
+    assert "near (closest ΔE" in step._hover.text()
+    step.colorfulness.setCurrentIndex(2)  # vivid: a new map
+    assert step._color_map().chroma > cmap.chroma
+
+    # The source in the library's colors, and how far off they are.
+    step.set_display(PAINTED)
+    assert step._shown[0] == PAINTED and len(step._layers) == 1
+    texture = step._layers[0].textures
+    assert texture.shape[1:3] == step._coverage.error.shape
+    assert "Mean ΔE" in step._summary.text()
+    step.canvas.cursor_moved.emit(1.0, 1.0)
+    assert step._hover.text().startswith("ΔE")
+    step.set_display(ERROR)
+    assert step._shown[0] == ERROR and not step.colorfulness.isVisibleTo(step)
+    step.set_display(SAMPLE)
+    assert len(step._layers[0].instances) == 40
 
 
 def test_matching_step_runs_and_shows_mosaic(sliced, photos, qapp):
@@ -1056,9 +1094,38 @@ def test_pack_images_places_every_image_once():
 def test_detail_sizes_keep_full_size_within_budget():
     from skitter.ui.render.tile_textures import detail_sizes
 
-    sizes, scale = detail_sizes([[100, 150], [99.5, 10.2]], budget=10**6)
-    assert scale == 1 and sizes.tolist() == [[100, 150], [100, 11]]
-    sizes, scale = detail_sizes(np.full((100, 2), 100.0), budget=250_000)
+    sizes, scale, boost = detail_sizes([[100, 150], [99.5, 10.2]], budget=10**6)
+    assert scale == 1 and boost == 1 and sizes.tolist() == [[100, 150], [100, 11]]
+    sizes, scale, _ = detail_sizes(np.full((100, 2), 100.0), budget=250_000)
     assert scale == pytest.approx(0.5) and sizes.tolist() == [[50, 50]] * 100
-    sizes, _ = detail_sizes([[9000, 3000]], budget=10**9, page=4096)
+    sizes, _, _ = detail_sizes([[9000, 3000]], budget=10**9, page=4096)
     assert sizes.tolist() == [[4096, 1366]]
+
+
+def test_small_tiles_get_as_many_texels_as_a_base_tile():
+    from skitter.ui.render.tile_textures import MAX_BOOST, crop_pixels, detail_sizes
+
+    base = (100, 100)
+    tiles = [[100, 100], [50, 50], [25, 25], [12.5, 12.5], [200, 200], [50, 100]]
+    sizes, scale, boost = detail_sizes(tiles, budget=10**6, base=base)
+    assert scale == 1 and boost == MAX_BOOST
+    # Up to a base tile's texels (at most MAX_BOOST times the tile); large tiles as before;
+    # a tile as long as the base on one side isn't small.
+    assert sizes.tolist() == [[100, 100], [100, 100], [100, 100], [50, 50], [200, 200],
+                              [50, 100]]  # fmt: skip
+    # Picks made later size their crops the same way.
+    assert crop_pixels(tiles, scale, boost, base).tolist() == sizes.tolist()
+    # Without a base (video export), crops are their plain size.
+    plain, _, boost = detail_sizes(tiles, budget=10**6)
+    assert boost == 1 and plain.tolist()[1:4] == [[50, 50], [25, 25], [13, 13]]
+
+
+def test_texture_budget_gives_up_the_boost_before_full_size():
+    from skitter.ui.render.tile_textures import detail_sizes
+
+    base, small = (100, 100), np.full((100, 2), 25.0)  # 62,500 texels plain, 1,000,000 boosted
+    sizes, scale, boost = detail_sizes(small, budget=250_000, base=base)
+    assert scale == 1 and 1 < boost < 4 and np.prod(sizes, axis=1).sum() <= 250_000
+    assert sizes[0, 0] == pytest.approx(50, abs=1)  # 250,000 / 100 tiles: 50 x 50 each
+    sizes, scale, boost = detail_sizes(small, budget=40_000, base=base)
+    assert boost == 1 and scale == pytest.approx(0.8)  # then every crop shrinks, as before

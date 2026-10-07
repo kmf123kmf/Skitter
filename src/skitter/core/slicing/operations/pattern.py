@@ -15,10 +15,15 @@ from skitter.core.slicing.base import (
     Subdivider,
     register_operation,
 )
+from skitter.core.slicing.common import (
+    VERTICAL,
+    anchor_param,
+    orientation_param,
+    rotation_param,
+)
 from skitter.core.slicing.params import (
     BoolParam,
     ChoiceParam,
-    FloatParam,
     IntParam,
     TileSizeParam,
 )
@@ -31,9 +36,6 @@ from skitter.core.slicing.patterns import (
     tile_pattern,
 )
 from skitter.core.slicing.regions import Region, RegionSet
-
-HORIZONTAL, VERTICAL = "horizontal", "vertical"
-
 
 # Patterns
 
@@ -95,27 +97,17 @@ class PatternSlicer(Subdivider):
         help="Bricks side by side in each square block. Bricks keep the tile's length "
              "and get thinner or thicker to fill the block.",
     )  # fmt: skip
-    orientation = ChoiceParam(
-        HORIZONTAL, "Orientation", choices=[(HORIZONTAL, "Horizontal"), (VERTICAL, "Vertical")],
-        help="Vertical turns the whole pattern 90°.",
-    )  # fmt: skip
-    angle = FloatParam(
-        0.0, "Rotation", min=-90.0, max=90.0, step=5.0, decimals=1, suffix="°",
-        help="Extra rotation of the whole pattern; 45° gives diagonal herringbone.",
-    )  # fmt: skip
+    orientation = orientation_param("Orientation", "Vertical turns the whole pattern 90°.")
+    angle = rotation_param("pattern", "45° gives diagonal herringbone")
     cell_size = TileSizeParam(
         1.0, "Brick size",
         help="Brick size in base tiles. Bricks at the edges stay whole and overhang.",
     )  # fmt: skip
-    anchor = ChoiceParam(
-        "center", "Anchor",
-        choices=[("center", "Center"), ("top_left", "Top left")],
-        help="Which point of the region the pattern is pinned to and turns about.",
-    )  # fmt: skip
+    anchor = anchor_param("pattern")
 
     def unit(self, ctx: SliceContext) -> PatternUnit:
         pattern = get_pattern(self.pattern)
-        builder = PatternBuilder(tuple(self.cell_size * size for size in ctx.tile_size))
+        builder = PatternBuilder(ctx.tile_dims(self.cell_size))
         return pattern.build(builder, **{name: getattr(self, name) for name in pattern.options})
 
     def subdivide(

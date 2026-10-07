@@ -6,10 +6,19 @@ search indexes between runs (keyed by library version and settings), so
 changing reuse rules or tint reuses them; changing the crop settings or the
 library rebuilds only what depends on them.
 
-Good-enough search: before searching every region of a shape, a sample of
-regions is also searched exactly (every candidate). If the approximate
-results cost noticeably more (relative regret above REGRET_LIMIT), search
-effort is raised and the sample checked again. After assignment, adaptive
+Detail levels: an index ranks with fixed weights, but regions too small for
+some structure blocks (or hidden where they lie) leave them out of their
+cost. Searching them with the full index ranks tiles on detail the cost
+ignores, and no search effort fixes that. So regions are searched per shape
+class and detail level (targets.detail_levels), each level with its own
+index weighted like its cost (indexing only the dimensions it uses).
+
+Good-enough search: before searching the regions of a shape and level, a
+sample of them is also searched exactly (every candidate). If the
+approximate results cost noticeably more (relative regret above
+REGRET_LIMIT), search effort is raised (x4) and the sample checked again,
+as long as that clearly helps (REGRET_GAIN), up to every cell of the index.
+After assignment, adaptive
 passes search harder only for the regions the quality check finds worst,
 keeping a pass only if the overall score improves and it places no more
 regions against the reuse rules (the score doesn't see repetition).
@@ -96,9 +105,11 @@ class Matcher:
 
     def index(
         self, key: tuple, cands: CandidateSet, settings: MatchSettings,
-        progress=lambda message, fraction: None,
+        progress=lambda message, fraction: None, weights=None,
     ) -> SearchIndex:  # fmt: skip
-        weights = settings.weights()
+        """The search index over cands at the settings' weights (or the given ones, for
+        a detail level; see targets.detail_levels), cached."""
+        weights = settings.weights() if weights is None else np.asarray(weights)
         full = (key, tuple(np.round(weights, 6)))
         index = self._indexes.get(full)
         if index is None or abs(index.tint_ref - settings.tint_value) > TINT_REBUILD:

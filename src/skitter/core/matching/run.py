@@ -10,6 +10,7 @@ previews of the run so far.
 import math
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 
 import faiss
 import numpy as np
@@ -35,14 +36,19 @@ from skitter.core.matching.result import (
     RegretStats,
 )
 from skitter.core.matching.settings import MatchSettings
-from skitter.core.matching.targets import target_descriptors
+from skitter.core.matching.targets import (
+    FULL_DETAIL,
+    detail_levels,
+    level_weights,
+    target_descriptors,
+)
 from skitter.core.slicing import RegionSet, SliceContext
 from skitter.core.tiles.crops import aspect_classes
 from skitter.core.tiles.descriptors import MEAN, cell_colors
 
 REGRET_LIMIT = 0.03  # acceptable mean extra cost of approximate search, relative
 REGRET_SAMPLES = 128
-MAX_EFFORT = 1024
+REGRET_GAIN = 0.75  # more effort is kept only if it cuts regret to this share or less
 WORST_SHARE = 0.1  # share of regions re-searched in each adaptive pass
 GAMUT_DE = 0.06  # a region's color is "missing" from the library beyond this ΔE (OKLab)
 SEARCH_SECONDS = 3.0  # aim for search batches about this long (progress and previews)
@@ -137,6 +143,14 @@ def batched_search(cands, index, regs, desc, weights, settings, k, effort, found
     return ids, cs
 
 
+@dataclass(frozen=True)
+class Search:
+    """How one shape class's regions of one detail level are searched."""
+
+    index: SearchIndex
+    effort: int  # calibrated search effort (IVF cells per query)
+
+
 class MatchRun:
     """One run of the pipeline; call the phases in order (see Matcher.run)."""
 
@@ -149,10 +163,11 @@ class MatchRun:
         self.tint = settings.tint_value
         self.k = settings.candidates
         self.kw = 2 * self.k  # room for wider searches
-        # Candidates per shape class: c -> (candidate set, index, regions of that class)
-        self.shapes: dict[int, tuple[CandidateSet, SearchIndex, np.ndarray]] = {}
+        # Candidates per shape class: c -> (candidate set, regions of that class)
+        self.shapes: dict[int, tuple[CandidateSet, np.ndarray]] = {}
+        # Searches per shape class and detail level (targets.detail_levels): (c, level) -> Search
+        self.searches: dict[tuple[int, int], Search] = {}
         self.regret: list[RegretStats] = []
-        self.efforts: dict[int, int] = {}
 
     # Previews
 
@@ -183,6 +198,7 @@ class MatchRun:
         self.target_rgb[self.need] = np.clip(oklab_to_srgb(targets.desc[self.need][:, MEAN]), 0, 1)
         self.show(PreviewStage.SKETCH)
         self.weights = region_weights(self.settings.weights(), targets.mask, self.tint)
+        self.level = detail_levels(targets.mask)
         self.classes, self.cls = (
             aspect_classes(regions.size[:, 0] / regions.size[:, 1])
             if n
@@ -191,39 +207,46 @@ class MatchRun:
         report.step("Preparing tiles", 0.05, "regions")
 
     def search(self) -> None:
-        """Each region's best candidates, per shape class: index, calibrate, search."""
+        """Each region's best candidates, per shape class and detail level: index,
+        calibrate, search."""
         report, settings, need, cls, k = self.report, self.settings, self.need, self.cls, self.k
         self.cand_ref = np.full((self.n, self.kw), -1, np.int64)  # candidate index in its class
         self.costs = np.full((self.n, self.kw), np.inf, np.float32)
         searched = [0]
+
+        def found(rows, ids, cs):
+            self.cand_ref[rows, :k], self.costs[rows, :k] = ids, cs
+            searched[0] += len(rows)
+            report.detail(f"Searching: {searched[0]:,} of {len(need):,} regions",
+                          searched[0] / max(len(need), 1))  # fmt: skip
+            if report.previewing:
+                best = np.where(np.isfinite(self.costs[:, 0]), self.cand_ref[:, 0], -1)
+                self.show(PreviewStage.BEST, best, self.costs[:, 0])
+
         for c, aspect in enumerate(self.classes):
             regs = need[cls[need] == c]
             if not len(regs):
                 continue
-            report.step(f"Indexing tiles for {aspect:.3g}:1 regions",
-                        0.05 + 0.25 * c / len(self.classes))  # fmt: skip
+            progress = 0.05 + 0.25 * c / len(self.classes)
+            report.step(f"Indexing tiles for {aspect:.3g}:1 regions", progress)
             key, cands = self.matcher.candidates(aspect, settings, report.detail)
             if not len(cands):
                 continue
-            index = self.matcher.index(key, cands, settings, report.detail)
-            self.shapes[c] = (cands, index, regs)
-            report.step("Checking search accuracy", None, "index")
-            effort, stats = self._calibrate(cands, index, regs)
-            self.regret.append(stats)
-            self.efforts[c] = effort
-            report.step("Searching", 0.3 + 0.3 * c / len(self.classes), "calibrate")
-
-            def found(rows, ids, cs):
-                self.cand_ref[rows, :k], self.costs[rows, :k] = ids, cs
-                searched[0] += len(rows)
-                report.detail(f"Searching: {searched[0]:,} of {len(need):,} regions",
-                              searched[0] / max(len(need), 1))  # fmt: skip
-                if report.previewing:
-                    best = np.where(np.isfinite(self.costs[:, 0]), self.cand_ref[:, 0], -1)
-                    self.show(PreviewStage.BEST, best, self.costs[:, 0])
-
-            batched_search(cands, index, regs, self.targets.desc, self.weights, settings, k,
-                           effort, found)  # fmt: skip
+            self.shapes[c] = (cands, regs)
+            for level in np.unique(self.level[regs])[::-1]:  # full detail first
+                mine = regs[self.level[regs] == level]
+                if level != FULL_DETAIL:
+                    report.step(f"Indexing tiles for {aspect:.3g}:1 regions (less detail)",
+                                progress)  # fmt: skip
+                weights = level_weights(settings.weights(), int(level))
+                index = self.matcher.index(key, cands, settings, report.detail, weights)
+                report.step("Checking search accuracy", None, "index")
+                effort, stats = self._calibrate(cands, index, mine)
+                self.regret.append(stats)
+                self.searches[c, int(level)] = Search(index, effort)
+                report.step("Searching", 0.3 + 0.3 * c / len(self.classes), "calibrate")
+                batched_search(cands, index, mine, self.targets.desc, self.weights, settings, k,
+                               effort, found)  # fmt: skip
         report.step("Assigning tiles", 0.6, "search")
         if not self.shapes:
             raise ValueError("no tiles fit these regions (empty library?)")
@@ -243,14 +266,14 @@ class MatchRun:
             pins = pins.subset(keep)
             self.pin_ref = self.cand_ref[pins.region, :KEEP].copy()
             self.pin_cost = self.costs[pins.region, :KEEP].copy()
-            for c, (cands, index, regs) in list(shapes.items()):
+            for c, (cands, regs) in list(shapes.items()):
                 mine = np.flatnonzero(cls[pins.region] == c)
                 if not len(mine):
                     continue
                 rows = pins.region[mine]
                 cands, ref = cands.with_crops(self.library, pins.tile[mine], pins.rect[mine],
                                               pins.mirrored[mine])  # fmt: skip
-                shapes[c] = (cands, index, regs)
+                shapes[c] = (cands, regs)
                 _, cost = rerank(cands, ref[:, None], self.targets.desc[rows], self.weights[rows],
                                  self.settings.crop_penalty)  # fmt: skip
                 self.cand_ref[rows], self.costs[rows] = -1, np.inf
@@ -268,7 +291,7 @@ class MatchRun:
         self.free = free = need[~np.isin(need, self.pinned)]
         tiles = np.full((n, self.kw), -1, np.int64)
         self.cand_mean = np.zeros((n, self.kw, 3), np.float32)
-        for cands, _, regs in self.shapes.values():
+        for cands, regs in self.shapes.values():
             ref = self.cand_ref[regs]
             safe = np.maximum(ref, 0)
             tiles[regs] = np.where(ref >= 0, cands.tile[safe], -1)
@@ -402,7 +425,7 @@ class MatchRun:
             rule_violations=int(over + close),
             forced=int(self.forced.sum()),
             manual=int(len(self.pinned)),
-            candidates=int(sum(len(c) for c, _, _ in self.shapes.values())),
+            candidates=int(sum(len(c) for c, _ in self.shapes.values())),
             gamut_gap=self._gamut_gap(),
             timings=self.report.timings,
         )
@@ -411,29 +434,36 @@ class MatchRun:
     # Searching
 
     def _calibrate(self, cands, index, regs):
-        """Raise search effort until sampled approximate results are close to exact."""
+        """(effort, RegretStats): search effort for these regions, raised (x4) while
+        sampled approximate results cost noticeably more than exact ones, as long as
+        that clearly helps, up to every cell of the index."""
         settings, desc, weights = self.settings, self.targets.desc, self.weights
         rng = np.random.default_rng(0)
         sample = rng.choice(regs, min(len(regs), REGRET_SAMPLES), replace=False)
         _, exact = exact_best(cands, desc[sample], weights[sample], settings.crop_penalty)
-        effort = start = settings.search_effort
+        effort = start = max(1, min(settings.search_effort, index.groups))
+        kept = None
         while True:
             if not index.exact:
-                share = math.log(effort / start) / max(math.log(MAX_EFFORT / start), 1e-9)
-                self.report.detail(f"Trying search effort {effort:,} (at most {MAX_EFFORT:,})",
+                share = math.log(effort / start) / max(math.log(index.groups / start), 1e-9)
+                self.report.detail(f"Trying search effort {effort:,} (at most {index.groups:,})",
                                    min(max(share, 0.0), 1.0))  # fmt: skip
             ids = index.search(desc[sample], settings.candidates, effort)
             _, cs = rerank(cands, ids, desc[sample], weights[sample], settings.crop_penalty)
             approx = np.where(np.isfinite(cs[:, 0]), cs[:, 0], exact)
             gap = np.maximum(approx - exact, 0)
             scale = max(float(np.median(exact)), 1e-9)
-            relative = float(gap.mean() / scale)
-            if index.exact or relative <= REGRET_LIMIT or effort >= MAX_EFFORT:
-                return effort, RegretStats(
-                    len(sample), float(gap.mean()), float(np.percentile(gap, 95)), relative,
-                    effort, index.exact,
-                )  # fmt: skip
-            effort = min(MAX_EFFORT, effort * 4)
+            extra = 100 * (np.sqrt(np.maximum(approx, 0)) - np.sqrt(np.maximum(exact, 0)))
+            stats = RegretStats(
+                len(sample), float(gap.mean()), float(np.percentile(gap, 95)),
+                float(gap.mean() / scale), effort, index.exact, float(np.maximum(extra, 0).mean()),
+            )  # fmt: skip
+            if kept is not None and stats.relative > REGRET_GAIN * kept.relative:
+                return kept.effort, kept  # more effort barely helps: keep the cheaper search
+            kept = stats
+            if index.exact or stats.relative <= REGRET_LIMIT or effort >= index.groups:
+                return effort, stats
+            effort = min(index.groups, effort * 4)
 
     def _widen(self, regs, found=None, boost=4) -> None:
         """New candidate lists for regions (unplaced first), searched boost times harder
@@ -442,12 +472,13 @@ class MatchRun:
         settings, assign, cls, k = self.settings, self.assignment, self.cls, self.kw
         per_photo = settings.max_uses if settings.max_uses > 0 else UNLIMITED_USES
         rng = np.random.default_rng(0)
-        for c, (cands, index, _) in self.shapes.items():
-            r = regs[cls[regs] == c]
+        for (c, level), search in self.searches.items():
+            cands, index = self.shapes[c][0], search.index
+            r = regs[(cls[regs] == c) & (self.level[regs] == level)]
             if not len(r):
                 continue
             assign.unplace(r[assign.choice[r] >= 0])
-            effort = min(MAX_EFFORT, self.efforts[c] * boost)
+            effort = min(index.groups, search.effort * boost)
             exclude = None
             if settings.max_uses > 0:  # photos at their limit can't take any of these
                 full = np.flatnonzero(assign.uses >= settings.max_uses)
@@ -571,7 +602,7 @@ class MatchRun:
         placed = ref >= 0
         tint_target = (assign.tint_target if assign.tint_target is not None
                        else targets.desc[:, MEAN])  # fmt: skip
-        for c, (cands, _, _) in self.shapes.items():
+        for c, (cands, _) in self.shapes.items():
             rows = np.flatnonzero(placed & (self.cls == c))
             if not len(rows):
                 continue
@@ -593,7 +624,7 @@ class MatchRun:
         rect = np.zeros((n, 4), np.float32)
         mirrored = np.zeros(n, bool)
         mean = np.zeros((n, 3), np.float32)
-        for c, (cands, _, _) in self.shapes.items():
+        for c, (cands, _) in self.shapes.items():
             rows = np.flatnonzero((ref >= 0) & (self.cls == c))
             i = ref[rows]
             tile[rows], rect[rows], mirrored[rows] = cands.tile[i], cands.rect[i], cands.mirrored[i]
@@ -628,7 +659,7 @@ class MatchRun:
     def _gamut_gap(self) -> float:
         """Share of the visible area whose average color no tile comes close to."""
         need, area = self.need, self.area
-        means = np.concatenate([c.desc[:, MEAN] for c, _, _ in self.shapes.values()])
+        means = np.concatenate([c.desc[:, MEAN] for c, _ in self.shapes.values()])
         means = means.astype(np.float32)
         if len(means) > 200_000:
             means = means[np.random.default_rng(0).choice(len(means), 200_000, replace=False)]

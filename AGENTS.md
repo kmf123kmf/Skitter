@@ -13,6 +13,7 @@
 - `skitter.core` must not import Qt. Long core operations take `progress`/`cancelled` callbacks; the UI runs them via `Session` + `ui/jobs.Job`.
 - Settings are declared with `Param`s on a `Configurable` (`core/slicing/params.py`); `ParamForm` builds their UI.
 - Slicing runs in the background: operations take `apply(regions, ctx, progress)` / `subdivide(region, ctx, progress)` and should call `progress(fraction)` at natural points in slow work (it also cancels). Tests slice inline by default (`tests/conftest.py`); use the `background_slicing` fixture to test the worker thread.
+- New slicers: lattice patterns go through `slicing/frame.PinnedFrame` (anchor + rotation for free); shared settings (anchor, rotation, orientation, seed) come from `slicing/common.py`; size tiles with `ctx.tile_dims(scale)`.
 - numba kernels use `cache=True, nogil=True` (so background jobs don't block the UI thread).
 - Tests must never touch the real tile library: `tests/conftest.py` points `LOCALAPPDATA` at a temp dir; open libraries in `tmp_path`.
 - UI preferences go through `ui/preferences.settings()` (INI); `tests/conftest.py` redirects its path.

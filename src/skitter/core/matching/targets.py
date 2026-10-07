@@ -10,6 +10,10 @@ as per-dimension weights in [0, 1]:
 - Size: a cell covering fewer than a couple of source pixels carries no real
   detail, so small regions match on the coarser levels only.
 
+Regions are also grouped by detail level (`detail_levels`: which structure
+blocks they use at all), so each group is searched with an index weighted
+like its cost (see run.py).
+
 Hidden or masked cells get a structure value of zero (the region's average),
 so approximate search, which can't weight per query, leans toward tiles that
 are flat there instead of guessing.
@@ -124,3 +128,28 @@ def target_descriptors(
 
         desc[lo:hi], mask[lo:hi], visible[lo:hi] = d, mk, vis_frac
     return Targets(desc, mask, visible)
+
+
+# Detail levels. A search index ranks with fixed weights, so regions that lack
+# a whole structure block (too small for it, or hidden where it lies) would be
+# ranked on detail their cost ignores. Each level gets its own index instead.
+BLOCKS = (LEVEL1, LEVEL2, TEXTURE)  # structure blocks a region may lack
+FULL_DETAIL = (1 << len(BLOCKS)) - 1
+
+
+def detail_levels(mask: np.ndarray) -> np.ndarray:
+    """(R,) the structure blocks each region's mask uses at all, as bits (bit i:
+    BLOCKS[i]); FULL_DETAIL when it uses every one."""
+    level = np.zeros(len(mask), np.int64)
+    for i, block in enumerate(BLOCKS):
+        level |= (mask[:, block].max(axis=1, initial=0) > 0).astype(np.int64) << i
+    return level
+
+
+def level_weights(weights, level: int) -> np.ndarray:
+    """Dimension weights with the structure blocks a detail level lacks turned off."""
+    weights = np.array(weights, dtype=np.float64)
+    for i, block in enumerate(BLOCKS):
+        if not (level >> i) & 1:
+            weights[block] = 0.0
+    return weights
