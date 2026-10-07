@@ -389,9 +389,12 @@ class MatchRun:
                 assign.refine_pass(self.order, self.importance)
             self.show_assigned(PreviewStage.ADAPTIVE)
             self.quality, _ = self._quality(self._raster)
-            # Kept only if better and within the rules as much as before (the score
-            # doesn't see reuse, so it could trade rule breaks for a sliver of quality).
-            if self.quality.score < best["score"] - 1e-3 and forced.sum() <= best["forced"].sum():
+            # Kept only if better, within the rules as much as before and leaving no more
+            # regions without a tile (the score sees neither reuse nor a missing tile, so
+            # it could trade rule breaks or holes for a sliver of quality).
+            if (self.quality.score < best["score"] - 1e-3
+                    and forced.sum() <= best["forced"].sum()
+                    and self._unplaced() <= best["unplaced"]):  # fmt: skip
                 improvement = (best["score"] - self.quality.score) / max(best["score"], 1e-9)
                 best = self._keep()
                 if improvement < 0.005:
@@ -521,7 +524,10 @@ class MatchRun:
                     rows = np.asarray(rows, np.int64)
                     ids, cs = rerank(cands, np.asarray(lists, np.int64), self.targets.desc[rows],
                                      self.weights[rows], settings.crop_penalty)  # fmt: skip
-                    self._replace(cands, rows, ids, cs)
+                    # Regions the search found nothing for (every photo it reaches is at
+                    # its limit) keep their lists: forcing still needs candidates.
+                    some = np.isfinite(cs[:, 0])
+                    self._replace(cands, rows[some], ids[some], cs[some])
                     if found is not None:
                         found(rows)
 
@@ -574,13 +580,17 @@ class MatchRun:
         ref[rows] = self.cand_ref[rows, choice[rows]]
         return ref
 
+    def _unplaced(self) -> int:
+        """Regions that need a tile and have none."""
+        return int((self.assignment.choice[self.need] < 0).sum())
+
     def _keep(self) -> dict:
         """The state an adaptive pass may need to go back to."""
         assign = self.assignment
         return dict(score=self.quality.score, choice=assign.choice.copy(),
                     tiles=assign.tiles.copy(), costs=assign.costs.copy(),
                     cand_ref=self.cand_ref.copy(), cand_mean=self.cand_mean.copy(),
-                    forced=self.forced.copy())  # fmt: skip
+                    forced=self.forced.copy(), unplaced=self._unplaced())  # fmt: skip
 
     def _restore(self, kept: dict) -> None:
         settings, old = self.settings, self.assignment

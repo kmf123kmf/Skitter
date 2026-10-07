@@ -506,11 +506,15 @@ def test_matcher_end_to_end(library):
         assert de <= 1.3 * bound + 0.01, (q, de, bound)
     assert result.quality.covered == 1.0
 
-    # Regions too small for fine detail are searched at their own detail level.
+    # Regions too small for fine detail are searched at their own detail level. And with
+    # far more regions than uses allow (1,200 > 122 photos x 3), every one still gets a
+    # tile: re-searches that find no photo under its limit keep the region's candidates
+    # for forcing, and adaptive passes never keep holes (the score doesn't see them).
     small = flat_ctx(target_image(), columns=40, tile=20)  # 4 source px per tile
     small_result = Matcher(library).run(GridSlicer().apply(small.canvas(), small), small,
-                                        MatchSettings(max_uses=0, refine_seconds=0.1))  # fmt: skip
+                                        MatchSettings(refine_seconds=0.1))  # fmt: skip
     assert (small_result.tile >= 0).all() and len(small_result.regret) == 1
+    assert small_result.stats["placed"] == small_result.stats["regions"] == 1200
     assert small_result.regret[0].extra_de < 1e-3  # exact search: no regret
 
     # Tinting toward each region's color can only bring the proxy closer.
