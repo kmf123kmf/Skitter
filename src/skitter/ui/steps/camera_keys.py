@@ -28,8 +28,11 @@ from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QCheckBox,
     QGroupBox,
+    QHBoxLayout,
     QLabel,
     QMenu,
+    QMessageBox,
+    QPushButton,
     QToolButton,
     QVBoxLayout,
 )
@@ -120,6 +123,12 @@ class CameraKeys(QObject):
 
     def build_group(self) -> QGroupBox:
         self.count = QLabel()
+        self.clear_button = QPushButton("Clear All…")
+        self.clear_button.setToolTip("Remove every key: the camera shows the video's framing.")
+        self.clear_button.clicked.connect(lambda: self.clear_keys())
+        top = QHBoxLayout()
+        top.addWidget(self.count, stretch=1)
+        top.addWidget(self.clear_button)
         self.hint = muted(QLabel())
         self.hint.setWordWrap(True)
         self.stretch = QCheckBox("Keep keys in step with the animation")
@@ -134,7 +143,7 @@ class CameraKeys(QObject):
         self.form.changed.connect(self._on_field)
         group = QGroupBox("Keyframes")
         layout = QVBoxLayout(group)
-        layout.addWidget(self.count)
+        layout.addLayout(top)
         layout.addWidget(self.stretch)
         layout.addWidget(self.form)
         layout.addWidget(self.hint)
@@ -182,6 +191,18 @@ class CameraKeys(QObject):
         index = self.selected if self.selected >= 0 else self._key_index_at(self.step.player.time)
         if index >= 0:
             self._set(self.track.without(index))
+
+    def clear_keys(self, confirm: bool = True) -> bool:
+        """Remove every key (asking first, if confirm)."""
+        keys = self.track.keys
+        if not keys:
+            return False
+        if confirm:
+            answer = QMessageBox.question(self.step, "Camera Keys", f"Remove all {len(keys)} keys?")
+            if answer != QMessageBox.StandardButton.Yes:
+                return False
+        self._set(CameraTrack((), self.track.stretch))
+        return True
 
     def jump(self, direction: int) -> None:
         clock = self.clock()
@@ -314,6 +335,7 @@ class CameraKeys(QObject):
         self.next_action.setEnabled(has and bool(keys))
         if not hasattr(self, "count"):
             return
+        self.clear_button.setEnabled(bool(keys))
         noun = "key" if len(keys) == 1 else "keys"
         self.count.setText(f"{len(keys)} {noun}" + ("" if keys else
                            ": the camera shows the video's framing."))  # fmt: skip
@@ -329,8 +351,7 @@ class CameraKeys(QObject):
             hint = ("Looking through the camera: drag to pan, wheel to zoom, Shift+wheel to "
                     "turn, then Add Key (K).")  # fmt: skip
         elif not keys:
-            hint = ("Look through camera (C) to frame a shot and Add Key (K), or write a "
-                    "ready-made move's keys under Camera Moves.")  # fmt: skip
+            hint = "Look through camera (C) to frame a shot, then Add Key (K)."
         else:
             hint = "Click a key on the timeline to select it; drag it to retime it."
         self.hint.setText(hint)

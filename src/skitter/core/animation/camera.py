@@ -9,8 +9,7 @@ the video's framing (zoom 1 shows exactly the view_rect framing) and a turn
 (radians, clockwise: the picture looks turned the other way).
 
 A `CameraPath` gives the shot at any time on the video's clock: the
-keyframes of keyframes.py make one, and camera_moves.py writes keys for
-ready-made moves. `keep_on_mosaic` places a shot on a scene.
+keyframes of keyframes.py make one.
 """
 
 import math
@@ -18,9 +17,6 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
 import numpy as np
-
-from skitter.core.animation.video import content_rect
-from skitter.core.scene import MosaicScene
 
 WorldRect = tuple[float, float, float, float]  # x, y, width, height (mosaic units)
 
@@ -74,18 +70,3 @@ class StillPath(CameraPath):
     @property
     def max_zoom(self) -> float:
         return self.still.zoom
-
-
-def keep_on_mosaic(scene: MosaicScene, base: WorldRect, point, zoom: float) -> tuple[float, float]:
-    """A frame center near point (table units) that keeps a frame at this zoom on the
-    mosaic where it can (centered on any axis where the frame is the wider)."""
-    x0, y0, x1, y1 = content_rect(scene)
-    w, h = base[2] / zoom, base[3] / zoom
-    center = []
-    for lo, hi, size, c in ((x0, x1, w, point[0]), (y0, y1, h, point[1])):
-        if size >= hi - lo:
-            c = (lo + hi) / 2
-        else:
-            c = min(max(c, lo + size / 2), hi - size / 2)
-        center.append(float(c))
-    return center[0], center[1]

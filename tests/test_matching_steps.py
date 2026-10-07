@@ -1156,21 +1156,15 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     animate.follow.setChecked(True)
     base, _ = animate._frame_rect()
     assert not session.project.camera_track.keys and animate.shot().zoom == 1.0  # no keys: still
-    assert not animate.clear_keys(confirm=False)  # nothing to clear
-
-    # Follow the action writes its keys (settings alone write nothing).
-    assert session.project.camera_move_id == "follow" and animate.camera_form._rows
-    animate.camera_form.editor("count").widget.setValue(5)
-    assert session.project.camera_move.count == 5 and not session.project.camera_track.keys
-    assert animate.write_move_keys(confirm=False)
-    assert len(session.project.camera_track.keys) == 5 and session.modified
-    assert len(animate.transport.timeline.keys) == 5
+    assert not animate.keys.clear_keys(confirm=False)  # nothing to clear
+    assert not animate.keys.clear_button.isEnabled()
 
     # A pull back: the export frame starts small (close up), ends on the whole view.
     home = home_shot(base)
     pull_back = [CameraKey(KeyTime("body", 0.0), Shot(home.center, 4.0)),
                  CameraKey(KeyTime("body", 0.8), home)]  # fmt: skip
     session.set_camera_track(CameraTrack.of(pull_back))
+    assert len(animate.transport.timeline.keys) == 2 and animate.keys.clear_button.isEnabled()
     animate.player.seek(0.0)
     w = animate._frame_line.instances["size"][0][0]
     assert w == pytest.approx(base[2] / 4) and animate.shot().zoom == pytest.approx(4.0)
@@ -1200,7 +1194,8 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     assert animate.canvas.camera.rotation == pytest.approx(-math.pi / 4)
     animate.player.seek(animate.player.duration)
     assert animate.canvas.camera.rotation == pytest.approx(0.0)
-    assert animate.clear_keys(confirm=False) and not session.project.camera_track.keys
+    assert animate.keys.clear_keys(confirm=False) and not session.project.camera_track.keys
+    assert not animate.transport.timeline.keys
 
 
 def test_transport_bar_steps_jumps_loops_and_changes_speed(sliced, photos, qapp):

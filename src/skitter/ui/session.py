@@ -9,14 +9,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
-from skitter.core.animation.keyframes import CameraTrack
-from skitter.core.animation.video import (
-    check_video,
-    output_size,
-    plan_video,
-    sync_size,
-    view_rect,
-)
+from skitter.core.animation.video import check_video, plan_video, sync_size
 from skitter.core.assembly import (
     ExportCancelled,
     ExportReport,
@@ -201,19 +194,15 @@ class Session(QObject):
         loaded: path already read (load_project), e.g. off the UI thread."""
         if loaded is None:
             loaded = load_project(path)
-        problems = self._replace_project(loaded.project, loaded.committed, loaded.mosaic,
-                                         loaded.camera_from_move)  # fmt: skip
+        problems = self._replace_project(loaded.project, loaded.committed, loaded.mosaic)
         self.project_path = Path(path)
         self.load_problems = loaded.problems + problems
         self.opened_view = loaded.view
         self._saved_state = self._state()
 
-    def _replace_project(
-        self, project: Project, committed: bool, mosaic, camera_from_move: str | None = None
-    ) -> list[str]:
+    def _replace_project(self, project: Project, committed: bool, mosaic) -> list[str]:
         """Make project the session's, replaying what it holds; returns problems met
-        restoring its mosaic. camera_from_move: write that move's keys once the mosaic
-        shows (older projects ran camera moves live)."""
+        restoring its mosaic."""
         if self.busy:
             raise RuntimeError(f"a {self.busy} job is running")
         if self._slicing_job is not None:
@@ -248,20 +237,9 @@ class Session(QObject):
                 self.slicing_changed.emit()
                 if mosaic is not None:
                     problems += self._restore_mosaic(mosaic)
-        if camera_from_move is not None and self.scene is not None:
-            self._keys_from_move(camera_from_move)
         self.matching_changed.emit()
         self.animation_edited()
         return problems
-
-    def _keys_from_move(self, move_id: str) -> None:
-        """Write a camera move's keys for the current mosaic (as the Animate tab would)."""
-        project, scene = self.project, self.scene
-        timeline = project.choreography.timeline(scene, project.animation_look)
-        width, height = output_size(project.video_settings, scene)
-        base = view_rect(scene, width, height, project.video_settings)
-        keys = project.camera_moves[move_id].keys(scene, timeline, base)
-        project.camera_track = CameraTrack.of(keys)
 
     def _restore_mosaic(self, mosaic) -> list[str]:
         """Show a saved mosaic over the current regions; returns what went wrong."""
