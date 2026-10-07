@@ -9,7 +9,8 @@ shows. The Video group edits the settings that decide what the video shows
 both stay in step); "Show export frame" outlines what the video shows at the
 current moment (the camera move's shot) and dims the rest, and "Follow
 camera" keeps the view on it (panning or zooming by hand stops following).
-A new mosaic opens on its finished state; Play runs from the start.
+A new mosaic opens on its finished state; Play runs from the start. Playback
+controls sit under the view (ui/widgets/transport.py).
 """
 
 import math
@@ -23,8 +24,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSlider,
     QVBoxLayout,
+    QWidget,
 )
 
 from skitter.core.animation.camera import CameraPath, Shot, home_shot
@@ -40,8 +41,8 @@ from skitter.ui.render.tile_textures import TileTextures
 from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.style import muted
 from skitter.ui.widgets.param_form import ParamForm
+from skitter.ui.widgets.transport import TransportBar
 
-SLIDER_STEPS = 1000
 MARGIN = 0.05  # view margin around the mosaic, share of its size
 FRAME_DIM = 0.6  # opacity of the shade outside the export frame
 FAR = 1e7  # mosaic units: "everywhere" for the shade
@@ -62,23 +63,32 @@ class AnimateStep(StepPage):
         self._stale = False  # manual picks changed the mosaic while this tab was hidden
 
         self.canvas = MosaicCanvas()
+        self.canvas.setFocusPolicy(Qt.FocusPolicy.ClickFocus)  # the playback keys work
         self.player = TimelinePlayer(self.canvas, self)
-        self.player.time_changed.connect(self._show_time)
         self.player.time_changed.connect(self._show_shot)
         self.canvas.view_changed.connect(self._on_view_changed)
-        self.player.playing_changed.connect(self._show_playing)
+        self.transport = TransportBar(self.player)
+        self.transport.status.setText("No mosaic: match tiles first.")
+        self.canvas.fps_changed.connect(self.transport.set_fps)
         self._shade = self.canvas.add_layer(SpriteLayer(None, make_instances(0)))
         self._frame_line = self.canvas.add_layer(
             SpriteLayer(None, make_instances(0), outline_px=1.5, edge_px=1.0)
         )
 
+        view = QWidget()
+        column = QVBoxLayout(view)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.setSpacing(0)
+        column.addWidget(self.canvas, stretch=1)
+        column.addWidget(self.transport)
+        self.transport.install_shortcuts(view)
+
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self.canvas, stretch=1)
+        layout.addWidget(view, stretch=1)
         layout.addWidget(
             side_panel(
-                self._build_playback_group(),
                 self._build_settings_group(),
                 self._build_camera_group(),
                 self._build_video_group(),
@@ -100,34 +110,6 @@ class AnimateStep(StepPage):
         return self.session.project
 
     # Construction
-
-    def _build_playback_group(self) -> QGroupBox:
-        self.play_button = QPushButton("Play")
-        self.play_button.clicked.connect(self.toggle_play)
-        restart = QPushButton("Restart")
-        restart.clicked.connect(self.restart)
-        buttons = QHBoxLayout()
-        buttons.addWidget(self.play_button)
-        buttons.addWidget(restart)
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(0, SLIDER_STEPS)
-        self.slider.sliderMoved.connect(self._on_slider)
-        self.time_label = QLabel("—")
-        self.fps_label = muted(QLabel())
-        self.canvas.fps_changed.connect(
-            lambda fps: self.fps_label.setText(f"{fps:.0f} fps" if fps else "")
-        )
-        self.status = muted(QLabel("No mosaic: match tiles first."))
-        group = QGroupBox("Playback")
-        layout = QVBoxLayout(group)
-        layout.addLayout(buttons)
-        layout.addWidget(self.slider)
-        times = QHBoxLayout()
-        times.addWidget(self.time_label, stretch=1)
-        times.addWidget(self.fps_label)
-        layout.addLayout(times)
-        layout.addWidget(self.status)
-        return group
 
     def _build_settings_group(self) -> QGroupBox:
         self.look_form = ParamForm()
@@ -246,26 +228,28 @@ class AnimateStep(StepPage):
         if self.textures is not None:
             self.textures.changed.disconnect(self._on_textures)
             self.textures.patched.disconnect(self._on_textures)
-            self.textures.status_changed.disconnect(self.status.setText)
+            self.textures.status_changed.disconnect(self.transport.status.setText)
         self.scene, self.textures = scene, self.session.textures
         if scene is None or self.textures is None or not len(scene):
             self.scene = self.textures = None
             self.camera_path = None
             self.player.set_timeline(None)
             self.player.set_content(None, None)
-            self.status.setText("No mosaic: match tiles first.")
+            self.transport.refresh()
+            self.transport.status.setText("No mosaic: match tiles first.")
             self._show_export_frame()
             self.state_changed.emit()
             return
         self.textures.changed.connect(self._on_textures)
         self.textures.patched.connect(self._on_textures)  # crops for picks read meanwhile
-        self.textures.status_changed.connect(self.status.setText)
-        self.status.setText(self.textures.status)
+        self.textures.status_changed.connect(self.transport.status.setText)
+        self.transport.status.setText(self.textures.status)
         timeline = self.choreography.timeline(scene, self.project.animation_look)
         self.player.set_timeline(timeline, time=timeline.duration)  # open on the finished mosaic
         self._plan_camera()
         self.player.set_camera(TableCamera.for_scene(scene, self.project.animation_look))
         self.player.set_content(self.textures.pages, self.textures.instances())
+        self._sync_transport()
         self._show_export_frame()
         self._fit()
         self.state_changed.emit()
@@ -314,6 +298,7 @@ class AnimateStep(StepPage):
         self.camera_form.refresh()
         self._apply_look()
         self._replan()
+        self._sync_transport()
         self._show_export_frame()
         if self.show_frame.isChecked() and self.follow.isChecked():
             self._fit()  # keep the whole frame in view as its shape changes
@@ -326,6 +311,11 @@ class AnimateStep(StepPage):
         timeline = self.choreography.timeline(self.scene, self.project.animation_look)
         self._plan_camera(timeline)
         self.player.set_timeline(timeline, timeline.duration if at_end else None)
+
+    def _sync_transport(self) -> None:
+        """Frame steps match the export's frames; controls follow whether there's a timeline."""
+        self.transport.frame_step = 1.0 / float(self.project.video_settings.fps)
+        self.transport.refresh()
 
     def _plan_camera(self, timeline=None) -> None:
         """The camera move over the timeline, framed like the video."""
@@ -440,27 +430,8 @@ class AnimateStep(StepPage):
     # Playback
 
     def toggle_play(self) -> None:
-        if self.player.playing:
-            self.player.pause()
-        else:
-            self.player.play()
+        self.transport.toggle_play()
 
     def restart(self) -> None:
-        self.player.pause()
-        self.player.seek(0.0)
+        self.transport.to_start()
         self.player.play()
-
-    def _on_slider(self, value: int) -> None:
-        self.player.pause()
-        self.player.seek(value / SLIDER_STEPS * self.player.duration)
-
-    def _show_time(self, t: float) -> None:
-        duration = self.player.duration
-        self.time_label.setText(f"{t:.2f} s of {duration:.2f} s" if duration else "—")
-        if not self.slider.isSliderDown():
-            self.slider.blockSignals(True)
-            self.slider.setValue(round(t / duration * SLIDER_STEPS) if duration else 0)
-            self.slider.blockSignals(False)
-
-    def _show_playing(self, playing: bool) -> None:
-        self.play_button.setText("Pause" if playing else "Play")

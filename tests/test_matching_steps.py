@@ -523,7 +523,8 @@ def test_animate_tab_plays_the_scene(sliced, photos, qapp):
     animate = window.step(AnimateStep)
     index = window.tabs.indexOf(animate)
     assert window.tabs.tabText(index) == "Animate" and index == len(window.steps) - 1
-    assert not window.tabs.isTabEnabled(index) and "match tiles" in animate.status.text()
+    assert not window.tabs.isTabEnabled(index) and "match tiles" in animate.transport.status.text()
+    assert not animate.transport.play_action.isEnabled()  # nothing to play yet
     build_library(window, photos)
     session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
@@ -538,7 +539,9 @@ def test_animate_tab_plays_the_scene(sliced, photos, qapp):
     assert animate.scene is scene and player.timeline is not None
 
     # It opens on the finished mosaic, exactly as the Matching preview draws it.
-    assert player.time == pytest.approx(player.duration) and animate.slider.value() == 1000
+    transport = animate.transport
+    assert player.time == pytest.approx(player.duration)
+    assert transport.slider.value() == transport.slider.maximum()
     final = session.textures.instances()
     for field in ("pos", "size", "rotation", "layer", "uv", "offset"):
         np.testing.assert_allclose(player.layer.instances[field], final[field], atol=1e-5)
@@ -546,11 +549,11 @@ def test_animate_tab_plays_the_scene(sliced, photos, qapp):
 
     # Play starts from the beginning: nothing has landed yet.
     animate.toggle_play()
-    assert player.playing and animate.play_button.text() == "Pause"
+    assert player.playing and transport.play_action.text() == "Pause"
     assert player.time == 0 and np.all(player.layer.instances["alpha"] == 0)
 
     # Scrubbing pauses; settings changes replan and keep the moment.
-    animate._on_slider(500)
+    transport.scrub(transport.slider.maximum() // 2)
     assert not player.playing and player.time == pytest.approx(4.0)  # half of 8 s
     animate.form.editor("duration").widget.setValue(20)
     assert player.duration == pytest.approx(20) and player.time == pytest.approx(4.0)
@@ -1182,3 +1185,68 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     assert animate.canvas.camera.rotation == pytest.approx(-math.pi / 4)
     animate.player.seek(animate.player.duration)
     assert animate.canvas.camera.rotation == pytest.approx(0.0)
+
+
+def test_transport_bar_steps_jumps_loops_and_changes_speed(sliced, photos, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from skitter.ui.steps.animate import AnimateStep
+
+    window = sliced
+    session = window.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.start_matching()
+    session.wait_for_job()
+    window.show()
+    animate = window.step(AnimateStep)
+    window.tabs.setCurrentWidget(animate)
+    player, transport = animate.player, animate.transport
+    assert transport.play_action.isEnabled()
+    assert transport.frame_step == pytest.approx(1 / 30)  # the export's frame rate
+
+    # Under the view, not in the side panel.
+    assert transport.parent() is animate.canvas.parent()
+
+    transport.to_start()
+    assert player.time == 0
+    transport.step(3)
+    assert player.time == pytest.approx(3 / 30)
+    transport.step(-1)
+    assert player.time == pytest.approx(2 / 30)
+    transport.jump(1.0)
+    assert player.time == pytest.approx(2 / 30 + 1.0)
+    transport.to_end()
+    assert player.time == pytest.approx(player.duration)
+    transport.step(5)
+    assert player.time == pytest.approx(player.duration)  # clamped
+
+    # The keys work while the view has focus.
+    animate.canvas.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(animate.canvas, Qt.Key.Key_Home)
+    assert player.time == 0
+    QTest.keyClick(animate.canvas, Qt.Key.Key_Right)
+    assert player.time == pytest.approx(1 / 30)
+    QTest.keyClick(animate.canvas, Qt.Key.Key_Space)
+    assert player.playing
+    QTest.keyClick(animate.canvas, Qt.Key.Key_Space)
+    assert not player.playing
+
+    # Frame steps follow the video's frame rate.
+    session.project.video_settings.update(frame_rate="25")
+    session.animation_edited()
+    assert transport.frame_step == pytest.approx(1 / 25)
+
+    # Loop: the clock runs past the end and wraps around; speed scales it.
+    transport.loop_action.setChecked(True)
+    transport.speed.setCurrentIndex(transport.speed.findData(2.0))
+    assert player.loop and player.speed == 2.0
+    player.seek(player.duration - 0.1)
+    player.play()
+    step = animate.canvas._animations[-1][0]
+    assert step(0.0)
+    assert step(0.2)  # 0.4 s of animation at 2x: past the end, so round again
+    assert player.playing and player.time < 0.5
+    player.pause()

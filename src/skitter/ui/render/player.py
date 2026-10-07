@@ -67,6 +67,8 @@ class TimelinePlayer(QObject):
         self.air_layer: SpriteLayer | None = None  # tiles in the air (layer's textures)
         self._base: np.ndarray | None = None
         self.time = 0.0
+        self.loop = False  # playing on from the start after the end
+        self.speed = 1.0  # animation seconds per real second
         self._run: object | None = None  # identifies the running playback
 
     @property
@@ -120,12 +122,16 @@ class TimelinePlayer(QObject):
         if self.time >= self.duration:
             self.seek(0.0)  # draw the first frame now, not the finished one
         run = self._run = object()
-        start = self.time
+        origin = {"time": self.time, "elapsed": 0.0}  # where this stretch of playing began
 
         def step(elapsed: float) -> bool:
             if run is not self._run:
                 return False
-            self.seek(start + elapsed)
+            t = origin["time"] + (elapsed - origin["elapsed"]) * self.speed
+            if t >= self.duration and self.loop and self.duration > 0:
+                origin["time"], origin["elapsed"] = 0.0, elapsed  # round again from the start
+                t = 0.0
+            self.seek(t)
             if self.time >= self.duration:
                 self.pause()
                 return False

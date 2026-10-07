@@ -158,6 +158,38 @@ def _zoom_actual(p: QPainter, color: QColor) -> None:
     p.drawText(QRectF(0, 0, 24, 24), Qt.AlignmentFlag.AlignCenter, "1:1")
 
 
+def _filled(p: QPainter, color: QColor, *points: tuple[float, float]) -> None:
+    p.setBrush(color)
+    p.drawPolygon(QPolygonF([QPointF(x, y) for x, y in points]))
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def _play(p: QPainter, color: QColor) -> None:
+    _filled(p, color, (7, 4.5), (19.5, 12), (7, 19.5))
+
+
+def _pause(p: QPainter, color: QColor) -> None:
+    p.setBrush(color)
+    p.drawRoundedRect(QRectF(6.5, 5, 3.5, 14), 0.8, 0.8)
+    p.drawRoundedRect(QRectF(14, 5, 3.5, 14), 0.8, 0.8)
+    p.setBrush(Qt.BrushStyle.NoBrush)
+
+
+def _to_start(p: QPainter, color: QColor) -> None:
+    p.drawLine(QPointF(5.5, 5), QPointF(5.5, 19))
+    _filled(p, color, (19, 5), (8.5, 12), (19, 19))
+
+
+def _step_back(p: QPainter, color: QColor) -> None:
+    p.drawLine(QPointF(7.5, 6.5), QPointF(7.5, 17.5))
+    _filled(p, color, (17.5, 6.5), (10, 12), (17.5, 17.5))
+
+
+def _loop(p: QPainter, color: QColor) -> None:
+    p.drawArc(QRectF(4, 6, 16, 12), 30 * 16, 300 * 16)
+    _filled(p, color, (16.5, 3.5), (21.5, 7.5), (16, 10))
+
+
 # Public icons
 
 
@@ -211,3 +243,31 @@ def zoom_fit() -> QIcon:
 
 def zoom_actual() -> QIcon:
     return _make_icon(_zoom_actual)
+
+
+def play() -> QIcon:
+    return _make_icon(_play)
+
+
+def pause() -> QIcon:
+    return _make_icon(_pause)
+
+
+def to_start() -> QIcon:
+    return _make_icon(_to_start)
+
+
+def to_end() -> QIcon:
+    return _make_icon(_mirrored(_to_start))
+
+
+def step_back() -> QIcon:
+    return _make_icon(_step_back)
+
+
+def step_forward() -> QIcon:
+    return _make_icon(_mirrored(_step_back))
+
+
+def loop() -> QIcon:
+    return _make_icon(_loop)
