@@ -2,12 +2,14 @@
 
 Pick a choreography (core/animation), edit its settings and the background,
 then play or scrub its timeline, and export it as a video (Export
-Animation). The choreographies, the look and the video settings live in the
-project, so the export renders exactly what this tab shows. The Video group
-edits the settings that decide what the video shows (size and framing; the
-Export Animation window edits the same settings, and both stay in step);
-"Show export frame" outlines that area and dims the rest. A new mosaic opens
-on its finished state; Play runs from the start.
+Animation). The choreographies, the camera moves, the look and the video
+settings live in the project, so the export renders exactly what this tab
+shows. The Video group edits the settings that decide what the video shows
+(size and framing; the Export Animation window edits the same settings, and
+both stay in step); "Show export frame" outlines what the video shows at the
+current moment (the camera move's shot) and dims the rest, and "Follow
+camera" keeps the view on it (panning or zooming by hand stops following).
+A new mosaic opens on its finished state; Play runs from the start.
 """
 
 from PySide6.QtCore import Qt, Signal
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from skitter.core.animation.camera import CameraPath
 from skitter.core.animation.look import TableCamera
 from skitter.core.animation.video import output_size, view_rect
 from skitter.core.scene import MosaicScene
@@ -53,11 +56,14 @@ class AnimateStep(StepPage):
         super().__init__(session, parent)
         self.scene: MosaicScene | None = None
         self.textures: TileTextures | None = None
+        self.camera_path: CameraPath | None = None  # the camera move over the timeline
         self._stale = False  # manual picks changed the mosaic while this tab was hidden
 
         self.canvas = MosaicCanvas()
         self.player = TimelinePlayer(self.canvas, self)
         self.player.time_changed.connect(self._show_time)
+        self.player.time_changed.connect(self._show_shot)
+        self.canvas.view_changed.connect(self._on_view_changed)
         self.player.playing_changed.connect(self._show_playing)
         self._shade = self.canvas.add_layer(SpriteLayer(None, make_instances(0)))
         self._frame_line = self.canvas.add_layer(
@@ -72,6 +78,7 @@ class AnimateStep(StepPage):
             side_panel(
                 self._build_playback_group(),
                 self._build_settings_group(),
+                self._build_camera_group(),
                 self._build_video_group(),
             )  # fmt: skip
         )
@@ -149,6 +156,28 @@ class AnimateStep(StepPage):
         self._show_choreography()
         return group
 
+    def _build_camera_group(self) -> QGroupBox:
+        self.camera_box = QComboBox()
+        for move in self.project.camera_moves.values():
+            self.camera_box.addItem(move.name, move.id)
+            index = self.camera_box.count() - 1
+            self.camera_box.setItemData(index, move.description, Qt.ItemDataRole.ToolTipRole)
+        self.camera_box.setCurrentIndex(self.camera_box.findData(self.project.camera_move_id))
+        self.camera_box.currentIndexChanged.connect(self._on_camera_move)
+        self.camera_description = muted(QLabel())
+        self.camera_description.setWordWrap(True)
+        self.camera_form = ParamForm()
+        self.camera_form.changed.connect(lambda _: self.session.animation_edited())
+        group = QGroupBox("Camera")
+        layout = QVBoxLayout(group)
+        top = QFormLayout()
+        top.addRow("Move:", self.camera_box)
+        layout.addLayout(top)
+        layout.addWidget(self.camera_description)
+        layout.addWidget(self.camera_form)
+        self._show_camera_move()
+        return group
+
     def _build_video_group(self) -> QGroupBox:
         self.show_frame = QCheckBox("Show export frame")
         self.show_frame.setToolTip(
@@ -158,6 +187,16 @@ class AnimateStep(StepPage):
             preferences.settings().value("animate/show_frame", "false") == "true"
         )
         self.show_frame.toggled.connect(self._on_show_frame)
+        self.follow = QCheckBox("Follow camera")
+        self.follow.setToolTip(
+            "Keep the view on what the video shows as the camera moves. Panning or zooming "
+            "by hand stops following."
+        )
+        self.follow.setChecked(
+            preferences.settings().value("animate/follow_camera", "true") == "true"
+        )
+        self.follow.toggled.connect(self._on_follow)
+        self.follow.setEnabled(self.show_frame.isChecked())
         self.video_form = ParamForm()
         self.video_form.set_target(self.project.video_settings, only=FRAME_SETTINGS)
         self.video_form.changed.connect(lambda _: self.session.animation_edited())
@@ -167,6 +206,7 @@ class AnimateStep(StepPage):
         group = QGroupBox("Video")
         layout = QVBoxLayout(group)
         layout.addWidget(self.show_frame)
+        layout.addWidget(self.follow)
         layout.addWidget(self.video_form)
         layout.addWidget(self.export_button)
         return group
@@ -208,6 +248,7 @@ class AnimateStep(StepPage):
         self.scene, self.textures = scene, self.session.textures
         if scene is None or self.textures is None or not len(scene):
             self.scene = self.textures = None
+            self.camera_path = None
             self.player.set_timeline(None)
             self.player.set_content(None, None)
             self.status.setText("No mosaic: match tiles first.")
@@ -220,6 +261,7 @@ class AnimateStep(StepPage):
         self.status.setText(self.textures.status)
         timeline = self.choreography.timeline(scene, self.project.animation_look)
         self.player.set_timeline(timeline, time=timeline.duration)  # open on the finished mosaic
+        self._plan_camera()
         self.player.set_camera(TableCamera.for_scene(scene, self.project.animation_look))
         self.player.set_content(self.textures.pages, self.textures.instances())
         self._show_export_frame()
@@ -240,6 +282,10 @@ class AnimateStep(StepPage):
         )
         self.choreography_box.blockSignals(False)
         self._show_choreography()
+        self.camera_box.blockSignals(True)
+        self.camera_box.setCurrentIndex(self.camera_box.findData(self.project.camera_move_id))
+        self.camera_box.blockSignals(False)
+        self._show_camera_move()
 
     def _show_choreography(self) -> None:
         self.description.setText(self.choreography.description)
@@ -250,14 +296,24 @@ class AnimateStep(StepPage):
         self._show_choreography()
         self.session.animation_edited()
 
+    def _show_camera_move(self) -> None:
+        self.camera_description.setText(self.project.camera_move.description)
+        self.camera_form.set_target(self.project.camera_move)
+
+    def _on_camera_move(self) -> None:
+        self.project.camera_move_id = self.camera_box.currentData()
+        self._show_camera_move()
+        self.session.animation_edited()
+
     def _on_animation_changed(self) -> None:
-        """Choreography, look or video settings edited (here or in Export Animation)."""
+        """Choreography, camera, look or video settings edited (here or in Export Animation)."""
         self.video_form.refresh()
         self.look_form.refresh()
+        self.camera_form.refresh()
         self._apply_look()
         self._replan()
         self._show_export_frame()
-        if self.show_frame.isChecked():
+        if self.show_frame.isChecked() and self.follow.isChecked():
             self._fit()  # keep the whole frame in view as its shape changes
 
     def _replan(self) -> None:
@@ -266,7 +322,17 @@ class AnimateStep(StepPage):
             return
         at_end = self.player.time >= self.player.duration
         timeline = self.choreography.timeline(self.scene, self.project.animation_look)
+        self._plan_camera(timeline)
         self.player.set_timeline(timeline, timeline.duration if at_end else None)
+
+    def _plan_camera(self, timeline=None) -> None:
+        """The camera move over the timeline, framed like the video."""
+        timeline = timeline or self.player.timeline
+        if self.scene is None or timeline is None:
+            self.camera_path = None
+            return
+        base, _ = self._frame_rect()
+        self.camera_path = self.project.camera_move.path(self.scene, timeline, base)
 
     # Look and export frame
 
@@ -283,21 +349,48 @@ class AnimateStep(StepPage):
 
     def _on_show_frame(self, checked: bool) -> None:
         preferences.settings().setValue("animate/show_frame", "true" if checked else "false")
+        self.follow.setEnabled(checked)
         self._show_export_frame()
         self._fit()
 
+    def _on_follow(self, checked: bool) -> None:
+        preferences.settings().setValue("animate/follow_camera", "true" if checked else "false")
+        if checked:
+            self._fit()
+
+    def _on_view_changed(self) -> None:
+        """Panning or zooming by hand (the canvas leaves fit mode) stops following."""
+        if self.follow.isChecked() and self.show_frame.isChecked() and not self.canvas.fit_mode:
+            self.follow.setChecked(False)
+
     def _frame_rect(self):
+        """(the video's framing, its pixel size): what the camera shows at zoom 1."""
         if self.scene is None:
             return None
         width, height = output_size(self.project.video_settings, self.scene)
         return view_rect(self.scene, width, height, self.project.video_settings), (width, height)
+
+    def shot_rect(self):
+        """What the video shows at the player's current time (the camera move's shot)."""
+        base, _ = self._frame_rect()
+        if self.camera_path is None:
+            return base
+        return self.camera_path.shot(self.player.time).view(base)
+
+    def _show_shot(self, _t: float = 0.0) -> None:
+        """The player moved in time: the export frame (and a following view) moves along."""
+        if self.scene is None or not self.show_frame.isChecked():
+            return
+        self._show_export_frame()
+        if self.follow.isChecked():
+            self._fit()
 
     def _show_export_frame(self) -> None:
         shown = self.show_frame.isChecked() and self.scene is not None
         shade = make_instances(4 if shown else 0)
         line = make_instances(1 if shown else 0)
         if shown:
-            (x, y, w, h), _ = self._frame_rect()
+            x, y, w, h = self.shot_rect()
             # Four bands around the frame: above, below, left, right.
             boxes = [
                 (x - FAR, y - FAR, w + 2 * FAR, FAR),
@@ -322,7 +415,7 @@ class AnimateStep(StepPage):
         if self.scene is None:
             return
         if self.show_frame.isChecked():
-            (x, y, w, h), _ = self._frame_rect()
+            x, y, w, h = self.shot_rect() if self.follow.isChecked() else self._frame_rect()[0]
             x0, y0, x1, y1 = x, y, x + w, y + h
         else:
             x0, y0, x1, y1 = self.scene.bounds

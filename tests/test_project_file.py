@@ -54,6 +54,8 @@ def sample_project(alpha=True) -> Project:
     project.video_settings.update(frame_rate="24")
     project.choreography_id = "deal"
     project.choreographies["deal"].update(decks=3)
+    project.camera_move_id = "pull_back"
+    project.camera_moves["pull_back"].update(zoom=6.0, timing=(10.0, 70.0), ease="out")
     return project
 
 
@@ -72,6 +74,7 @@ def test_a_project_survives_a_round_trip(tmp_path):
     for name in ("center", "size", "rotation", "z"):
         np.testing.assert_array_equal(getattr(again.regions, name), getattr(project.regions, name))
     assert again.choreography.id == "deal" and again.choreographies["deal"].decks == 3
+    assert again.camera_move.id == "pull_back" and again.camera_move.timing == (10.0, 70.0)
     assert not again.slicing_plan.stages[1].enabled
     assert not (tmp_path / "test.skitter.part").exists()
 

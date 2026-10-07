@@ -1129,3 +1129,45 @@ def test_texture_budget_gives_up_the_boost_before_full_size():
     assert sizes[0, 0] == pytest.approx(50, abs=1)  # 250,000 / 100 tiles: 50 x 50 each
     sizes, scale, boost = detail_sizes(small, budget=40_000, base=base)
     assert boost == 1 and scale == pytest.approx(0.8)  # then every crop shrinks, as before
+
+
+def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos):
+    from skitter.ui.steps.animate import AnimateStep
+
+    window = sliced
+    session = window.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.start_matching()
+    session.wait_for_job()
+    window.show()
+    window.tabs.setCurrentWidget(window.step(AnimateStep))
+    animate = window.step(AnimateStep)
+    animate.show_frame.setChecked(True)
+    animate.follow.setChecked(True)
+    base, _ = animate._frame_rect()
+    assert animate.camera_box.currentData() == "static" and animate.shot_rect() == base
+
+    # Pull back: the export frame starts small (close up) and ends on the whole video view.
+    animate.camera_box.setCurrentIndex(animate.camera_box.findData("pull_back"))
+    assert session.project.camera_move_id == "pull_back" and animate.camera_form._rows
+    animate.camera_form.editor("zoom").widget.setValue(4.0)
+    assert session.project.camera_move.zoom == 4.0
+    animate.player.seek(0.0)
+    w = animate._frame_line.instances["size"][0][0]
+    assert w == pytest.approx(base[2] / 4) and animate.shot_rect()[2] == pytest.approx(base[2] / 4)
+    close_view = animate.canvas.bounds[2]  # following: the view is fitted around the shot
+    assert close_view < base[2] / 2
+    animate.player.seek(animate.player.duration)
+    assert animate.shot_rect() == pytest.approx(base)
+    assert animate.canvas.bounds[2] > 3 * close_view
+
+    # Panning by hand stops following; the frame still moves with the camera.
+    animate.player.seek(0.0)
+    camera = animate.canvas.camera
+    animate.canvas.set_view(camera.center, camera.zoom * 1.5)
+    assert not animate.follow.isChecked()
+    zoom = camera.zoom
+    animate.player.seek(animate.player.duration)
+    assert camera.zoom == zoom
+    assert animate._frame_line.instances["size"][0][0] == pytest.approx(base[2])

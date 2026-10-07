@@ -21,6 +21,7 @@ import moderngl
 import numpy as np
 
 from skitter.core.animation import Timeline
+from skitter.core.animation.camera import CameraPath
 from skitter.core.animation.look import TableCamera
 from skitter.core.animation.video import VideoPlan
 from skitter.ui.render.camera import Camera2D
@@ -147,8 +148,13 @@ class VideoRenderer:
             for x in range(0, width, self.tile)
         ]
 
-    def render(self, timeline: Timeline, k: int) -> np.ndarray:
-        """Frame k as (height, width, 4) uint8 RGBA (straight alpha; opaque unless plan.alpha)."""
+    def render(self, timeline: Timeline, k: int, path: CameraPath | None = None) -> np.ndarray:
+        """Frame k as (height, width, 4) uint8 RGBA (straight alpha; opaque unless plan.alpha).
+
+        path: the camera move (core/animation/camera.py); each moment blended into the
+        frame is seen through its own shot, so camera motion blurs too. None: the
+        plan's view throughout.
+        """
         ctx, plan = self.ctx, self.plan
         moments = plan.moments(k)
         self.accum.use()
@@ -159,8 +165,9 @@ class VideoRenderer:
             for layer, instances in zip(self._layers(), layers, strict=True):
                 layer.instances = instances
                 layer.mark_dirty()
+            view = plan.view if path is None else path.shot(float(t)).view(plan.view)
             for section in self.passes:
-                self._render_pass(section, weight)
+                self._render_pass(section, weight, view)
         # Lay over the background (or keep alpha) and convert to sRGB.
         self.out.use()
         ctx.viewport = (0, 0, plan.width, plan.height)
@@ -174,11 +181,11 @@ class VideoRenderer:
         frame = np.frombuffer(data, np.uint8).reshape(plan.height, plan.width, 4)
         return np.ascontiguousarray(frame[::-1])  # OpenGL rows run bottom to top
 
-    def _render_pass(self, section, weight: float) -> None:
+    def _render_pass(self, section, weight: float, view) -> None:
         ctx, plan, s = self.ctx, self.plan, self.factor
         x, y, w, h = section
-        vx, vy, _, _ = plan.view
-        scale = plan.scale
+        vx, vy, vw, _ = view
+        scale = plan.width / vw  # output pixels per mosaic unit
         cam = self.camera
         cam.center = np.array([vx + (x + w / 2) / scale, vy + (y + h / 2) / scale])
         cam.zoom = scale * s

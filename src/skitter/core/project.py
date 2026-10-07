@@ -6,6 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from skitter.core.animation import Choreography, choreography_types
+from skitter.core.animation.camera import CameraMove, camera_move_types
 from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
@@ -39,12 +40,21 @@ class Project:
         default_factory=lambda: {cls.id: cls() for cls in choreography_types()}
     )
     choreography_id: str = "assemble"
+    # Camera moves (core/animation/camera.py): one settings object per move, the chosen one.
+    camera_moves: dict[str, CameraMove] = field(
+        default_factory=lambda: {cls.id: cls() for cls in camera_move_types()}
+    )
+    camera_move_id: str = "static"
     animation_look: AnimationLook = field(default_factory=AnimationLook)
     video_settings: VideoSettings = field(default_factory=VideoSettings)
 
     @property
     def choreography(self) -> Choreography:
         return self.choreographies[self.choreography_id]
+
+    @property
+    def camera_move(self) -> CameraMove:
+        return self.camera_moves[self.camera_move_id]
 
     @property
     def has_source(self) -> bool:

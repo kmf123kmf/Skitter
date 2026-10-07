@@ -217,17 +217,21 @@ class VideoExportDialog(QDialog):
 
     def _show_plan(self, scene) -> None:
         project = self.session.project
-        duration = project.choreography.timeline(scene, project.animation_look).duration
-        plan = plan_video(scene, duration, self.settings, project.animation_look.background)
+        timeline = project.choreography.timeline(scene, project.animation_look)
+        plan = plan_video(scene, timeline.duration, self.settings,
+                          project.animation_look.background)  # fmt: skip
+        closest = project.camera_move.path(scene, timeline, plan.view).max_zoom
         fps = float(plan.fps)
         self.size_label.setText(f"{plan.width:,} × {plan.height:,} px at {fps:g} fps")
         samples = 8 * self.settings.supersampling**2 * plan.samples
         self.length_label.setText(
             f"{plan.seconds:.1f} s, {plan.frames:,} frames ({samples:,} samples per pixel)"
         )
-        _, scale, _ = detail_sizes(scene.size * plan.scale)
+        _, scale, _ = detail_sizes(scene.size * plan.scale * closest)
         tile_px = plan.scale * scene.tile_size[0]
         text = f"{tile_px:,.0f} px base tiles"
+        if closest > 1:
+            text += f" ({tile_px * closest:,.0f} px at the camera's closest)"
         text += "" if scale >= 1 else f", textures reduced to {scale:.0%} (memory)"
         self.detail_label.setText(text)
         estimate = estimate_bytes(plan, self.fmt)

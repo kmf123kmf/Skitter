@@ -761,17 +761,20 @@ class Session(QObject):
             raise RuntimeError(problems[0])
         project, scene = self.project, self.scene
         choreography = project.choreography.copy()
+        camera = project.camera_move.copy()
         settings = project.video_settings.copy()
         background = project.animation_look.background
         look = project.animation_look.copy()
         timeline = choreography.timeline(scene, look)
         plan = plan_video(scene, timeline.duration, settings, background)
+        # Tiles show largest at the camera's closest: their textures need that detail.
+        closest = camera.path(scene, timeline, plan.view).max_zoom
         job = VideoJob(
-            path=Path(path), scene=scene, choreography=choreography, settings=settings,
-            background=background, look=look, plan=plan,
+            path=Path(path), scene=scene, choreography=choreography, camera=camera,
+            settings=settings, background=background, look=look, plan=plan,
             # Read here: the library isn't threadsafe.
             request=DetailRequest.for_scene(scene, TileFiles.read(self.library, scene.slot),
-                                            plan.scale),
+                                            plan.scale * closest),
         )  # fmt: skip
 
         def work(progress, cancelled):

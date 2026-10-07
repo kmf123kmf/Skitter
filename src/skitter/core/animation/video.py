@@ -275,7 +275,7 @@ def output_size(settings: VideoSettings, scene: MosaicScene) -> tuple[int, int]:
     if preset is not None:
         width, height = preset
     elif settings.resolution == "mosaic":
-        x0, y0, x1, y1 = _content(scene)
+        x0, y0, x1, y1 = content_rect(scene)
         width = settings.width
         height = round(width * (y1 - y0) / max(x1 - x0, 1e-9))
     else:
@@ -296,7 +296,7 @@ def sync_size(settings: VideoSettings, scene: MosaicScene | None) -> None:
         settings.height = min(max(height, MIN_SIDE), MAX_SIDE)
 
 
-def _content(scene: MosaicScene) -> tuple[float, float, float, float]:
+def content_rect(scene: MosaicScene) -> tuple[float, float, float, float]:
     """What the video frames: the image frame and any tile hanging past it."""
     x0, y0, x1, y1 = scene.bounds
     w, h = scene.canvas
@@ -305,7 +305,7 @@ def _content(scene: MosaicScene) -> tuple[float, float, float, float]:
 
 def view_rect(scene: MosaicScene, width: int, height: int, settings: VideoSettings):
     """World rect (x, y, w, h) shown by a width x height frame."""
-    x0, y0, x1, y1 = _content(scene)
+    x0, y0, x1, y1 = content_rect(scene)
     cw, ch = x1 - x0, y1 - y0
     aspect = width / height
     keep = 1.0 - 2.0 * settings.margin / 100.0  # share of the frame the mosaic spans
