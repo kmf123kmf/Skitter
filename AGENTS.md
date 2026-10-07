@@ -17,4 +17,5 @@
 - numba kernels use `cache=True, nogil=True` (so background jobs don't block the UI thread).
 - Tests must never touch the real tile library: `tests/conftest.py` points `LOCALAPPDATA` at a temp dir; open libraries in `tmp_path`.
 - UI preferences go through `ui/preferences.settings()` (INI); `tests/conftest.py` redirects its path.
+- Project state is saved in `.skitter` files (`core/project_file.py`): new project settings must be added to `document()` and `_project()` there (Configurables round-trip through `values()` / `from_values()`). Views that hold a project settings object rebind on `Session.project_replaced`.
 - `TileLibrary` defines `__len__`, so an empty library is falsy: compare with `is None`.

@@ -214,6 +214,21 @@ class Configurable:
     def values(self) -> dict[str, Any]:
         return dict(self._values)
 
+    @classmethod
+    def from_values(cls, values: dict, problems: list[str] | None = None, what: str = ""):
+        """A new object with these values. With a problems list, values this class
+        doesn't know or accept (saved by another version) keep their defaults and are
+        reported there instead of raising."""
+        obj = cls()
+        for name, value in values.items():
+            try:
+                obj.update(**{name: value})
+            except (KeyError, ValueError, TypeError) as exc:
+                if problems is None:
+                    raise
+                problems.append(f"{what or cls.__name__}: {name} ignored ({exc})")
+        return obj
+
     def key(self) -> tuple:
         """Identifies the current settings (for result caching)."""
         return tuple(sorted(self._values.items()))

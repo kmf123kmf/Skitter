@@ -102,8 +102,18 @@ class SlicingPlan:
         }
 
     @classmethod
-    def from_dict(cls, data: dict) -> "SlicingPlan":
-        return cls(
-            Stage(operation_from_dict(item), item.get("enabled", True))
-            for item in data.get("stages", [])
-        )
+    def from_dict(cls, data: dict, problems: list[str] | None = None) -> "SlicingPlan":
+        """The plan to_dict described. With a problems list, operations this version
+        doesn't have are left out and settings it doesn't know keep their defaults,
+        each reported there instead of raising."""
+        stages = []
+        for item in data.get("stages", []):
+            try:
+                operation = operation_from_dict(item, problems)
+            except KeyError as exc:
+                if problems is None:
+                    raise
+                problems.append(f"Slicing stage left out: {exc.args[0]}")
+                continue
+            stages.append(Stage(operation, item.get("enabled", True)))
+        return cls(stages)

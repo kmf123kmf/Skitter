@@ -7,7 +7,7 @@ geometric edits move the alpha mask with the picture, and a mask edit (a
 shape drawn in the app) would only change the alpha channel.
 """
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 import numpy as np
 
@@ -64,6 +64,17 @@ class Crop:
 
 
 Edit = FlipHorizontal | FlipVertical | Rotate90 | Crop
+EDIT_TYPES = {cls.__name__: cls for cls in (FlipHorizontal, FlipVertical, Rotate90, Crop)}
+
+
+def edit_to_dict(edit: Edit) -> dict:
+    return {"type": type(edit).__name__, **asdict(edit)}
+
+
+def edit_from_dict(data: dict) -> Edit:
+    """The edit edit_to_dict described (KeyError: an unknown kind of edit)."""
+    fields = dict(data)
+    return EDIT_TYPES[fields.pop("type")](**fields)
 
 
 def apply_edits(image: np.ndarray, edits: list[Edit]) -> np.ndarray:

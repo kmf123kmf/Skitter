@@ -50,7 +50,7 @@ def test_next_unavailable_until_source_loaded(window, image_file):
     window.step(SourceStep).load_file(image_file)
     assert window.next_button.isEnabled()
     assert not window.tabs.isTabEnabled(1)  # loading alone doesn't finish the step
-    assert window.windowTitle() == "Skitter — photo.png"
+    assert window.windowTitle() == "Skitter — photo.png[*]" and window.isWindowModified()
 
 
 def test_next_commits_source_and_opens_slicing(window, source):

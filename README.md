@@ -60,9 +60,24 @@ A photo mosaic generator with an animated graphical interface.
 
 To add a step: subclass `StepPage`, set `title`, implement `is_complete()` (and `advance()` if it has work to commit), and append the class to `STEPS`.
 
+### Project files
+
+**File → New / Open / Open Recent / Save / Save As** (Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S; Open Source Image moved to Ctrl+Shift+O). A project is one `.skitter` file, a zip (`core/project_file.py`):
+
+- `project.json`: a format version and every step's settings, the source's name and edits, whether it was committed, and the matched mosaic's non-array data.
+- `source.png`: a lossless copy of the source as loaded (RGB unless it has transparency), so a project doesn't depend on the original file.
+- `regions.npz`: the regions, if the source was committed. They are kept, not sliced again, so the mosaic still fits exactly.
+- `mosaic.npz`: the matched mosaic, reduced to what matters (`core/matching/saved.py`): per region the photo's index into a list of file paths, its crop window, mirroring and whether it was picked by hand, plus tint targets and costs. Candidate lists for picking by hand are not kept (their indices only mean something to the run that made them).
+
+Opening rebuilds the result: photos are found by path in the current library (regions whose photo is gone are left empty, counted and reported), their crops described again from the thumbnails, quality evaluated anew. The mosaic shows, exports and animates at once; Edit Tiles asks to run matching again first, which keeps the picks (as pins) and brings the candidates back. Paths aren't a new dependency: the preview's full-size tiles and the export read the original photos anyway.
+
+Loading is forgiving: settings or operations a version doesn't know keep their defaults or are left out (`Configurable.from_values`, `SlicingPlan.from_dict(problems=...)`), each listed in a note after opening. A newer format is refused. Saving writes a `.part` file and renames it, so a failed save never damages the existing file.
+
+In the app, `Session.new_project` / `open_project` replace the whole `Project`. `project_replaced` is emitted first, and views holding its settings objects (settings forms, the export dialogs) rebind; then the usual signals replay what it holds (source, commit, layout, regions, mosaic), so each tab rebuilds as if the user had worked through it. `Session.modified` compares `project_file.document` and the identities of the image, regions and mosaic with their state at the last save or open. The title shows `*` while modified, and New, Open and closing offer to save first.
+
 ### Preferences
 
-Display choices that belong to the user rather than the project (the Slicing tab's line color, line opacity and Show structure, the Animate tab's Show export frame, and the folders the export dialogs last used) are stored with `QSettings` in an INI file, through `ui/preferences.settings()`. `tests/conftest.py` redirects that file to a temp folder, so tests never read or write the real one.
+Display choices that belong to the user rather than the project (the Slicing tab's line color, line opacity and Show structure, the Animate tab's Show export frame, the folders the export dialogs last used, and recent projects) are stored with `QSettings` in an INI file, through `ui/preferences.settings()`. `tests/conftest.py` redirects that file to a temp folder, so tests never read or write the real one.
 
 ## Slicing
 
@@ -249,6 +264,7 @@ src/skitter/
     geometry.py     rectangle math for interactive tools (crop box)
     color.py        sRGB <-> OKLab (vectorized and for numba kernels)
     project.py      Project dataclass (state across all steps)
+    project_file.py  .skitter project files: save, forgiving load
     scene.py        MosaicScene: the finished mosaic's tiles in their final state
     assembly.py     full-detail mosaic rendering and export settings
     animation/      choreographies (Assemble, Deal), timelines, tile frames, landing orders; video settings and encoding
@@ -270,6 +286,7 @@ src/skitter/
       matcher.py    the pipeline's entry point and its caches (Matcher)
       run.py        one run, phase by phase (MatchRun), and its progress (Reporter)
       result.py     MatchResult, MatchPreview and preview stages
+      saved.py      a matched mosaic as a project file keeps it, and restored
       settings.py   MatchSettings (Params)
     slicing/        slicing framework
       layout.py     MosaicLayout: tile aspect and columns; mosaic units

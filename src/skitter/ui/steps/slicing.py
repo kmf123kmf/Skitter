@@ -100,6 +100,7 @@ class SlicingStep(StepPage):
             )
         )
 
+        session.project_replaced.connect(self._on_project_replaced)
         session.source_committed.connect(self._on_source_committed)
         session.layout_changed.connect(self._on_layout_changed)
         session.slicing_changed.connect(self._on_slicing_changed)
@@ -460,6 +461,10 @@ class SlicingStep(StepPage):
         self._recompute.start()
 
     # Session updates
+
+    def _on_project_replaced(self) -> None:
+        self._refresh_stages(select=0)
+        self._show_layout()
 
     def _on_source_committed(self) -> None:
         self.viewer.show_image(self.session.project.source_final, self.session.mosaic_size())

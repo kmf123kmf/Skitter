@@ -1,11 +1,20 @@
-"""Top-level application window: one tab per workflow step."""
+"""Top-level application window: one tab per workflow step.
+
+The File menu saves and opens projects (core/project_file.py): New, Open,
+Open Recent, Save, Save As. The title shows the project and `*` while it has
+unsaved changes; New, Open and closing ask before dropping them.
+"""
+
+from pathlib import Path
 
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QAction, QCursor, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QStyle,
     QTabWidget,
@@ -13,14 +22,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from skitter.core.project_file import EXTENSION, ProjectFileError
+from skitter.ui import preferences
 from skitter.ui.export_dialog import ExportDialog
 from skitter.ui.session import Session
 from skitter.ui.steps import STEPS, StepPage
 from skitter.ui.steps.animate import AnimateStep
 from skitter.ui.steps.matching import MatchingStep
+from skitter.ui.steps.slicing import SlicingStep
 from skitter.ui.steps.source import SourceStep
 from skitter.ui.video_dialog import VideoExportDialog
 from skitter.ui.widgets.wheel_guard import install_wheel_guard
+
+PROJECT_FILTER = f"Skitter projects (*{EXTENSION})"
+RECENT_KEY, RECENT_COUNT = "project/recent", 8
 
 
 class MainWindow(QMainWindow):
@@ -50,11 +65,18 @@ class MainWindow(QMainWindow):
 
         self._current_step = self.steps[0]
         self.tabs.currentChanged.connect(self._on_tab_changed)
-        self.session.source_changed.connect(self._update_title)
+        session = self.session
+        for signal in (
+            session.project_replaced, session.source_changed, session.source_edited,
+            session.source_committed, session.layout_changed, session.slicing_changed,
+            session.matching_changed, session.mosaic_edited, session.animation_changed,
+        ):  # fmt: skip
+            signal.connect(self._update_title)
 
         self.export_dialog: ExportDialog | None = None
         self.video_dialog: VideoExportDialog | None = None
         self._build_menus()
+        self._update_title()
         self._update_navigation()
         self.statusBar().showMessage("Choose a source image to begin")
 
@@ -81,10 +103,23 @@ class MainWindow(QMainWindow):
     def _build_menus(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
 
-        open_action = QAction("&Open Source Image...", self)
-        open_action.setShortcut(QKeySequence.StandardKey.Open)
-        open_action.triggered.connect(self.open_source_image)
-        file_menu.addAction(open_action)
+        def add(text, slot, shortcut=None) -> QAction:
+            action = QAction(text, self)
+            if shortcut is not None:
+                action.setShortcut(QKeySequence(shortcut))
+            action.triggered.connect(slot)
+            file_menu.addAction(action)
+            return action
+
+        add("&New Project", self.new_project, QKeySequence.StandardKey.New)
+        add("&Open Project...", self.open_project_dialog, QKeySequence.StandardKey.Open)
+        self.recent_menu = file_menu.addMenu("Open &Recent")
+        self.recent_menu.aboutToShow.connect(self._fill_recent)
+        file_menu.addSeparator()
+        self.save_action = add("&Save Project", self.save_project, QKeySequence.StandardKey.Save)
+        self.save_as_action = add("Save Project &As...", self.save_project_as, "Ctrl+Shift+S")
+        file_menu.addSeparator()
+        add("Open Source &Image...", self.open_source_image, "Ctrl+Shift+O")
 
         file_menu.addSeparator()
 
@@ -110,6 +145,136 @@ class MainWindow(QMainWindow):
         session.export_finished.connect(self._on_exported)
 
         self._update_actions()
+
+    # Projects
+
+    def new_project(self) -> bool:
+        if not self._may_replace_project():
+            return False
+        self.session.new_project()
+        self._update_title()
+        self.tabs.setCurrentWidget(self.step(SourceStep))
+        self.statusBar().showMessage("New project: choose a source image to begin")
+        return True
+
+    def open_project_dialog(self) -> bool:
+        if not self._may_replace_project():
+            return False
+        path, _ = QFileDialog.getOpenFileName(self, "Open Project", self._project_folder(),
+                                              PROJECT_FILTER)  # fmt: skip
+        return bool(path) and self.open_project(path, ask=False)
+
+    def open_project(self, path, ask: bool = True) -> bool:
+        """Open a project file (ask: first offer to save unsaved changes)."""
+        if ask and not self._may_replace_project():
+            return False
+        try:
+            self.session.open_project(path)
+        except (ProjectFileError, OSError) as exc:
+            QMessageBox.warning(self, "Open Project", str(exc))
+            self._forget_recent(path)
+            return False
+        self._remember(path)
+        self._update_title()
+        session = self.session
+        if session.project.matches is not None:
+            self.tabs.setCurrentWidget(self.step(MatchingStep))
+        elif session.source_is_committed:
+            self.tabs.setCurrentWidget(self.step(SlicingStep))
+        else:
+            self.tabs.setCurrentWidget(self.step(SourceStep))
+        notes = list(session.load_problems)
+        if session.missing_tiles:
+            notes.insert(0, f"{session.missing_tiles:,} tiles show photos that are no longer in "
+                            "the tile library; run matching to fill them.")  # fmt: skip
+        if notes:
+            QMessageBox.information(self, "Open Project", "Opened, with notes:\n\n"
+                                    + "\n".join(f"• {note}" for note in notes))  # fmt: skip
+        self.statusBar().showMessage(f"Opened {Path(path).name}", 10_000)
+        return True
+
+    def save_project(self) -> bool:
+        path = self.session.project_path
+        return self.save_project_as() if path is None else self._save_to(path)
+
+    def save_project_as(self) -> bool:
+        session = self.session
+        if not session.project.has_source:
+            self.statusBar().showMessage("Choose a source image first: there is nothing to save")
+            return False
+        current = session.project_path
+        if current is None:
+            source = session.project.source_path
+            name = f"{source.stem if source else 'mosaic'}{EXTENSION}"
+            current = Path(self._project_folder()) / name
+        path, _ = QFileDialog.getSaveFileName(self, "Save Project", str(current), PROJECT_FILTER)
+        if not path:
+            return False
+        path = Path(path)
+        if path.suffix.lower() != EXTENSION:
+            path = path.with_name(path.name + EXTENSION)
+        return self._save_to(path)
+
+    def _save_to(self, path) -> bool:
+        try:
+            self.session.save_project(path)
+        except OSError as exc:
+            QMessageBox.warning(self, "Save Project", f"Could not save {Path(path).name}: {exc}")
+            return False
+        self._remember(path)
+        self._update_title()
+        self.statusBar().showMessage(f"Saved {Path(path).name}", 10_000)
+        return True
+
+    def _may_replace_project(self) -> bool:
+        """Whether the current project may go: saved or discarded on request, and no
+        background job running."""
+        session = self.session
+        if session.busy:
+            QMessageBox.information(self, "Skitter", f"Wait for the {session.busy} job to "
+                                    "finish, or cancel it, first.")  # fmt: skip
+            return False
+        if not session.project.has_source or not session.modified:
+            return True
+        name = session.project_path.name if session.project_path else "this project"
+        answer = QMessageBox.question(
+            self, "Skitter", f"Save changes to {name}?",
+            QMessageBox.StandardButton.Save | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )  # fmt: skip
+        if answer == QMessageBox.StandardButton.Save:
+            return self.save_project()
+        return answer == QMessageBox.StandardButton.Discard
+
+    def _project_folder(self) -> str:
+        folder = preferences.settings().value("project/folder", "")
+        return folder if folder and Path(folder).is_dir() else str(Path.home())
+
+    def _recent(self) -> list[str]:
+        value = preferences.settings().value(RECENT_KEY, [])
+        return [value] if isinstance(value, str) else list(value or [])
+
+    def _remember(self, path) -> None:
+        path = str(Path(path))
+        recent = [path] + [p for p in self._recent() if p != path]
+        prefs = preferences.settings()
+        prefs.setValue(RECENT_KEY, recent[:RECENT_COUNT])
+        prefs.setValue("project/folder", str(Path(path).parent))
+
+    def _forget_recent(self, path) -> None:
+        path = str(Path(path))
+        preferences.settings().setValue(RECENT_KEY, [p for p in self._recent() if p != path])
+
+    def _fill_recent(self) -> None:
+        menu = self.recent_menu
+        menu.clear()
+        recent = self._recent()
+        for path in recent:
+            menu.addAction(Path(path).name, lambda p=path: self.open_project(p)).setToolTip(path)
+        menu.setToolTipsVisible(True)
+        if not recent:
+            menu.addAction("No recent projects").setEnabled(False)
 
     def open_source_image(self) -> None:
         source = self.step(SourceStep)
@@ -204,11 +369,23 @@ class MainWindow(QMainWindow):
         self._update_navigation()
 
     def closeEvent(self, event) -> None:
+        if not self._may_replace_project():
+            event.ignore()
+            return
         for step in self.steps:
             step.shutdown()
         self.session.shutdown()  # stop background work before the window goes
         super().closeEvent(event)
 
-    def _update_title(self) -> None:
-        path = self.session.project.source_path
-        self.setWindowTitle(f"Skitter — {path.name}" if path else "Skitter")
+    def _update_title(self, *_) -> None:
+        session = self.session
+        if session.project_path is not None:
+            name = session.project_path.name
+        elif session.project.source_path is not None:
+            name = session.project.source_path.name
+        else:
+            name = None
+        self.setWindowTitle(f"Skitter — {name}[*]" if name else "Skitter[*]")
+        self.setWindowModified(session.project.has_source and session.modified)
+        self.save_action.setEnabled(session.project.has_source)
+        self.save_as_action.setEnabled(session.project.has_source)

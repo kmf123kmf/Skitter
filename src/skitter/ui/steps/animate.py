@@ -75,6 +75,7 @@ class AnimateStep(StepPage):
             )  # fmt: skip
         )
 
+        session.project_replaced.connect(self._on_project_replaced)
         session.matching_changed.connect(self._load_scene)
         session.mosaic_edited.connect(self._on_mosaic_edited)
         session.animation_changed.connect(self._on_animation_changed)
@@ -228,6 +229,16 @@ class AnimateStep(StepPage):
         if not self.isVisible() and self._stale:
             return  # reloaded on entering
         self.player.set_content(self.textures.pages, self.textures.instances())
+
+    def _on_project_replaced(self) -> None:
+        self.look_form.set_target(self.project.animation_look)
+        self.video_form.set_target(self.project.video_settings, only=FRAME_SETTINGS)
+        self.choreography_box.blockSignals(True)
+        self.choreography_box.setCurrentIndex(
+            self.choreography_box.findData(self.project.choreography_id)
+        )
+        self.choreography_box.blockSignals(False)
+        self._show_choreography()
 
     def _show_choreography(self) -> None:
         self.description.setText(self.choreography.description)

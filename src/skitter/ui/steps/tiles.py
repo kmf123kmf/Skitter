@@ -122,6 +122,7 @@ class TilesStep(StepPage):
         session.library_progress.connect(self._on_progress)
         session.busy_changed.connect(self._refresh)
         session.source_committed.connect(self._on_source_committed)
+        session.project_replaced.connect(self._on_source_committed)
         session.layout_changed.connect(self._refresh_stats)
         self._refresh()
 

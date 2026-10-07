@@ -376,11 +376,14 @@ class SourceStep(StepPage):
     def _on_source_changed(self) -> None:
         self.cancel_crop()
         project = self.session.project
-        self._view.setCurrentWidget(self.viewer)
-        self.viewer.show_image(project.source_image)
+        if project.has_source:
+            self._view.setCurrentWidget(self.viewer)
+            self.viewer.show_image(project.source_image)
+            self.status_message.emit(f"Source image: {project.source_path.name}")
+        else:  # a new, empty project
+            self._view.setCurrentWidget(self._empty)
         self._refresh_info()
         self._update_actions()
-        self.status_message.emit(f"Source image: {project.source_path.name}")
         self.state_changed.emit()
 
     def _on_source_edited(self, edit: Edit | None, undone: bool) -> None:
@@ -409,6 +412,13 @@ class SourceStep(StepPage):
 
     def _refresh_info(self) -> None:
         project = self.session.project
+        if not project.has_source:
+            for label in (self._name, self._original_size, self._size, self._megapixels,
+                          self._file_size, self._transparent):  # fmt: skip
+                label.setText("—")
+            self._name.setToolTip("")
+            self._history.clear()
+            return
         path = project.source_path
         self._name.setText(path.name)
         self._name.setToolTip(str(path))
@@ -416,7 +426,10 @@ class SourceStep(StepPage):
         self._size.setText(_format_size(project.source_image))
         h, w = project.source_image.shape[:2]
         self._megapixels.setText(f"{w * h / 1e6:.1f}")
-        self._file_size.setText(_format_bytes(path.stat().st_size))
+        try:
+            self._file_size.setText(_format_bytes(path.stat().st_size))
+        except OSError:  # moved or deleted since (a project keeps its own copy)
+            self._file_size.setText("—")
         visible = visible_mask(project.source_image)
         hidden = 0.0 if visible is None else 1.0 - float(visible.mean())
         share = f"{hidden:.0%}" if hidden >= 0.005 or hidden == 0 else "under 1%"

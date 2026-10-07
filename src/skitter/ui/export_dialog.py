@@ -119,10 +119,17 @@ class ExportDialog(QDialog):
         layout.addStretch()
         layout.addLayout(buttons)
 
+        session.project_replaced.connect(self._on_project_replaced)
         session.export_progress.connect(self._on_progress)
         session.export_finished.connect(self._on_finished)
         for signal in session.export_signals():
             signal.connect(self._refresh)
+        self.path.setText(self._default_path())
+        self._refresh()
+
+    def _on_project_replaced(self) -> None:
+        self.settings = self.session.project.export_settings
+        self.form.set_target(self.settings)
         self.path.setText(self._default_path())
         self._refresh()
 

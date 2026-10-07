@@ -363,5 +363,8 @@ def get_operation_type(type_id: str) -> type[SlicingOperation]:
         raise KeyError(f"unknown slicing operation {type_id!r}") from None
 
 
-def operation_from_dict(data: dict) -> SlicingOperation:
-    return get_operation_type(data["type"])(**data.get("params", {}))
+def operation_from_dict(data: dict, problems: list[str] | None = None) -> SlicingOperation:
+    """The operation to_dict described. With a problems list, settings it doesn't know
+    keep their defaults and are reported there (see Configurable.from_values)."""
+    cls = get_operation_type(data["type"])
+    return cls.from_values(data.get("params", {}), problems, cls.name)

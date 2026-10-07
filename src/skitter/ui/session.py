@@ -1,5 +1,6 @@
 """Observable wrapper around the Project shared by all step pages."""
 
+import json
 import logging
 import os
 from dataclasses import dataclass, field
@@ -21,7 +22,9 @@ from skitter.core.edits import Edit, apply_edits
 from skitter.core.matching import edit as picks
 from skitter.core.matching.candidates import Pins
 from skitter.core.matching.matcher import MatchCancelled, Matcher, MatchResult
+from skitter.core.matching.saved import restore, saved_mosaic
 from skitter.core.project import Project
+from skitter.core.project_file import document, load_project, save_project
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing import (
     MosaicLayout,
@@ -58,7 +61,17 @@ class Session(QObject):
 
     Step pages modify the project only through Session methods so that every
     page interested in a change gets notified.
+
+    New, Open (`new_project`, `open_project`) replace the whole project: views
+    that hold its settings objects rebind on `project_replaced`, then the
+    usual signals replay what the project holds (source, commit, layout,
+    regions, mosaic), so every page rebuilds as if the user had got there.
+    `modified` tells whether the project differs from its file.
     """
+
+    # A new project replaced session.project (New, Open): views holding its settings
+    # objects (forms, dialogs) rebind; the usual signals follow for what it holds.
+    project_replaced = Signal()
 
     source_changed = Signal()  # a new source image was loaded
     source_edited = Signal(object, bool)  # (edit, undone); edit is None after revert
@@ -123,6 +136,11 @@ class Session(QObject):
         self._job: Job | None = None
         self._job_kind: str | None = None
 
+        self.project_path: Path | None = None  # the file the project was opened from or saved to
+        self.load_problems: list[str] = []  # what the last Open skipped
+        self.missing_tiles = 0  # regions of the opened mosaic whose photos weren't found
+        self._saved_state = self._state()
+
     def set_source(self, path: Path, image: np.ndarray) -> None:
         project = self.project
         project.source_path = Path(path)
@@ -132,6 +150,98 @@ class Session(QObject):
         self._redo.clear()
         self._source_loads += 1
         self.source_changed.emit()
+
+    # Project files
+
+    def _state(self) -> tuple:
+        """What a project file would hold, cheaply comparable (see modified)."""
+        project = self.project
+        text = json.dumps(document(project, self.source_is_committed), sort_keys=True,
+                          default=str)  # fmt: skip
+        return (text, id(project.source_original), id(project.regions), id(project.matches))
+
+    @property
+    def modified(self) -> bool:
+        """Whether the project has changes its file (if any) doesn't."""
+        return self._state() != self._saved_state
+
+    def new_project(self) -> None:
+        """Start over with an empty project (the tile library stays open)."""
+        self.load_problems = self._replace_project(Project(), committed=False, mosaic=None)
+        self.project_path = None
+        self._saved_state = self._state()
+
+    def save_project(self, path: str | Path) -> None:
+        """Write the project to path (OSError if that fails). The matched mosaic is
+        kept when it still fits the source, regions and tiles."""
+        self.wait_for_slicing()  # the regions being made belong in the file
+        mosaic = None
+        if self.mosaic_is_valid:
+            mosaic = saved_mosaic(self.project.matches, self.library)
+        save_project(path, self.project, self.source_is_committed, mosaic)
+        self.project_path = Path(path)
+        self._saved_state = self._state()
+
+    def open_project(self, path: str | Path) -> None:
+        """Replace the project with the one in path (ProjectFileError if it isn't
+        one). load_problems and missing_tiles report what couldn't be restored."""
+        loaded = load_project(path)
+        problems = self._replace_project(loaded.project, loaded.committed, loaded.mosaic)
+        self.project_path = Path(path)
+        self.load_problems = loaded.problems + problems
+        self._saved_state = self._state()
+
+    def _replace_project(self, project: Project, committed: bool, mosaic) -> list[str]:
+        """Make project the session's, replaying what it holds; returns problems met
+        restoring its mosaic."""
+        if self.busy:
+            raise RuntimeError(f"a {self.busy} job is running")
+        if self._slicing_job is not None:
+            self._slicing_job.cancel()  # its result is ignored (see _evaluate_slicing)
+            self._slicing_job = None
+        self._slicing_run += 1
+        self._set_matches(None)
+        regions, final = project.regions, project.source_final
+        project.regions = project.source_final = None  # set below, once committed
+        self.project = project
+        self._redo.clear()
+        self._source_loads += 1
+        self._committed_key = None
+        self._slice_context = None
+        self._slicing_cache = []
+        self.slicing_error = self.slicing_summary = self.match_error = None
+        self.dropped_picks = self.missing_tiles = 0
+        self.project_replaced.emit()
+        self.source_changed.emit()
+        problems = []
+        if committed and final is not None:
+            project.source_final = final
+            self._committed_key = self._source_key()
+            self._rebuild_slice_context()
+            self.layout_changed.emit()
+            self.source_committed.emit()
+            if regions is None:
+                self._evaluate_slicing(fresh=True)
+            else:
+                project.regions = regions
+                self.slicing_summary = summarize(regions, self._slice_context) if regions else None
+                self.slicing_changed.emit()
+                if mosaic is not None:
+                    problems += self._restore_mosaic(mosaic)
+        self.matching_changed.emit()
+        self.animation_edited()
+        return problems
+
+    def _restore_mosaic(self, mosaic) -> list[str]:
+        """Show a saved mosaic over the current regions; returns what went wrong."""
+        library = self.library if self.library is not None else self.open_library()
+        regions, ctx = self.project.regions, self._slice_context
+        try:
+            result, self.missing_tiles = restore(mosaic, library, regions, ctx)
+        except ValueError as exc:
+            return [f"The matched mosaic was left out ({exc}); match again"]
+        self._set_matches(result, (regions, ctx, mosaic.library_version, mosaic.settings.key()))
+        return []
 
     # Committing the source
 

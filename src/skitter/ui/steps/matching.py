@@ -89,6 +89,7 @@ class MatchingStep(StepPage):
                 self._build_export_group(),
             )  # fmt: skip
         )
+        session.project_replaced.connect(self._on_project_replaced)
         session.source_committed.connect(self._sync_image)
         session.layout_changed.connect(self._sync_image)
         for signal in (session.slicing_started, session.slicing_changed, session.library_changed,
@@ -141,6 +142,10 @@ class MatchingStep(StepPage):
         layout.addWidget(self._error)
         self._show_detail(False)
         return group
+
+    def _on_project_replaced(self) -> None:
+        self.edit.set_editing(False)
+        self.form.set_target(self.session.project.match_settings)
 
     def _build_settings_group(self) -> QGroupBox:
         self.form = ParamForm()

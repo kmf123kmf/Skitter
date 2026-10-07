@@ -426,6 +426,9 @@ class EditMode(QObject):
         noun = "tile" if count == 1 else "tiles"
         if not can_edit and session.project.matches is None:
             hint = "Match tiles first; then pick any tile by hand here."
+        elif not can_edit and session.project.matches.candidates is None:
+            hint = ("This mosaic was opened from a project file. To pick tiles by hand, run "
+                    "matching again (tiles picked by hand so far are kept).")  # fmt: skip
         elif not can_edit:
             hint = "Picking is unavailable while matching or updating the library."
         elif not self.editing:

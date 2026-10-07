@@ -119,11 +119,18 @@ class VideoExportDialog(QDialog):
         layout.addStretch()
         layout.addLayout(buttons)
 
+        session.project_replaced.connect(self._on_project_replaced)
         session.video_progress.connect(self._on_progress)
         session.video_finished.connect(self._on_finished)
         for signal in session.export_signals():
             signal.connect(self._refresh)
         session.animation_changed.connect(self._on_animation_changed)
+        self.path.setText(self._default_path())
+        self._refresh()
+
+    def _on_project_replaced(self) -> None:
+        self.settings = self.session.project.video_settings
+        self.form.set_target(self.settings)
         self.path.setText(self._default_path())
         self._refresh()
 
