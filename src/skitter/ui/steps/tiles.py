@@ -83,6 +83,7 @@ def _square_crops(width, height) -> np.ndarray:
 
 
 class TilesStep(StepPage):
+    id = "tiles"
     title = "Tiles"
 
     def __init__(self, session, parent=None):

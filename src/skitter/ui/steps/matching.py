@@ -53,6 +53,7 @@ KEEP, DISCARD = True, False
 
 
 class MatchingStep(StepPage):
+    id = "matching"
     title = "Matching"
     export_requested = Signal()  # the user pressed Export Image…
 

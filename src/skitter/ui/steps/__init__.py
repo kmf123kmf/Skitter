@@ -7,5 +7,6 @@ from skitter.ui.steps.slicing import SlicingStep
 from skitter.ui.steps.source import SourceStep
 from skitter.ui.steps.tiles import TilesStep
 
-# Tab order. Each step unlocks once every step before it is complete.
+# Tab order. Each step unlocks once every step before it is complete. Steps are named
+# by `id` in project files, so reordering or retitling them keeps old files working.
 STEPS: list[type[StepPage]] = [SourceStep, SlicingStep, TilesStep, MatchingStep, AnimateStep]

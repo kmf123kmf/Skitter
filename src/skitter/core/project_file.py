@@ -4,7 +4,9 @@ A project file is a zip archive:
 
 - project.json: the format version and every step's settings, the source's
   name and edits, whether the source was committed, and the matched
-  mosaic's non-array data (see matching/saved.py).
+  mosaic's non-array data (see matching/saved.py). Its "view" part holds how
+  the app was showing the project (such as the tab it was on): the app's
+  business, not compared for unsaved changes, and safe to ignore.
 - source.png: a copy of the source image as loaded (lossless; with alpha
   only when the image has transparency), so the project doesn't depend on
   the original file.
@@ -59,6 +61,7 @@ class ProjectFile:
     committed: bool  # the source was committed: regions (and a mosaic) belong to it
     mosaic: SavedMosaic | None = None  # restore with matching.saved.restore
     problems: list[str] = field(default_factory=list)  # what was skipped while loading
+    view: dict = field(default_factory=dict)  # how the app showed it (see save_project)
 
 
 def _plain(value):
@@ -91,9 +94,12 @@ def document(project: Project, committed: bool) -> dict:
     }
 
 
-def save_project(path, project: Project, committed: bool, mosaic: SavedMosaic | None) -> None:
+def save_project(
+    path, project: Project, committed: bool, mosaic: SavedMosaic | None, view: dict | None = None
+) -> None:
     """Write project to path (a .skitter file). committed: project.source_final is the
-    current source with its edits (regions and mosaic are saved only then)."""
+    current source with its edits (regions and mosaic are saved only then). view: how
+    the app shows the project (plain data, kept as is)."""
     if not project.has_source:
         raise ValueError("a project needs a source image to be saved")
     path = Path(path)
@@ -103,6 +109,8 @@ def save_project(path, project: Project, committed: bool, mosaic: SavedMosaic | 
     mosaic = mosaic if regions is not None else None
     if mosaic is not None:
         doc["mosaic"] = mosaic.meta()
+    if view:
+        doc["view"] = view
     part = path.with_name(path.name + ".part")
     try:
         with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as archive:
@@ -149,7 +157,8 @@ def load_project(path) -> ProjectFile:
             saved = SavedMosaic.from_parts(mosaic, doc["mosaic"], problems)
         except (KeyError, TypeError, ValueError) as exc:
             problems.append(f"The matched mosaic could not be read ({exc}); match again")
-    return ProjectFile(project, committed, saved, problems)
+    view = doc.get("view")
+    return ProjectFile(project, committed, saved, problems, view if isinstance(view, dict) else {})
 
 
 def _project(doc: dict, source: np.ndarray, problems: list[str]) -> Project:

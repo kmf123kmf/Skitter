@@ -44,6 +44,7 @@ FRAME_SETTINGS = ("resolution", "width", "height", "framing", "margin")  # what 
 
 
 class AnimateStep(StepPage):
+    id = "animate"
     title = "Animate"
 
     export_requested = Signal()  # the user pressed Export Animation…

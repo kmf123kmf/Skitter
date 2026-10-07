@@ -58,6 +58,7 @@ def _format_size(image) -> str:
 
 
 class SourceStep(StepPage):
+    id = "source"
     title = "Source"
 
     def __init__(self, session, parent=None):

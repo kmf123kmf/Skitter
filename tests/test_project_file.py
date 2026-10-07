@@ -76,6 +76,16 @@ def test_a_project_survives_a_round_trip(tmp_path):
     assert not (tmp_path / "test.skitter.part").exists()
 
 
+def test_view_state_is_kept_as_is_and_optional(tmp_path):
+    project = sample_project()
+    save_project(tmp_path / "a.skitter", project, True, None, view={"step": "animate", "x": [1]})
+    assert load_project(tmp_path / "a.skitter").view == {"step": "animate", "x": [1]}
+    save_project(tmp_path / "b.skitter", project, True, None)
+    assert load_project(tmp_path / "b.skitter").view == {}
+    rewrite(tmp_path / "b.skitter", lambda doc: doc.update(view="not a dict"))
+    assert load_project(tmp_path / "b.skitter").view == {}
+
+
 def test_uncommitted_projects_keep_settings_but_not_regions(tmp_path):
     project = sample_project(alpha=False)
     save_project(tmp_path / "p.skitter", project, committed=False, mosaic=None)
@@ -173,6 +183,7 @@ def test_photos_gone_from_the_library_leave_their_regions_empty(matched, library
 
 
 def test_save_new_and_open_restore_the_whole_session(sliced, photos, tmp_path):  # noqa: F811
+    from skitter.ui.steps.animate import AnimateStep
     from skitter.ui.steps.matching import MatchingStep
     from skitter.ui.steps.source import SourceStep
 
@@ -212,8 +223,25 @@ def test_save_new_and_open_restore_the_whole_session(sliced, photos, tmp_path): 
     assert not step.edit.can_edit() and "run matching again" in step.edit.picker.hint.text()
     assert not session.modified and app.windowTitle() == "Skitter — work.skitter[*]"
 
+    # Projects reopen on the tab they were saved on (by step id); switching tabs isn't
+    # an unsaved change. An id this version doesn't have falls back to the furthest tab.
+    app.tabs.setCurrentWidget(app.step(AnimateStep))
+    assert not session.modified
+    assert app._save_to(path) and app.open_project(path)
+    assert app.tabs.currentWidget() is app.step(AnimateStep)
+    session.save_project(path, {"step": "retired-tab"})
+    assert app.open_project(path) and app.tabs.currentWidget() is app.step(MatchingStep)
+
     # Matching again keeps the pick and brings back the candidates for picking by hand.
     session.start_matching(keep_picks=True)
     session.wait_for_job()
     assert session.manual_picks == 1 and session.project.matches.tile[region] == tiles[region]
     assert session.project.matches.candidates is not None and session.modified
+
+
+def test_steps_have_stable_unique_ids():
+    from skitter.ui.steps import STEPS
+
+    ids = [step.id for step in STEPS]
+    assert all(ids) and len(set(ids)) == len(ids)
+    assert ids == ["source", "slicing", "tiles", "matching", "animate"]  # saved in projects

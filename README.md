@@ -64,7 +64,7 @@ To add a step: subclass `StepPage`, set `title`, implement `is_complete()` (and 
 
 **File → New / Open / Open Recent / Save / Save As** (Ctrl+N, Ctrl+O, Ctrl+S, Ctrl+Shift+S; Open Source Image moved to Ctrl+Shift+O). A project is one `.skitter` file, a zip (`core/project_file.py`):
 
-- `project.json`: a format version and every step's settings, the source's name and edits, whether it was committed, and the matched mosaic's non-array data.
+- `project.json`: a format version and every step's settings, the source's name and edits, whether it was committed, and the matched mosaic's non-array data. A separate `view` part records how the app showed the project: the tab it was saved on, by the step's stable `id` (not its title or position), so renamed, reordered or new tabs don't break old files; an unknown id falls back to the furthest tab the project reaches. View state isn't an unsaved change.
 - `source.png`: a lossless copy of the source as loaded (RGB unless it has transparency), so a project doesn't depend on the original file.
 - `regions.npz`: the regions, if the source was committed. They are kept, not sliced again, so the mosaic still fits exactly.
 - `mosaic.npz`: the matched mosaic, reduced to what matters (`core/matching/saved.py`): per region the photo's index into a list of file paths, its crop window, mirroring and whether it was picked by hand, plus tint targets and costs. Candidate lists for picking by hand are not kept (their indices only mean something to the run that made them).

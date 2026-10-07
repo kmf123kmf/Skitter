@@ -138,6 +138,7 @@ class Session(QObject):
 
         self.project_path: Path | None = None  # the file the project was opened from or saved to
         self.load_problems: list[str] = []  # what the last Open skipped
+        self.opened_view: dict = {}  # how the opened project was shown (project_file "view")
         self.missing_tiles = 0  # regions of the opened mosaic whose photos weren't found
         self._saved_state = self._state()
 
@@ -168,17 +169,19 @@ class Session(QObject):
     def new_project(self) -> None:
         """Start over with an empty project (the tile library stays open)."""
         self.load_problems = self._replace_project(Project(), committed=False, mosaic=None)
+        self.opened_view = {}
         self.project_path = None
         self._saved_state = self._state()
 
-    def save_project(self, path: str | Path) -> None:
+    def save_project(self, path: str | Path, view: dict | None = None) -> None:
         """Write the project to path (OSError if that fails). The matched mosaic is
-        kept when it still fits the source, regions and tiles."""
+        kept when it still fits the source, regions and tiles. view: how the app shows
+        it (given back as opened_view on opening)."""
         self.wait_for_slicing()  # the regions being made belong in the file
         mosaic = None
         if self.mosaic_is_valid:
             mosaic = saved_mosaic(self.project.matches, self.library)
-        save_project(path, self.project, self.source_is_committed, mosaic)
+        save_project(path, self.project, self.source_is_committed, mosaic, view)
         self.project_path = Path(path)
         self._saved_state = self._state()
 
@@ -189,6 +192,7 @@ class Session(QObject):
         problems = self._replace_project(loaded.project, loaded.committed, loaded.mosaic)
         self.project_path = Path(path)
         self.load_problems = loaded.problems + problems
+        self.opened_view = loaded.view
         self._saved_state = self._state()
 
     def _replace_project(self, project: Project, committed: bool, mosaic) -> list[str]:

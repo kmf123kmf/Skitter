@@ -68,6 +68,7 @@ def _stage_text(stage: Stage) -> str:
 
 
 class SlicingStep(StepPage):
+    id = "slicing"
     title = "Slicing"
 
     def __init__(self, session, parent=None):

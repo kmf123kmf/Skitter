@@ -11,13 +11,15 @@ SIDE_PANEL_WIDTH = 320  # content width; the panel adds room for its scrollbar
 class StepPage(QWidget):
     """One tab in the mosaic workflow.
 
-    Subclasses set `title` and build their UI. The main window's Next button
-    calls `advance()` to commit the step's work and then moves to the next
-    tab; tabs after a step unlock only while it `is_complete()`. Emit
-    `state_changed` whenever `is_complete()` or `can_advance()` may have
-    changed.
+    Subclasses set `id` and `title` and build their UI. `id` names the step in
+    project files (the tab a project was saved on): keep it when renaming or
+    reordering tabs. The main window's Next button calls `advance()` to commit
+    the step's work and then moves to the next tab; tabs after a step unlock
+    only while it `is_complete()`. Emit `state_changed` whenever
+    `is_complete()` or `can_advance()` may have changed.
     """
 
+    id = ""  # stable name, never shown (see the class docstring)
     title = ""
 
     state_changed = Signal()

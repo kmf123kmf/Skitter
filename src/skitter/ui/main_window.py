@@ -177,12 +177,7 @@ class MainWindow(QMainWindow):
         self._remember(path)
         self._update_title()
         session = self.session
-        if session.project.matches is not None:
-            self.tabs.setCurrentWidget(self.step(MatchingStep))
-        elif session.source_is_committed:
-            self.tabs.setCurrentWidget(self.step(SlicingStep))
-        else:
-            self.tabs.setCurrentWidget(self.step(SourceStep))
+        self.tabs.setCurrentWidget(self._step_to_show(session.opened_view.get("step")))
         notes = list(session.load_problems)
         if session.missing_tiles:
             notes.insert(0, f"{session.missing_tiles:,} tiles show photos that are no longer in "
@@ -215,9 +210,23 @@ class MainWindow(QMainWindow):
             path = path.with_name(path.name + EXTENSION)
         return self._save_to(path)
 
+    def _step_to_show(self, step_id) -> StepPage:
+        """The tab an opened project was saved on (by id), if it's here and open; else
+        the furthest one its work reaches."""
+        self._update_navigation()
+        for index, step in enumerate(self.steps):
+            if step.id == step_id and self.tabs.isTabEnabled(index):
+                return step
+        session = self.session
+        if session.project.matches is not None:
+            return self.step(MatchingStep)
+        if session.source_is_committed:
+            return self.step(SlicingStep)
+        return self.step(SourceStep)
+
     def _save_to(self, path) -> bool:
         try:
-            self.session.save_project(path)
+            self.session.save_project(path, {"step": self.steps[self.tabs.currentIndex()].id})
         except OSError as exc:
             QMessageBox.warning(self, "Save Project", f"Could not save {Path(path).name}: {exc}")
             return False
