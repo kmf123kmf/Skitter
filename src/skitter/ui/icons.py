@@ -190,6 +190,34 @@ def _loop(p: QPainter, color: QColor) -> None:
     _filled(p, color, (16.5, 3.5), (21.5, 7.5), (16, 10))
 
 
+def _diamond(p: QPainter, color: QColor, x: float, y: float, r: float) -> None:
+    _filled(p, color, (x, y - r), (x + r, y), (x, y + r), (x - r, y))
+
+
+def _add_key(p: QPainter, color: QColor) -> None:
+    _diamond(p, color, 10, 13, 6.5)
+    p.drawLine(QPointF(19, 3), QPointF(19, 9))
+    p.drawLine(QPointF(16, 6), QPointF(22, 6))
+
+
+def _delete_key(p: QPainter, color: QColor) -> None:
+    _diamond(p, color, 10, 13, 6.5)
+    p.drawLine(QPointF(16, 6), QPointF(22, 6))
+
+
+def _previous_key(p: QPainter, color: QColor) -> None:
+    _diamond(p, color, 15, 12, 6)
+    _polyline(p, (8, 7), (3, 12), (8, 17))
+
+
+def _viewfinder(p: QPainter, color: QColor) -> None:
+    _polyline(p, (3, 8), (3, 4), (7, 4))
+    _polyline(p, (17, 4), (21, 4), (21, 8))
+    _polyline(p, (21, 16), (21, 20), (17, 20))
+    _polyline(p, (7, 20), (3, 20), (3, 16))
+    p.drawEllipse(QPointF(12, 12), 3.2, 3.2)
+
+
 # Public icons
 
 
@@ -271,3 +299,23 @@ def step_forward() -> QIcon:
 
 def loop() -> QIcon:
     return _make_icon(_loop)
+
+
+def add_key() -> QIcon:
+    return _make_icon(_add_key)
+
+
+def delete_key() -> QIcon:
+    return _make_icon(_delete_key)
+
+
+def previous_key() -> QIcon:
+    return _make_icon(_previous_key)
+
+
+def next_key() -> QIcon:
+    return _make_icon(_mirrored(_previous_key))
+
+
+def viewfinder() -> QIcon:
+    return _make_icon(_viewfinder)

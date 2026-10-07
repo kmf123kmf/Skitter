@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
+from skitter.core.animation.keyframes import video_camera_path
 from skitter.core.animation.video import check_video, plan_video, sync_size
 from skitter.core.assembly import (
     ExportCancelled,
@@ -739,6 +740,11 @@ class Session(QObject):
 
     # Animation
 
+    def set_camera_track(self, track) -> None:
+        """Replace the camera's keyframes (keyframes.CameraTrack, immutable)."""
+        self.project.camera_track = track
+        self.animation_edited()
+
     def animation_edited(self) -> None:
         """The choreography, its settings, the look or the video settings changed."""
         sync_size(self.project.video_settings, self.scene)
@@ -768,10 +774,12 @@ class Session(QObject):
         timeline = choreography.timeline(scene, look)
         plan = plan_video(scene, timeline.duration, settings, background)
         # Tiles show largest at the camera's closest: their textures need that detail.
-        closest = camera.path(scene, timeline, plan.view).max_zoom
+        track = project.camera_track
+        closest = video_camera_path(track, camera, scene, timeline, plan.view,
+                                    plan.video_clock).max_zoom  # fmt: skip
         job = VideoJob(
             path=Path(path), scene=scene, choreography=choreography, camera=camera,
-            settings=settings, background=background, look=look, plan=plan,
+            track=track, settings=settings, background=background, look=look, plan=plan,
             # Read here: the library isn't threadsafe.
             request=DetailRequest.for_scene(scene, TileFiles.read(self.library, scene.slot),
                                             plan.scale * closest),

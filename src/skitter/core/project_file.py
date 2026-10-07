@@ -35,6 +35,7 @@ from PIL import Image
 
 from skitter.core.animation import choreography_types
 from skitter.core.animation.camera import camera_move_types
+from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
@@ -92,6 +93,7 @@ def document(project: Project, committed: bool) -> dict:
         "choreography": project.choreography_id,
         "camera_moves": {key: m.values() for key, m in project.camera_moves.items()},
         "camera_move": project.camera_move_id,
+        "camera_track": project.camera_track.to_dict(),
         "animation_look": project.animation_look.values(),
         "video_settings": project.video_settings.values(),
     }
@@ -209,6 +211,8 @@ def _project(doc: dict, source: np.ndarray, problems: list[str]) -> Project:
             project.camera_moves[cls.id] = cls.from_values(saved[cls.id], problems, cls.name)
     if doc.get("camera_move") in project.camera_moves:
         project.camera_move_id = doc["camera_move"]
+    if isinstance(doc.get("camera_track"), dict):
+        project.camera_track = CameraTrack.from_dict(doc["camera_track"], problems)
     return project
 
 

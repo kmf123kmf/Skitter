@@ -541,7 +541,7 @@ def test_animate_tab_plays_the_scene(sliced, photos, qapp):
     # It opens on the finished mosaic, exactly as the Matching preview draws it.
     transport = animate.transport
     assert player.time == pytest.approx(player.duration)
-    assert transport.slider.value() == transport.slider.maximum()
+    assert transport.timeline.time == pytest.approx(transport.timeline.duration)
     final = session.textures.instances()
     for field in ("pos", "size", "rotation", "layer", "uv", "offset"):
         np.testing.assert_allclose(player.layer.instances[field], final[field], atol=1e-5)
@@ -552,11 +552,14 @@ def test_animate_tab_plays_the_scene(sliced, photos, qapp):
     assert player.playing and transport.play_action.text() == "Pause"
     assert player.time == 0 and np.all(player.layer.instances["alpha"] == 0)
 
+    # The preview plays the whole video: the animation (8 s) and its end hold (2 s).
+    assert player.duration == pytest.approx(8.0 + 2.0)
+
     # Scrubbing pauses; settings changes replan and keep the moment.
-    transport.scrub(transport.slider.maximum() // 2)
-    assert not player.playing and player.time == pytest.approx(4.0)  # half of 8 s
+    transport.timeline.scrubbed.emit(transport.timeline.duration / 2)
+    assert not player.playing and player.time == pytest.approx(5.0)  # half of 10 s
     animate.form.editor("duration").widget.setValue(20)
-    assert player.duration == pytest.approx(20) and player.time == pytest.approx(4.0)
+    assert player.duration == pytest.approx(22) and player.time == pytest.approx(5.0)
 
     # Leaving the tab pauses playback.
     animate.toggle_play()
@@ -1250,3 +1253,117 @@ def test_transport_bar_steps_jumps_loops_and_changes_speed(sliced, photos, qapp)
     assert step(0.2)  # 0.4 s of animation at 2x: past the end, so round again
     assert player.playing and player.time < 0.5
     player.pause()
+
+
+def test_timeline_strip_scrubs_and_drags_keys(qapp):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from skitter.ui.widgets.timeline_strip import TimelineStrip
+
+    strip = TimelineStrip()
+    strip.resize(420, 40)
+    strip.set_timing(10.0, (1.0, 8.0))
+    strip.set_keys([(2.0, True, "smooth"), (6.0, False, "hold")])
+    assert strip.time_at(strip.x_of(3.5)) == pytest.approx(3.5)
+    y = int(strip.height() / 2 + 10)
+    assert strip.key_at(strip.x_of(6.0) + 3, y) == 1 and strip.key_at(strip.x_of(4.0), y) == -1
+
+    events = []
+    strip.scrubbed.connect(lambda t: events.append(("scrub", round(t, 2))))
+    strip.key_clicked.connect(lambda i: events.append(("click", i)))
+    strip.key_moved.connect(lambda i, t: events.append(("move", i, round(t, 1))))
+    strip.key_menu.connect(lambda i, pos: events.append(("menu", i)))
+    QTest.mouseClick(strip, Qt.MouseButton.LeftButton, pos=QPoint(round(strip.x_of(4.0)), y))
+    key = QPoint(round(strip.x_of(2.0)), y)
+    QTest.mousePress(strip, Qt.MouseButton.LeftButton, pos=key)
+    QTest.mouseMove(strip, QPoint(round(strip.x_of(3.0)), y))
+    QTest.mouseRelease(strip, Qt.MouseButton.LeftButton, pos=QPoint(round(strip.x_of(3.0)), y))
+    QTest.mouseClick(strip, Qt.MouseButton.RightButton, pos=QPoint(round(strip.x_of(6.0)), y))
+    assert events[0][0] == "scrub" and events[0][1] == pytest.approx(4.0, abs=0.05)
+    assert events[1:] == [("click", 0), ("move", 0, 3.0), ("menu", 1)]
+
+
+def test_camera_keys_through_the_viewfinder(sliced, photos, qapp):
+    from PySide6.QtCore import QPoint, QPointF, Qt
+    from PySide6.QtGui import QWheelEvent
+
+    from skitter.core.animation.keyframes import KeyTime
+    from skitter.ui.steps.animate import AnimateStep
+
+    window = sliced
+    session = window.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.start_matching()
+    session.wait_for_job()
+    window.show()
+    animate = window.step(AnimateStep)
+    window.tabs.setCurrentWidget(animate)
+    qapp.processEvents()
+    keys, player, canvas = animate.keys, animate.player, animate.canvas
+    strip = animate.transport.timeline
+    assert not session.project.camera_track.keys and not keys.form.isVisible()
+
+    # Add Key without the viewfinder keys what the camera shows now.
+    player.seek(2.0)
+    keys.add_key()
+    track = session.project.camera_track
+    assert len(track.keys) == 1 and track.keys[0].time == KeyTime("body", 2.0 / 8.0)
+    assert track.keys[0].shot.zoom == pytest.approx(1.0)  # the camera's shot (static)
+    assert len(strip.keys) == 1 and keys.selected == 0 and keys.form.isVisible()
+    assert keys.fields.time == pytest.approx(2.0) and session.modified
+
+    # Through the camera: the export frame stays put while the view moves under it.
+    keys.set_viewfinder(True)
+    assert canvas.rotatable and not animate.show_frame.isEnabled()
+    player.seek(6.0)
+    before = animate.shot()
+    camera = canvas.camera
+    canvas.set_view(camera.center + (5.0, 0.0), camera.zoom * 2.0)  # pan and zoom in
+    assert keys.pending is not None
+    assert keys.pending.zoom == pytest.approx(before.zoom * 2.0)
+    assert keys.pending.center[0] == pytest.approx(before.center[0] + 5.0)
+    wheel = QWheelEvent(
+        QPointF(50, 50),
+        canvas.mapToGlobal(QPointF(50, 50)),
+        QPoint(0, 0),
+        QPoint(0, 120),
+        Qt.MouseButton.NoButton,
+        Qt.KeyboardModifier.ShiftModifier,
+        Qt.ScrollPhase.NoScrollPhase,
+        False,
+    )
+    canvas.wheelEvent(wheel)  # Shift+wheel turns
+    assert keys.pending.rotation == pytest.approx(math.radians(5.0))
+    assert animate.shot() is keys.pending
+    framing = keys.pending
+    keys.add_key()
+    track = session.project.camera_track
+    assert len(track.keys) == 2 and track.keys[1].shot == framing and keys.pending is None
+    assert keys.selected == 1
+
+    # Moving in time drops a framing that wasn't keyed.
+    canvas.set_view(camera.center + (3.0, 0.0), camera.zoom)
+    assert keys.pending is not None
+    player.seek(4.0)
+    assert keys.pending is None
+    keys.set_viewfinder(False)
+    assert not canvas.rotatable and animate.show_frame.isEnabled()
+
+    # Jump between keys; retime, edit and delete them.
+    keys.jump(1)
+    assert player.time == pytest.approx(6.0) and keys.selected == 1
+    keys.jump(-1)
+    assert player.time == pytest.approx(2.0) and keys.selected == 0
+    keys.retime(0, 3.0)
+    assert session.project.camera_track.times(keys.clock())[0] == pytest.approx(3.0)
+    keys._edit(0, stop=False, motion="hold")
+    assert session.project.camera_track.keys[0].motion == "hold"
+    assert strip.keys[0][1:] == (False, "hold")
+    keys.form.editor("zoom").widget.setValue(3.0)
+    assert session.project.camera_track.keys[keys.selected].shot.zoom == pytest.approx(3.0)
+    keys.stretch.setChecked(False)
+    assert not session.project.camera_track.stretch
+    keys.delete_key()
+    assert len(session.project.camera_track.keys) == 1

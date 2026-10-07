@@ -1,8 +1,10 @@
 """Playback controls for a TimelinePlayer, laid out under its canvas.
 
-A full-width scrubber over one row: the time on the left; to start, previous
-frame, play / pause, next frame and to end in the middle; loop, speed, a
-status line and the frame rate on the right.
+A full-width timeline strip (timeline_strip.py: ruler, holds, playhead and
+any keys the page shows on it) over one row: the time and the page's own
+tools (`left_tools`) on the left; to start, previous frame, play / pause,
+next frame and to end in the middle; loop, speed, a status line and the
+frame rate on the right.
 
 Keys (while the bar's page has focus, see `install_shortcuts`): Space plays
 or pauses, Home / End jump to the start / end, Left / Right step one frame
@@ -16,7 +18,6 @@ from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
-    QSlider,
     QToolButton,
     QVBoxLayout,
     QWidget,
@@ -25,8 +26,8 @@ from PySide6.QtWidgets import (
 from skitter.ui import icons
 from skitter.ui.render.player import TimelinePlayer
 from skitter.ui.style import muted
+from skitter.ui.widgets.timeline_strip import TimelineStrip
 
-SLIDER_STEPS = 10_000
 SPEEDS = (0.25, 0.5, 1.0, 2.0)
 ICON = QSize(20, 20)
 
@@ -37,11 +38,8 @@ class TransportBar(QWidget):
         self.player = player
         self.frame_step = 1 / 30  # seconds: one frame of the video (set by the page)
 
-        self.slider = QSlider(Qt.Orientation.Horizontal)
-        self.slider.setRange(0, SLIDER_STEPS)
-        self.slider.setToolTip("Drag to scrub through the animation.")
-        self.slider.sliderMoved.connect(self.scrub)
-        self.slider.sliderPressed.connect(lambda: self.scrub(self.slider.value()))
+        self.timeline = TimelineStrip()
+        self.timeline.scrubbed.connect(self.seek_to)
 
         self.time_label = QLabel("—")
         mono = QFontDatabase.systemFont(QFontDatabase.SystemFont.FixedFont)
@@ -97,6 +95,10 @@ class TransportBar(QWidget):
         # Equal stretch either side keeps the buttons centered under the view.
         left = QHBoxLayout()
         left.addWidget(self.time_label)
+        left.addSpacing(8)
+        self.left_tools = QHBoxLayout()  # the page's own buttons (keys, say)
+        self.left_tools.setSpacing(0)
+        left.addLayout(self.left_tools)
         left.addStretch()
         row.addLayout(left, stretch=1)
         row.addLayout(controls)
@@ -105,7 +107,7 @@ class TransportBar(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(10, 4, 10, 6)
         layout.setSpacing(2)
-        layout.addWidget(self.slider)
+        layout.addWidget(self.timeline)
         layout.addLayout(row)
 
         player.time_changed.connect(self._show_time)
@@ -168,9 +170,14 @@ class TransportBar(QWidget):
         self.player.pause()
         self.player.seek(self.player.time + seconds)
 
-    def scrub(self, value: int) -> None:
+    def seek_to(self, t: float) -> None:
+        """Pause and show time t (scrubbing)."""
         self.player.pause()
-        self.player.seek(value / SLIDER_STEPS * self.player.duration)
+        self.player.seek(t)
+
+    def set_holds(self, start: float, end: float) -> None:
+        """Where the animation starts and ends on the player's clock (shaded either side)."""
+        self.timeline.set_timing(self.player.duration, (start, end))
 
     def _on_loop(self, checked: bool) -> None:
         self.player.loop = checked
@@ -189,8 +196,9 @@ class TransportBar(QWidget):
     def refresh(self) -> None:
         """Enable the controls while there is something to play."""
         has = self.player.timeline is not None
-        for widget in (self.slider, self.speed):
+        for widget in (self.timeline, self.speed):
             widget.setEnabled(has)
+        self.timeline.set_timing(self.player.duration, self.timeline.holds)
         for action in (self.start_action, self.back_action, self.play_action,
                        self.forward_action, self.end_action, self.second_back,
                        self.second_forward, self.loop_action):  # fmt: skip
@@ -203,10 +211,9 @@ class TransportBar(QWidget):
     def _show_time(self, t: float) -> None:
         duration = self.player.duration
         self.time_label.setText(f"{t:6.2f} s / {duration:.2f} s" if duration else "—")
-        if not self.slider.isSliderDown():
-            self.slider.blockSignals(True)
-            self.slider.setValue(round(t / duration * SLIDER_STEPS) if duration else 0)
-            self.slider.blockSignals(False)
+        if abs(self.timeline.duration - duration) > 1e-9:
+            self.timeline.set_timing(duration, self.timeline.holds)
+        self.timeline.set_time(t)
 
     def _show_playing(self, playing: bool) -> None:
         self.play_action.setIcon(icons.pause() if playing else icons.play())

@@ -10,7 +10,8 @@ both stay in step); "Show export frame" outlines what the video shows at the
 current moment (the camera move's shot) and dims the rest, and "Follow
 camera" keeps the view on it (panning or zooming by hand stops following).
 A new mosaic opens on its finished state; Play runs from the start. Playback
-controls sit under the view (ui/widgets/transport.py).
+controls sit under the view (ui/widgets/transport.py); camera keyframes and
+the Look through camera viewfinder are in camera_keys.py.
 """
 
 import math
@@ -29,8 +30,9 @@ from PySide6.QtWidgets import (
 )
 
 from skitter.core.animation.camera import CameraPath, Shot, home_shot
+from skitter.core.animation.keyframes import video_camera_path
 from skitter.core.animation.look import TableCamera
-from skitter.core.animation.video import output_size, view_rect
+from skitter.core.animation.video import ClockedTimeline, VideoClock, output_size, view_rect
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import ColorParam
 from skitter.ui import preferences
@@ -39,6 +41,7 @@ from skitter.ui.render.player import TimelinePlayer
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import TileTextures
 from skitter.ui.steps.base import StepPage, side_panel
+from skitter.ui.steps.camera_keys import CameraKeys
 from skitter.ui.style import muted
 from skitter.ui.widgets.param_form import ParamForm
 from skitter.ui.widgets.transport import TransportBar
@@ -59,7 +62,7 @@ class AnimateStep(StepPage):
         super().__init__(session, parent)
         self.scene: MosaicScene | None = None
         self.textures: TileTextures | None = None
-        self.camera_path: CameraPath | None = None  # the camera move over the timeline
+        self.camera_path: CameraPath | None = None  # the camera over the video clock
         self._stale = False  # manual picks changed the mosaic while this tab was hidden
 
         self.canvas = MosaicCanvas()
@@ -70,6 +73,7 @@ class AnimateStep(StepPage):
         self.transport = TransportBar(self.player)
         self.transport.status.setText("No mosaic: match tiles first.")
         self.canvas.fps_changed.connect(self.transport.set_fps)
+        self.keys = CameraKeys(self)
         self._shade = self.canvas.add_layer(SpriteLayer(None, make_instances(0)))
         self._frame_line = self.canvas.add_layer(
             SpriteLayer(None, make_instances(0), outline_px=1.5, edge_px=1.0)
@@ -82,6 +86,7 @@ class AnimateStep(StepPage):
         column.addWidget(self.canvas, stretch=1)
         column.addWidget(self.transport)
         self.transport.install_shortcuts(view)
+        self.keys.install_shortcuts(view)
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -89,6 +94,7 @@ class AnimateStep(StepPage):
         layout.addWidget(view, stretch=1)
         layout.addWidget(
             side_panel(
+                self.keys.build_group(),  # first: it works with the strip under the view
                 self._build_settings_group(),
                 self._build_camera_group(),
                 self._build_video_group(),
@@ -244,12 +250,13 @@ class AnimateStep(StepPage):
         self.textures.patched.connect(self._on_textures)  # crops for picks read meanwhile
         self.textures.status_changed.connect(self.transport.status.setText)
         self.transport.status.setText(self.textures.status)
-        timeline = self.choreography.timeline(scene, self.project.animation_look)
+        timeline = self._clocked_timeline()
         self.player.set_timeline(timeline, time=timeline.duration)  # open on the finished mosaic
         self._plan_camera()
         self.player.set_camera(TableCamera.for_scene(scene, self.project.animation_look))
         self.player.set_content(self.textures.pages, self.textures.instances())
         self._sync_transport()
+        self.keys.refresh()
         self._show_export_frame()
         self._fit()
         self.state_changed.emit()
@@ -272,6 +279,8 @@ class AnimateStep(StepPage):
         self.camera_box.setCurrentIndex(self.camera_box.findData(self.project.camera_move_id))
         self.camera_box.blockSignals(False)
         self._show_camera_move()
+        self.keys.selected = -1
+        self.keys.refresh()
 
     def _show_choreography(self) -> None:
         self.description.setText(self.choreography.description)
@@ -299,8 +308,9 @@ class AnimateStep(StepPage):
         self._apply_look()
         self._replan()
         self._sync_transport()
+        self.keys.refresh()
         self._show_export_frame()
-        if self.show_frame.isChecked() and self.follow.isChecked():
+        if self._following():
             self._fit()  # keep the whole frame in view as its shape changes
 
     def _replan(self) -> None:
@@ -308,23 +318,33 @@ class AnimateStep(StepPage):
         if self.scene is None:
             return
         at_end = self.player.time >= self.player.duration
-        timeline = self.choreography.timeline(self.scene, self.project.animation_look)
+        timeline = self._clocked_timeline()
         self._plan_camera(timeline)
         self.player.set_timeline(timeline, timeline.duration if at_end else None)
+
+    def _clocked_timeline(self) -> ClockedTimeline:
+        """The choreography on the video's clock: its start and end holds play too, as in
+        the exported video."""
+        timeline = self.choreography.timeline(self.scene, self.project.animation_look)
+        return ClockedTimeline(timeline, VideoClock.of(self.project.video_settings,
+                                                       timeline.duration))  # fmt: skip
 
     def _sync_transport(self) -> None:
         """Frame steps match the export's frames; controls follow whether there's a timeline."""
         self.transport.frame_step = 1.0 / float(self.project.video_settings.fps)
         self.transport.refresh()
 
-    def _plan_camera(self, timeline=None) -> None:
-        """The camera move over the timeline, framed like the video."""
+    def _plan_camera(self, timeline: ClockedTimeline | None = None) -> None:
+        """The camera over the video clock, framed like the video."""
         timeline = timeline or self.player.timeline
         if self.scene is None or timeline is None:
             self.camera_path = None
             return
         base, _ = self._frame_rect()
-        self.camera_path = self.project.camera_move.path(self.scene, timeline, base)
+        project = self.project
+        self.camera_path = video_camera_path(project.camera_track, project.camera_move,
+                                             self.scene, timeline.timeline, base,
+                                             timeline.clock)  # fmt: skip
 
     # Look and export frame
 
@@ -351,9 +371,36 @@ class AnimateStep(StepPage):
             self._fit()
 
     def _on_view_changed(self) -> None:
-        """Panning or zooming by hand (the canvas leaves fit mode) stops following."""
-        if self.follow.isChecked() and self.show_frame.isChecked() and not self.canvas.fit_mode:
+        """Panning or zooming by hand (the canvas leaves fit mode): through the camera, it
+        frames a new shot; otherwise it stops following."""
+        if self.canvas.fit_mode:
+            return
+        if self.keys.viewfinder:
+            self.keys.view_moved()
+            self._show_export_frame()
+        elif self.follow.isChecked() and self.show_frame.isChecked():
             self.follow.setChecked(False)
+
+    def viewfinder_changed(self) -> None:
+        """Looking through the camera shows the export frame and follows it."""
+        on = self.keys.viewfinder
+        for box in (self.show_frame, self.follow):
+            box.setEnabled(not on and (box is self.show_frame or self.show_frame.isChecked()))
+        self._show_export_frame()
+        self._fit()
+
+    def _framing(self) -> bool:
+        """The export frame shows (asked for, or looking through the camera)."""
+        return self.keys.viewfinder or self.show_frame.isChecked()
+
+    def _following(self) -> bool:
+        """The view keeps to the camera's shot."""
+        return self.keys.viewfinder or (self.show_frame.isChecked() and self.follow.isChecked())
+
+    def frame_rect(self):
+        """The video's framing (what the camera shows at zoom 1), or None."""
+        rect = self._frame_rect()
+        return None if rect is None else rect[0]
 
     def _frame_rect(self):
         """(the video's framing, its pixel size): what the camera shows at zoom 1."""
@@ -363,7 +410,10 @@ class AnimateStep(StepPage):
         return view_rect(self.scene, width, height, self.project.video_settings), (width, height)
 
     def shot(self) -> Shot:
-        """What the video shows at the player's current time (the camera move's shot)."""
+        """What the video shows at the player's current time: the camera's shot, or a
+        framing made through the viewfinder and not keyed yet."""
+        if self.keys.pending is not None:
+            return self.keys.pending
         base, _ = self._frame_rect()
         if self.camera_path is None:
             return home_shot(base)
@@ -371,14 +421,15 @@ class AnimateStep(StepPage):
 
     def _show_shot(self, _t: float = 0.0) -> None:
         """The player moved in time: the export frame (and a following view) moves along."""
-        if self.scene is None or not self.show_frame.isChecked():
+        self.keys.time_moved()
+        if self.scene is None or not self._framing():
             return
         self._show_export_frame()
-        if self.follow.isChecked():
+        if self._following():
             self._fit()
 
     def _show_export_frame(self) -> None:
-        shown = self.show_frame.isChecked() and self.scene is not None
+        shown = self._framing() and self.scene is not None
         shade = make_instances(4 if shown else 0)
         line = make_instances(1 if shown else 0)
         if shown:
@@ -412,10 +463,10 @@ class AnimateStep(StepPage):
     def _fit(self) -> None:
         if self.scene is None:
             return
-        rotation = 0.0
-        if self.show_frame.isChecked():
-            base, _ = self._frame_rect()
-            shot = self.shot() if self.follow.isChecked() else home_shot(base)
+        rotation, shot = 0.0, None
+        base, _ = self._frame_rect()
+        if self._framing():
+            shot = self.shot() if self._following() else home_shot(base)
             (cx, cy), (w, h), rotation = shot.center, shot.size(base), shot.rotation
             x0, y0, x1, y1 = cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
         else:
@@ -423,6 +474,8 @@ class AnimateStep(StepPage):
         mx, my = (x1 - x0) * MARGIN, (y1 - y0) * MARGIN
         self.canvas.fit_to(x0 - mx, y0 - my, x1 - x0 + 2 * mx, y1 - y0 + 2 * my,
                            rotation=rotation)  # fmt: skip
+        if shot is not None:
+            self.keys.fitted(shot, base)  # the frame's size on screen, for the viewfinder
 
     def _refresh_export(self) -> None:
         self.export_button.setEnabled(self.session.can_export and self.scene is not None)

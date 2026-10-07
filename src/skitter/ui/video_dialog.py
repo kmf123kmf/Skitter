@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
+from skitter.core.animation.keyframes import video_camera_path
 from skitter.core.animation.video import (
     FORMATS,
     estimate_bytes,
@@ -220,7 +221,8 @@ class VideoExportDialog(QDialog):
         timeline = project.choreography.timeline(scene, project.animation_look)
         plan = plan_video(scene, timeline.duration, self.settings,
                           project.animation_look.background)  # fmt: skip
-        closest = project.camera_move.path(scene, timeline, plan.view).max_zoom
+        closest = video_camera_path(project.camera_track, project.camera_move, scene, timeline,
+                                    plan.view, plan.video_clock).max_zoom  # fmt: skip
         fps = float(plan.fps)
         self.size_label.setText(f"{plan.width:,} × {plan.height:,} px at {fps:g} fps")
         samples = 8 * self.settings.supersampling**2 * plan.samples

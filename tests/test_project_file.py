@@ -15,6 +15,8 @@ from test_matching_steps import (  # noqa: F401 (fixtures)
     window,
 )
 
+from skitter.core.animation.camera import Shot
+from skitter.core.animation.keyframes import CameraKey, CameraTrack, KeyTime
 from skitter.core.edits import Crop, FlipHorizontal, Rotate90, apply_edits
 from skitter.core.matching.saved import SavedMosaic, restore, saved_mosaic
 from skitter.core.project import Project
@@ -56,6 +58,10 @@ def sample_project(alpha=True) -> Project:
     project.choreographies["deal"].update(decks=3)
     project.camera_move_id = "pull_back"
     project.camera_moves["pull_back"].update(zoom=6.0, timing=(10.0, 70.0), ease="out")
+    project.camera_track = CameraTrack((
+        CameraKey(KeyTime("lead", 0.5), Shot((10.0, 20.0), 3.0, 0.25)),
+        CameraKey(KeyTime("body", 0.4), Shot((30.0, 25.0), 1.5), stop=False, motion="linear"),
+    ), stretch=False)  # fmt: skip
     return project
 
 
@@ -75,6 +81,7 @@ def test_a_project_survives_a_round_trip(tmp_path):
         np.testing.assert_array_equal(getattr(again.regions, name), getattr(project.regions, name))
     assert again.choreography.id == "deal" and again.choreographies["deal"].decks == 3
     assert again.camera_move.id == "pull_back" and again.camera_move.timing == (10.0, 70.0)
+    assert again.camera_track == project.camera_track
     assert not again.slicing_plan.stages[1].enabled
     assert not (tmp_path / "test.skitter.part").exists()
 

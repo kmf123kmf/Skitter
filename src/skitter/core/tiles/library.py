@@ -94,11 +94,13 @@ class TileLibrary:
         self._db.executescript(_SCHEMA)
         self._thumbs_path = self.folder / "thumbs.u8"
         self._thumbs: np.memmap | None = None
+        self.closed = False  # close() was called: nothing can be read any more
         self._reload()
 
     def close(self) -> None:
         self._thumbs = None
         self._db.close()
+        self.closed = True
 
     # Roots
 

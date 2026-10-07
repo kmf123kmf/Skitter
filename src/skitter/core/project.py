@@ -7,6 +7,7 @@ import numpy as np
 
 from skitter.core.animation import Choreography, choreography_types
 from skitter.core.animation.camera import CameraMove, camera_move_types
+from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
@@ -45,6 +46,7 @@ class Project:
         default_factory=lambda: {cls.id: cls() for cls in camera_move_types()}
     )
     camera_move_id: str = "static"
+    camera_track: CameraTrack = field(default_factory=CameraTrack)  # keyframes (keyframes.py)
     animation_look: AnimationLook = field(default_factory=AnimationLook)
     video_settings: VideoSettings = field(default_factory=VideoSettings)
 

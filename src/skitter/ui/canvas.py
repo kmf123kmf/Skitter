@@ -1,5 +1,6 @@
 """GPU canvas: draws sprite layers with moderngl inside a Qt OpenGL widget."""
 
+import math
 import time
 from collections.abc import Callable
 
@@ -20,6 +21,7 @@ Animation = Callable[[float], bool]
 VIEW_ANIMATION_S = 0.2
 WHEEL_ZOOM_STEP = 1.15
 CLICK_SLOP = 4  # logical pixels a click may move and still not be a drag
+ROTATE_STEP_DEG = 5.0  # view turn per wheel notch (with Shift, where rotatable)
 CHECKER_PX = 8  # checkerboard square size, logical pixels (transparent backgrounds)
 
 _CHECKER_VERTEX = """
@@ -87,6 +89,7 @@ class MosaicCanvas(QOpenGLWidget):
         self.bounds: WorldRect | None = None
         self.bounds_rotation = 0.0  # bounds are a rect in a frame turned this much (fit_to)
         self.clamp_to_bounds = False
+        self.rotatable = False  # Shift+wheel turns the view (the Animate viewfinder)
         self.fit_mode = False
         self.fit_margin = 0.95
         # Show texels as sharp squares once each covers this many device pixels.
@@ -175,6 +178,14 @@ class MosaicCanvas(QOpenGLWidget):
         """Zoom by factor about screen point (x, y)."""
         center, zoom = self.camera.zoom_at_params(x, y, factor)
         self.set_view(center, zoom, animate)
+
+    def rotate_by(self, angle: float) -> None:
+        """Turn the view about its middle by angle (radians, clockwise), leaving fit mode."""
+        self._view_token = None
+        self.fit_mode = False
+        self.camera.rotation += float(angle)
+        self.view_changed.emit()
+        self.update()
 
     def report_cursor(self, pos: QPointF) -> None:
         """Emit cursor_moved for a screen position (used by overlay widgets)."""
@@ -344,7 +355,14 @@ class MosaicCanvas(QOpenGLWidget):
             self.double_clicked.emit(pos.x(), pos.y())
 
     def wheelEvent(self, event: QWheelEvent) -> None:
-        steps = event.angleDelta().y() / 120
+        delta = event.angleDelta()
+        if self.rotatable and event.modifiers() & Qt.KeyboardModifier.ShiftModifier:
+            # Some systems turn Shift+wheel into a sideways scroll.
+            steps = (delta.y() or delta.x()) / 120
+            if steps:
+                self.rotate_by(math.radians(ROTATE_STEP_DEG) * steps)
+            return
+        steps = delta.y() / 120
         if steps:
             pos = event.position()
             self.zoom_at(pos.x(), pos.y(), WHEEL_ZOOM_STEP**steps)

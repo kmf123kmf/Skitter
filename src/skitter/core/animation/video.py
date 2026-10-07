@@ -226,6 +226,50 @@ class VideoSettings(Configurable):
 
 
 @dataclass(frozen=True)
+class VideoClock:
+    """The video's own time: a start hold, the animation, an end hold.
+
+    Tiles follow animation time, which stands still during the holds; the
+    camera (keyframes.py) follows video time, so it can move over the empty
+    table before the build and over the finished mosaic after it.
+    """
+
+    hold_start: float
+    duration: float  # the animation's
+    hold_end: float
+
+    @property
+    def total(self) -> float:
+        return self.hold_start + self.duration + self.hold_end
+
+    @property
+    def animation_end(self) -> float:
+        """Video time at which the animation finishes."""
+        return self.hold_start + self.duration
+
+    def animation_time(self, video_time):
+        """Animation time at video time(s): still during the holds."""
+        return np.clip(np.asarray(video_time, dtype=np.float64) - self.hold_start,
+                       0.0, self.duration)  # fmt: skip
+
+    @classmethod
+    def of(cls, settings: "VideoSettings", duration: float) -> "VideoClock":
+        return cls(float(settings.hold_start), float(duration), float(settings.hold_end))
+
+
+class ClockedTimeline:
+    """A timeline seen on the video clock: frame(t) at video time t, over the holds
+    too (still before and after the animation)."""
+
+    def __init__(self, timeline, clock: VideoClock):
+        self.timeline, self.clock = timeline, clock
+        self.duration = clock.total
+
+    def frame(self, t: float):
+        return self.timeline.frame(float(self.clock.animation_time(t)))
+
+
+@dataclass(frozen=True)
 class VideoPlan:
     """Everything decided before rendering: size, view, frame times."""
 
@@ -245,6 +289,12 @@ class VideoPlan:
         return len(self.clock)
 
     @property
+    def video_clock(self) -> VideoClock:
+        total = float(self.clock[-1]) if len(self.clock) else 0.0
+        return VideoClock(self.hold_start, self.duration,
+                          max(0.0, total - self.hold_start - self.duration))  # fmt: skip
+
+    @property
     def times(self) -> np.ndarray:
         """(F,) animation time of each frame (still during the holds)."""
         return np.clip(self.clock - self.hold_start, 0.0, self.duration)
@@ -258,15 +308,21 @@ class VideoPlan:
         """Output pixels per mosaic unit."""
         return self.width / self.view[2]
 
-    def moments(self, k: int) -> np.ndarray:
-        """Animation times blended into frame k: spread over the shutter around its video
-        time, then mapped through the holds (so held frames stay perfectly still). The
-        last frame is exactly the finished mosaic."""
+    def video_moments(self, k: int) -> np.ndarray:
+        """Video times blended into frame k: spread over the shutter around its time (the
+        camera follows these). The last frame is exactly the end."""
         if self.samples <= 1 or self.shutter <= 0 or k == self.frames - 1:
-            return self.times[k : k + 1]
+            return self.clock[k : k + 1].astype(np.float64)
         offsets = (np.arange(self.samples) + 0.5) / self.samples - 0.5
-        return np.clip(self.clock[k] + offsets * self.shutter - self.hold_start,
-                       0.0, self.duration)  # fmt: skip
+        return np.clip(self.clock[k] + offsets * self.shutter, 0.0, float(self.clock[-1]))
+
+    def moments(self, k: int) -> np.ndarray:
+        """Animation times blended into frame k: video_moments mapped through the holds
+        (so held frames stay perfectly still). The last frame is exactly the finished
+        mosaic."""
+        if k == self.frames - 1:
+            return self.times[k : k + 1]
+        return self.video_clock.animation_time(self.video_moments(k))
 
 
 def output_size(settings: VideoSettings, scene: MosaicScene) -> tuple[int, int]:

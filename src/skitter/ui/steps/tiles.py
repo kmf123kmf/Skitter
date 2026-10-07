@@ -402,7 +402,7 @@ class TilesStep(StepPage):
 
     def _set_colors(self, colors: TileColors, version: int) -> None:
         library = self.session.library
-        if library is None or library.version != version:
+        if library is None or library.closed or library.version != version:
             return  # the library changed meanwhile: _refresh analyzes again
         self._colors, self._colors_version = colors, version
         self._map = self._coverage = None
