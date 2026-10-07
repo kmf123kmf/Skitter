@@ -7,26 +7,33 @@ tiles are, the other what the frame shows. The renderer combines them.
 A move animates the framing, not the table camera of look.py: that camera
 stays above the middle of the mosaic, so perspective, shadows and the
 choreographies' rules about it (tiles kept off its axis near it) hold. A
-move is a long lens panning and zooming over that picture. A `Shot` is the
-point of the table at the middle of the frame and a zoom relative to the
-video's framing (zoom 1 shows exactly the video_rect framing, as Static does).
+move is a long lens panning, zooming and turning over that picture. A `Shot`
+is the table point at the middle of the frame, a zoom relative to the
+video's framing (zoom 1 shows exactly the view_rect framing, as Static does)
+and a turn (radians, clockwise: the picture looks turned the other way).
 
 Moves plan a `CameraPath` for a scene, its timeline and that framing;
 `path.shot(t)` is the shot at time t. Timing settings are shares of the
-animation, so a move stays in step when the duration changes. Zoom moves
-are pure zooms about one fixed point of the table (nothing slides across
-the frame while it zooms), with the zoom changing geometrically (each step
-feels as large as the last).
+animation, so a move stays in step when the duration changes.
+
+Most moves are made of `Segment`s, each a spiral similarity: the frame
+scales and turns about one fixed table point, so nothing slides across the
+frame on its own (a pure zoom when the turn doesn't change; a straight pan
+when neither does). Zoom changes geometrically, so each step feels as large
+as the last. Follow samples the timeline instead (`SampledPath`).
 
 Add a move by subclassing CameraMove (declare Params, plan a path) and
 decorating it with @register_camera_move.
 """
 
+import cmath
+import math
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import ClassVar
 
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 from skitter.core import easing
 from skitter.core.animation.base import Timeline
@@ -48,19 +55,38 @@ EASE_CHOICES = (
     ("out", "Gentle stop"),
     ("linear", "Steady"),
 )
+PLACES = {  # named spots of the mosaic, as fractions across and down
+    "top_left": (0.0, 0.0), "top": (0.5, 0.0), "top_right": (1.0, 0.0),
+    "left": (0.0, 0.5), "center": (0.5, 0.5), "right": (1.0, 0.5),
+    "bottom_left": (0.0, 1.0), "bottom": (0.5, 1.0), "bottom_right": (1.0, 1.0),
+}  # fmt: skip
+PLACE_CHOICES = tuple((key, key.replace("_", " ").capitalize()) for key in PLACES)
 
 
 @dataclass(frozen=True)
 class Shot:
-    """What the frame shows at a moment: centered on a table point, at a zoom."""
+    """What the frame shows at a moment."""
 
     center: tuple[float, float]  # the table point at the middle of the frame
     zoom: float = 1.0  # 1: the video's framing; 2: twice as close
+    rotation: float = 0.0  # the frame's turn over the table, radians clockwise
 
-    def view(self, base: WorldRect) -> WorldRect:
-        """The world rect shown, given the video's framing (the view at zoom 1)."""
-        w, h = base[2] / self.zoom, base[3] / self.zoom
-        return (self.center[0] - w / 2, self.center[1] - h / 2, w, h)
+    def size(self, base: WorldRect) -> tuple[float, float]:
+        """The frame's width and height on the table, given the video's framing."""
+        return base[2] / self.zoom, base[3] / self.zoom
+
+    def corners(self, base: WorldRect) -> np.ndarray:
+        """(4, 2) the frame's corners on the table: top left, top right, bottom right,
+        bottom left (as the video shows them)."""
+        w, h = self.size(base)
+        local = np.array([[-w, -h], [w, -h], [w, h], [-w, h]]) / 2
+        c, s = math.cos(self.rotation), math.sin(self.rotation)
+        return np.asarray(self.center) + local @ np.array([[c, s], [-s, c]])
+
+
+def home_shot(base: WorldRect) -> Shot:
+    """The video's framing itself."""
+    return Shot((base[0] + base[2] / 2, base[1] + base[3] / 2))
 
 
 class CameraPath(ABC):
@@ -77,6 +103,68 @@ class CameraPath(ABC):
 
 
 @dataclass(frozen=True)
+class Segment:
+    """From one shot to another over [t0, t1], eased: a spiral similarity (see the
+    module docstring). In complex numbers, the center is a - e^(i rotation) K / zoom
+    for a fixed point a, which stays where it is in the frame throughout."""
+
+    t0: float
+    t1: float
+    start: Shot
+    end: Shot
+    ease: str = "smooth"
+
+    def progress(self, t: float) -> float:
+        span = self.t1 - self.t0
+        u = 1.0 if span <= 0 else min(max((t - self.t0) / span, 0.0), 1.0)
+        return float(EASES[self.ease](u))
+
+    @property
+    def fixed_point(self) -> complex | None:
+        """The table point that stays put in the frame (None: a straight pan)."""
+        a, b = self.start, self.end
+        k = (a.zoom / b.zoom) * cmath.exp(1j * (b.rotation - a.rotation))
+        if abs(1 - k) < 1e-9:
+            return None
+        return (complex(*b.center) - k * complex(*a.center)) / (1 - k)
+
+    def shot(self, t: float) -> Shot:
+        a, b = self.start, self.end
+        u = self.progress(t)
+        if u <= 0.0 or u >= 1.0:
+            return a if u <= 0.0 else b  # exactly, so the holds before and after match
+        zoom = a.zoom * (b.zoom / a.zoom) ** u
+        rotation = a.rotation + (b.rotation - a.rotation) * u
+        fixed = self.fixed_point
+        if fixed is None:
+            c = complex(*a.center) + (complex(*b.center) - complex(*a.center)) * u
+        else:
+            k = (fixed - complex(*a.center)) * a.zoom * cmath.exp(-1j * a.rotation)
+            c = fixed - cmath.exp(1j * rotation) * k / zoom
+        return Shot((c.real, c.imag), zoom, rotation)
+
+
+@dataclass(frozen=True)
+class SegmentPath(CameraPath):
+    """Segments in time order; still between and around them."""
+
+    segments: tuple[Segment, ...]
+
+    def shot(self, t: float) -> Shot:
+        segments = self.segments
+        if t <= segments[0].t0:
+            return segments[0].start
+        for segment in segments:
+            if t <= segment.t1:
+                return segment.shot(t) if t >= segment.t0 else segment.start
+        return segments[-1].end
+
+    @property
+    def max_zoom(self) -> float:
+        return max(max(s.start.zoom, s.end.zoom) for s in self.segments)
+
+
+@dataclass(frozen=True)
 class StillPath(CameraPath):
     still: Shot
 
@@ -89,64 +177,61 @@ class StillPath(CameraPath):
 
 
 @dataclass(frozen=True)
-class ZoomPath(CameraPath):
-    """A pure zoom about a fixed table point: zoom z0 at time t0 to z1 at t1, eased.
+class SampledPath(CameraPath):
+    """Shots sampled over time, interpolated (centers linearly, zoom geometrically)."""
 
-    The frame's center at zoom z is anchor + (home - anchor) / z, where home is
-    the center at zoom 1, so every table point moves straight toward or away
-    from the anchor and the anchor itself stays put in the frame.
-    """
-
-    anchor: tuple[float, float]
-    home: tuple[float, float]
-    z0: float
-    z1: float
-    t0: float
-    t1: float
-    ease: str = "smooth"
+    times: np.ndarray  # (S,) increasing
+    centers: np.ndarray  # (S, 2)
+    zooms: np.ndarray  # (S,)
 
     def shot(self, t: float) -> Shot:
-        span = self.t1 - self.t0
-        u = 1.0 if span <= 0 else float(np.clip((t - self.t0) / span, 0.0, 1.0))
-        u = float(EASES[self.ease](u))
-        zoom = self.z0 * (self.z1 / self.z0) ** u
-        anchor, home = np.asarray(self.anchor), np.asarray(self.home)
-        center = anchor + (home - anchor) / zoom
-        return Shot((float(center[0]), float(center[1])), zoom)
+        x = float(np.interp(t, self.times, self.centers[:, 0]))
+        y = float(np.interp(t, self.times, self.centers[:, 1]))
+        zoom = float(np.exp(np.interp(t, self.times, np.log(self.zooms))))
+        return Shot((x, y), zoom)
 
     @property
     def max_zoom(self) -> float:
-        return max(self.z0, self.z1)
+        return float(self.zooms.max())
+
+
+def keep_on_mosaic(scene: MosaicScene, base: WorldRect, point, zoom: float) -> tuple[float, float]:
+    """A frame center near point (table units) that keeps a frame at this zoom on the
+    mosaic where it can (centered on any axis where the frame is the wider)."""
+    x0, y0, x1, y1 = content_rect(scene)
+    w, h = base[2] / zoom, base[3] / zoom
+    center = []
+    for lo, hi, size, c in ((x0, x1, w, point[0]), (y0, y1, h, point[1])):
+        if size >= hi - lo:
+            c = (lo + hi) / 2
+        else:
+            c = min(max(c, lo + size / 2), hi - size / 2)
+        center.append(float(c))
+    return center[0], center[1]
+
+
+def spot(scene: MosaicScene, fractions) -> tuple[float, float]:
+    """A point of the mosaic given as fractions across and down."""
+    x0, y0, x1, y1 = content_rect(scene)
+    return x0 + fractions[0] * (x1 - x0), y0 + fractions[1] * (y1 - y0)
 
 
 def close_up(scene: MosaicScene, base: WorldRect, focus, zoom: float) -> tuple[float, float]:
     """Where a close-up at this zoom centers: on the focus (fractions of the mosaic),
     moved just enough to keep the frame on the mosaic where it can."""
-    x0, y0, x1, y1 = content_rect(scene)
-    w, h = base[2] / zoom, base[3] / zoom
-    center = []
-    for lo, hi, size, f in ((x0, x1, w, focus[0]), (y0, y1, h, focus[1])):
-        c = lo + f * (hi - lo)
-        if size >= hi - lo:
-            c = (lo + hi) / 2
-        else:
-            c = min(max(c, lo + size / 2), hi - size / 2)
-        center.append(c)
-    return center[0], center[1]
+    return keep_on_mosaic(scene, base, spot(scene, focus), zoom)
 
 
 def zoom_path(scene, base: WorldRect, duration: float, focus, zoom: float, timing, ease: str,
               closing: bool) -> CameraPath:  # fmt: skip
     """From the close-up to the full view (closing False: pull back) or the reverse."""
-    home = (base[0] + base[2] / 2, base[1] + base[3] / 2)
+    home = home_shot(base)
     if zoom <= 1.0 + 1e-9:
-        return StillPath(Shot(home))
-    near = np.asarray(close_up(scene, base, focus, zoom))
-    # The fixed point whose pure zoom from home (zoom 1) reaches `near` at `zoom`.
-    anchor = (zoom * near - np.asarray(home)) / (zoom - 1.0)
+        return StillPath(home)
+    near = Shot(close_up(scene, base, focus, zoom), zoom)
     t0, t1 = (duration * share / 100.0 for share in timing)
-    z0, z1 = (1.0, zoom) if closing else (zoom, 1.0)
-    return ZoomPath((float(anchor[0]), float(anchor[1])), home, z0, z1, t0, t1, ease)
+    start, end = (home, near) if closing else (near, home)
+    return SegmentPath((Segment(t0, t1, start, end, ease),))
 
 
 class CameraMove(Configurable, ABC):
@@ -187,17 +272,7 @@ def get_camera_move(type_id: str) -> type[CameraMove]:
         raise KeyError(f"unknown camera move {type_id!r}") from None
 
 
-# Built-in moves
-
-
-@register_camera_move
-class StaticMove(CameraMove):
-    id = "static"
-    name = "Static"
-    description = "The camera holds still on the video's framing."
-
-    def path(self, scene, timeline, base) -> CameraPath:
-        return StillPath(Shot((base[0] + base[2] / 2, base[1] + base[3] / 2)))
+# Shared settings
 
 
 def _focus(axis: str) -> FloatParam:
@@ -210,10 +285,10 @@ def _focus(axis: str) -> FloatParam:
     )  # fmt: skip
 
 
-def _zoom() -> FloatParam:
+def _zoom(default: float = 4.0, label: str = "Close-up", help: str = "") -> FloatParam:
     return FloatParam(
-        4.0, "Close-up", min=1.0, max=20.0, step=0.5, decimals=1, suffix="×",
-        help="How close the close-up is, compared with the video's framing.",
+        default, label, min=1.0, max=20.0, step=0.5, decimals=1, suffix="×",
+        help=help or "How close the close-up is, compared with the video's framing.",
     )  # fmt: skip
 
 
@@ -228,6 +303,23 @@ def _timing(default) -> RangeParam:
 def _ease() -> ChoiceParam:
     return ChoiceParam("smooth", "Easing", choices=EASE_CHOICES,
                        help="How the move speeds up and slows down.")  # fmt: skip
+
+
+def _span(duration: float, timing) -> tuple[float, float]:
+    return duration * timing[0] / 100.0, duration * timing[1] / 100.0
+
+
+# Built-in moves
+
+
+@register_camera_move
+class StaticMove(CameraMove):
+    id = "static"
+    name = "Static"
+    description = "The camera holds still on the video's framing."
+
+    def path(self, scene, timeline, base) -> CameraPath:
+        return StillPath(home_shot(base))
 
 
 @register_camera_move
@@ -264,13 +356,164 @@ class PushInMove(CameraMove):
                          self.zoom, self.timing, self.ease, closing=True)  # fmt: skip
 
 
+@register_camera_move
+class PanMove(CameraMove):
+    id = "pan"
+    name = "Pan"
+    description = (
+        "Glides across the mosaic close up, from one side or corner to another, then "
+        "pulls back to show it all (or stays close)."
+    )
+
+    start = ChoiceParam("left", "From", choices=PLACE_CHOICES,
+                        help="Where the pan starts, close up.")  # fmt: skip
+    finish = ChoiceParam("right", "To", choices=PLACE_CHOICES,
+                         help="Where the pan ends.")  # fmt: skip
+    zoom = _zoom(2.5, help="How close the camera pans, compared with the video's framing.")
+    timing = _timing((0.0, 85.0))
+    ending = ChoiceParam(
+        "whole", "Then", choices=(("whole", "Pull back to the whole mosaic"),
+                                  ("stay", "Stay close")),
+        help="Whole mosaic: the last quarter of the move pulls back to show everything.",
+    )  # fmt: skip
+    ease = _ease()
+
+    def path(self, scene, timeline, base) -> CameraPath:
+        t0, t1 = _span(timeline.duration, self.timing)
+        zoom = self.zoom
+        a = Shot(keep_on_mosaic(scene, base, spot(scene, PLACES[self.start]), zoom), zoom)
+        b = Shot(keep_on_mosaic(scene, base, spot(scene, PLACES[self.finish]), zoom), zoom)
+        if self.ending == "stay":
+            return SegmentPath((Segment(t0, t1, a, b, self.ease),))
+        mid = t0 + 0.75 * (t1 - t0)
+        return SegmentPath((Segment(t0, mid, a, b, self.ease),
+                            Segment(mid, t1, b, home_shot(base), self.ease)))  # fmt: skip
+
+
+@register_camera_move
+class RotateMove(CameraMove):
+    id = "rotate"
+    name = "Rotate"
+    description = (
+        "Starts turned (and, if you like, closer) and turns upright onto the whole mosaic."
+    )
+
+    angle = FloatParam(
+        30.0, "Turn", min=-180.0, max=180.0, step=5.0, decimals=0, suffix="°",
+        help="How far the picture turns on its way upright: positive turns clockwise, "
+             "negative counterclockwise.",
+    )  # fmt: skip
+    zoom = _zoom(1.5, "Start", help="How close the camera starts (1: the video's framing).")
+    timing = _timing((0.0, 80.0))
+    ease = _ease()
+
+    def path(self, scene, timeline, base) -> CameraPath:
+        t0, t1 = _span(timeline.duration, self.timing)
+        home = home_shot(base)
+        # The frame turns the other way to the picture.
+        start = Shot(home.center, self.zoom, -math.radians(self.angle))
+        if start == home:
+            return StillPath(home)
+        return SegmentPath((Segment(t0, t1, start, home, self.ease),))
+
+
+FOLLOW_SAMPLES = 96  # moments the timeline is looked at to find the action
+
+
+def _nearest(found: np.ndarray) -> np.ndarray:
+    """For each index, the nearest index where found is True (found has one at least)."""
+    have = np.flatnonzero(found)
+    index = np.arange(len(found))
+    right = np.searchsorted(have, index).clip(0, len(have) - 1)
+    left = (right - 1).clip(0, len(have) - 1)
+    closer = np.abs(have[left] - index) <= np.abs(have[right] - index)
+    return np.where(closer, have[left], have[right])
+
+
+@register_camera_move
+class FollowMove(CameraMove):
+    id = "follow"
+    name = "Follow"
+    description = (
+        "Watches where the mosaic is being built: the camera keeps the landing spots of "
+        "the tiles in flight in view, then pulls back to the whole mosaic at the end."
+    )
+
+    closest = _zoom(3.0, "Closest", help="The closest the camera gets, compared with the "
+                                        "video's framing.")  # fmt: skip
+    room = FloatParam(
+        1.5, "Room", min=1.0, max=4.0, step=0.25, decimals=2, suffix="×",
+        help="How much room the frame leaves around the action (1: just enough).",
+    )  # fmt: skip
+    smoothness = FloatParam(
+        10.0, "Smoothness", min=0.0, max=50.0, step=2.5, decimals=1, suffix="%",
+        help="How calmly the camera follows: it averages the action over this share of "
+             "the animation.",
+    )  # fmt: skip
+    ending = FloatParam(
+        20.0, "Pull back over", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
+        help="The last share of the animation, over which the camera eases back to the "
+             "whole mosaic.",
+    )  # fmt: skip
+
+    def path(self, scene, timeline, base) -> CameraPath:
+        duration = timeline.duration
+        home = home_shot(base)
+        if duration <= 0 or not len(scene):
+            return StillPath(home)
+        times = np.linspace(0.0, duration, FOLLOW_SAMPLES)
+        spots = np.asarray(scene.center, dtype=np.float64)
+        reach = 0.5 * np.asarray(scene.size, dtype=np.float64).max(axis=1)
+        centers = np.full((len(times), 2), np.nan)
+        zooms = np.full(len(times), np.nan)
+        for i, t in enumerate(times):
+            frame = timeline.frame(float(t))
+            moving = frame.alpha > 0
+            if frame.rest is not None:
+                moving &= ~frame.rest
+            else:
+                moving &= np.abs(frame.center - spots).sum(axis=1) > 1e-6
+            if not moving.any():
+                continue
+            where = spots[moving]
+            lo = np.percentile(where, 10, axis=0) - reach[moving].mean()
+            hi = np.percentile(where, 90, axis=0) + reach[moving].mean()
+            centers[i] = (lo + hi) / 2
+            need = np.maximum(hi - lo, 1e-9) * self.room
+            zooms[i] = min(self.closest, base[2] / need[0], base[3] / need[1])
+        found = ~np.isnan(zooms)
+        if not found.any():
+            return StillPath(home)
+        # Moments without action hold the shot of the nearest moment with some.
+        nearest = _nearest(found)
+        centers, zooms = centers[nearest], np.maximum(zooms[nearest], 1.0)
+        sigma = self.smoothness / 100.0 * (len(times) - 1)
+        log_zoom = np.log(zooms)
+        if sigma > 0:
+            centers = gaussian_filter1d(centers, sigma, axis=0, mode="nearest")
+            log_zoom = gaussian_filter1d(log_zoom, sigma, mode="nearest")
+        zooms = np.exp(log_zoom)
+        # Ease back to the whole mosaic over the last share.
+        start = duration * (1 - self.ending / 100.0)
+        u = np.clip((times - start) / max(duration - start, 1e-9), 0.0, 1.0)
+        u = easing.ease_in_out_cubic(u) if self.ending > 0 else (times >= duration) * 1.0
+        zooms = np.exp(np.log(zooms) * (1 - u))
+        centers = centers + (np.asarray(home.center) - centers) * u[:, None]
+        centers = np.array([keep_on_mosaic(scene, base, c, z)
+                            for c, z in zip(centers, zooms, strict=True)])  # fmt: skip
+        return SampledPath(times, centers, zooms)
+
+
 __all__ = [
     "CameraMove",
     "CameraPath",
+    "SampledPath",
+    "Segment",
+    "SegmentPath",
     "Shot",
     "StillPath",
-    "ZoomPath",
     "camera_move_types",
     "get_camera_move",
+    "home_shot",
     "register_camera_move",
 ]

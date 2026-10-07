@@ -21,7 +21,7 @@ import moderngl
 import numpy as np
 
 from skitter.core.animation import Timeline
-from skitter.core.animation.camera import CameraPath
+from skitter.core.animation.camera import CameraPath, Shot, home_shot
 from skitter.core.animation.look import TableCamera
 from skitter.core.animation.video import VideoPlan
 from skitter.ui.render.camera import Camera2D
@@ -165,9 +165,9 @@ class VideoRenderer:
             for layer, instances in zip(self._layers(), layers, strict=True):
                 layer.instances = instances
                 layer.mark_dirty()
-            view = plan.view if path is None else path.shot(float(t)).view(plan.view)
+            shot = home_shot(plan.view) if path is None else path.shot(float(t))
             for section in self.passes:
-                self._render_pass(section, weight, view)
+                self._render_pass(section, weight, shot)
         # Lay over the background (or keep alpha) and convert to sRGB.
         self.out.use()
         ctx.viewport = (0, 0, plan.width, plan.height)
@@ -181,14 +181,16 @@ class VideoRenderer:
         frame = np.frombuffer(data, np.uint8).reshape(plan.height, plan.width, 4)
         return np.ascontiguousarray(frame[::-1])  # OpenGL rows run bottom to top
 
-    def _render_pass(self, section, weight: float, view) -> None:
+    def _render_pass(self, section, weight: float, shot: Shot) -> None:
         ctx, plan, s = self.ctx, self.plan, self.factor
         x, y, w, h = section
-        vx, vy, vw, _ = view
-        scale = plan.width / vw  # output pixels per mosaic unit
+        scale = plan.width / shot.size(plan.view)[0]  # output pixels per mosaic unit
         cam = self.camera
-        cam.center = np.array([vx + (x + w / 2) / scale, vy + (y + h / 2) / scale])
+        cam.rotation = shot.rotation
         cam.zoom = scale * s
+        # The section's middle, from the frame's middle, along the (turned) frame.
+        offset = np.array([x + w / 2 - plan.width / 2, y + h / 2 - plan.height / 2]) / scale
+        cam.center = np.asarray(shot.center) + cam.turn(offset)
         cam.viewport = np.array([w * s, h * s], dtype=float)
 
         self.msaa.use()

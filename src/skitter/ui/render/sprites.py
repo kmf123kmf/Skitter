@@ -206,6 +206,7 @@ class SpriteRenderer:
     def set_camera(self, camera: Camera2D) -> None:
         self.program["u_center"] = tuple(camera.center)
         self.program["u_zoom"] = camera.zoom
+        self.program["u_rotation"] = float(camera.rotation)
         self.program["u_viewport"] = tuple(camera.viewport)
 
     def render(self, layer: SpriteLayer, nearest_mag: bool = False) -> None:

@@ -85,6 +85,7 @@ class MosaicCanvas(QOpenGLWidget):
         self.renderer: SpriteRenderer | None = None
 
         self.bounds: WorldRect | None = None
+        self.bounds_rotation = 0.0  # bounds are a rect in a frame turned this much (fit_to)
         self.clamp_to_bounds = False
         self.fit_mode = False
         self.fit_margin = 0.95
@@ -129,8 +130,13 @@ class MosaicCanvas(QOpenGLWidget):
         """Device pixels per world unit (1.0 shows images at actual size)."""
         return self.camera.zoom * self.devicePixelRatioF()
 
-    def fit_to(self, x: float, y: float, w: float, h: float, animate: bool = False) -> None:
+    def fit_to(
+        self, x: float, y: float, w: float, h: float, animate: bool = False, rotation: float = 0.0
+    ) -> None:
+        """Frame the rect (x, y, w, h); with rotation, a rect of that size around the same
+        center, turned that much clockwise (the view turns with it)."""
         self.bounds = (x, y, w, h)
+        self.bounds_rotation = float(rotation)
         self.zoom_to_fit(animate)
 
     def zoom_to_fit(
@@ -144,6 +150,7 @@ class MosaicCanvas(QOpenGLWidget):
         if self.bounds is None or not self._has_viewport():
             self.update()
             return
+        self.camera.rotation = self.bounds_rotation
         center, zoom = self.camera.fit_params(*self.bounds, margin=self.fit_margin)
         self._apply_view(center, zoom, animate, duration, easing)
 
@@ -319,7 +326,7 @@ class MosaicCanvas(QOpenGLWidget):
             delta = event.position() - self._drag_pos
             self._drag_pos = event.position()
             cam = self.camera
-            self.set_view(cam.center - np.array([delta.x(), delta.y()]) / cam.zoom, cam.zoom)
+            self.set_view(cam.center - cam.screen_delta(delta.x(), delta.y()), cam.zoom)
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         press, self._press_pos = self._press_pos, None

@@ -12,6 +12,8 @@ camera" keeps the view on it (panning or zooming by hand stops following).
 A new mosaic opens on its finished state; Play runs from the start.
 """
 
+import math
+
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -25,7 +27,7 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from skitter.core.animation.camera import CameraPath
+from skitter.core.animation.camera import CameraPath, Shot, home_shot
 from skitter.core.animation.look import TableCamera
 from skitter.core.animation.video import output_size, view_rect
 from skitter.core.scene import MosaicScene
@@ -370,12 +372,12 @@ class AnimateStep(StepPage):
         width, height = output_size(self.project.video_settings, self.scene)
         return view_rect(self.scene, width, height, self.project.video_settings), (width, height)
 
-    def shot_rect(self):
+    def shot(self) -> Shot:
         """What the video shows at the player's current time (the camera move's shot)."""
         base, _ = self._frame_rect()
         if self.camera_path is None:
-            return base
-        return self.camera_path.shot(self.player.time).view(base)
+            return home_shot(base)
+        return self.camera_path.shot(self.player.time)
 
     def _show_shot(self, _t: float = 0.0) -> None:
         """The player moved in time: the export frame (and a following view) moves along."""
@@ -390,21 +392,27 @@ class AnimateStep(StepPage):
         shade = make_instances(4 if shown else 0)
         line = make_instances(1 if shown else 0)
         if shown:
-            x, y, w, h = self.shot_rect()
-            # Four bands around the frame: above, below, left, right.
+            shot = self.shot()
+            w, h = shot.size(self._frame_rect()[0])
+            # Four bands around the frame, in its own (turned) frame: above, below, left,
+            # right; centers relative to the frame's.
             boxes = [
-                (x - FAR, y - FAR, w + 2 * FAR, FAR),
-                (x - FAR, y + h, w + 2 * FAR, FAR),
-                (x - FAR, y, FAR, h),
-                (x + w, y, FAR, h),
+                (0.0, -(h + FAR) / 2, w + 2 * FAR, FAR),
+                (0.0, (h + FAR) / 2, w + 2 * FAR, FAR),
+                (-(w + FAR) / 2, 0.0, FAR, h),
+                ((w + FAR) / 2, 0.0, FAR, h),
             ]
+            c, s = math.cos(shot.rotation), math.sin(shot.rotation)
             for i, (bx, by, bw, bh) in enumerate(boxes):
-                shade[i]["pos"] = (bx + bw / 2, by + bh / 2)
+                shade[i]["pos"] = (shot.center[0] + c * bx - s * by,
+                                   shot.center[1] + s * bx + c * by)  # fmt: skip
                 shade[i]["size"] = (bw, bh)
+            shade["rotation"] = shot.rotation
             shade["tint"] = (0.0, 0.0, 0.0, 1.0)
             shade["alpha"] = FRAME_DIM
-            line["pos"] = (x + w / 2, y + h / 2)
+            line["pos"] = shot.center
             line["size"] = (w, h)
+            line["rotation"] = shot.rotation
             line["tint"] = (1.0, 1.0, 1.0, 1.0)
         self._shade.instances, self._frame_line.instances = shade, line
         self._shade.mark_dirty()
@@ -414,13 +422,17 @@ class AnimateStep(StepPage):
     def _fit(self) -> None:
         if self.scene is None:
             return
+        rotation = 0.0
         if self.show_frame.isChecked():
-            x, y, w, h = self.shot_rect() if self.follow.isChecked() else self._frame_rect()[0]
-            x0, y0, x1, y1 = x, y, x + w, y + h
+            base, _ = self._frame_rect()
+            shot = self.shot() if self.follow.isChecked() else home_shot(base)
+            (cx, cy), (w, h), rotation = shot.center, shot.size(base), shot.rotation
+            x0, y0, x1, y1 = cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2
         else:
             x0, y0, x1, y1 = self.scene.bounds
         mx, my = (x1 - x0) * MARGIN, (y1 - y0) * MARGIN
-        self.canvas.fit_to(x0 - mx, y0 - my, x1 - x0 + 2 * mx, y1 - y0 + 2 * my)
+        self.canvas.fit_to(x0 - mx, y0 - my, x1 - x0 + 2 * mx, y1 - y0 + 2 * my,
+                           rotation=rotation)  # fmt: skip
 
     def _refresh_export(self) -> None:
         self.export_button.setEnabled(self.session.can_export and self.scene is not None)

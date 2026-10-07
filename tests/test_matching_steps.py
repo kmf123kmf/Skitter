@@ -1,5 +1,6 @@
 """Tiles and Matching steps, background jobs, and the tile atlas (headless)."""
 
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -1146,7 +1147,7 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     animate.show_frame.setChecked(True)
     animate.follow.setChecked(True)
     base, _ = animate._frame_rect()
-    assert animate.camera_box.currentData() == "static" and animate.shot_rect() == base
+    assert animate.camera_box.currentData() == "static" and animate.shot().zoom == 1.0
 
     # Pull back: the export frame starts small (close up) and ends on the whole video view.
     animate.camera_box.setCurrentIndex(animate.camera_box.findData("pull_back"))
@@ -1155,11 +1156,11 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     assert session.project.camera_move.zoom == 4.0
     animate.player.seek(0.0)
     w = animate._frame_line.instances["size"][0][0]
-    assert w == pytest.approx(base[2] / 4) and animate.shot_rect()[2] == pytest.approx(base[2] / 4)
+    assert w == pytest.approx(base[2] / 4) and animate.shot().zoom == pytest.approx(4.0)
     close_view = animate.canvas.bounds[2]  # following: the view is fitted around the shot
     assert close_view < base[2] / 2
     animate.player.seek(animate.player.duration)
-    assert animate.shot_rect() == pytest.approx(base)
+    assert animate.shot().zoom == pytest.approx(1.0)
     assert animate.canvas.bounds[2] > 3 * close_view
 
     # Panning by hand stops following; the frame still moves with the camera.
@@ -1171,3 +1172,13 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     animate.player.seek(animate.player.duration)
     assert camera.zoom == zoom
     assert animate._frame_line.instances["size"][0][0] == pytest.approx(base[2])
+
+    # Rotate: the frame is drawn turned, and a following view turns with it.
+    animate.camera_box.setCurrentIndex(animate.camera_box.findData("rotate"))
+    animate.camera_form.editor("angle").widget.setValue(45.0)
+    animate.follow.setChecked(True)
+    animate.player.seek(0.0)
+    assert animate._frame_line.instances["rotation"][0] == pytest.approx(-math.pi / 4)
+    assert animate.canvas.camera.rotation == pytest.approx(-math.pi / 4)
+    animate.player.seek(animate.player.duration)
+    assert animate.canvas.camera.rotation == pytest.approx(0.0)

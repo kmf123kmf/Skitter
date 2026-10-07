@@ -15,6 +15,7 @@ in vec3 in_offset;    // OKLab shift of every texel (matching's tint)
 in float in_blur;     // > 0: soft shadow; the quad grows by this much (world units)
 
 uniform vec2 u_center;     // camera center, world units
+uniform float u_rotation;  // camera turn, radians clockwise (the world looks turned back)
 uniform float u_zoom;      // screen pixels per world unit
 uniform vec2 u_viewport;   // viewport size, logical pixels
 
@@ -37,7 +38,11 @@ void main() {
     vec2 world = in_pos + vec2(c * local.x - s * local.y, s * local.x + c * local.y);
 
     // World y grows downward (image convention); clip space y grows upward.
-    vec2 ndc = (world - u_center) * u_zoom / (u_viewport * 0.5);
+    vec2 rel = world - u_center;
+    float cr = cos(u_rotation);
+    float sr = sin(u_rotation);
+    rel = vec2(cr * rel.x + sr * rel.y, -sr * rel.x + cr * rel.y);  // into the camera's frame
+    vec2 ndc = rel * u_zoom / (u_viewport * 0.5);
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
 
     vec2 unit_uv = in_corner * (extent / in_size) + 0.5;  // 0..1 across the sprite
