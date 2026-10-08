@@ -87,7 +87,7 @@ Slicing divides the final image into regions for tile matching. The result is al
 
 - The user picks the **tile aspect** and the number of **columns** (`MosaicLayout`). Nothing has a size in pixels until export (see below), so the same mosaic can be exported at any resolution. Everything else is derived:
   - **Mosaic canvas** = the source image scaled uniformly to `columns` base tiles across. Height follows the source's aspect ratio, so the canvas usually holds a fractional number of tile rows.
-  - **Slicing and matching work in mosaic units**: a base tile is `TILE_UNIT` (100) units wide. The unit only sets the internal scale; results don't depend on it (`SliceContext` takes another `tile_width`, which tests use). The source is only used to sample colors (`SliceContext.patch` handles the scaling).
+  - **Slicing and matching work in mosaic units**: the canvas is always `CANVAS_WIDTH` (4000) units wide, so a base tile is `CANVAS_WIDTH / columns` (100 at the default 40 columns), and positions (like camera keys) stay put on the picture when the layout changes. The unit only sets the internal scale; results don't depend on it (`SliceContext` takes another `tile_width`, which tests use). The source is only used to sample colors (`SliceContext.patch` handles the scaling).
 - Slicers try to **cover 100% of the canvas**, and the resulting tiles are what they are. Edge tiles may overhang, and the grid centers its overhang by default. Trimming the overhang is an export option, not slicing's job.
 - **Size settings** use `TileSizeParam`, measured in base tiles (1.0 = one tile), so plans follow the user's tile size. Resizing the mosaic means changing columns: more tiles of the same size.
 - The Slicing tab shows, live:

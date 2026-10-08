@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.edits import Crop, Edit, FlipHorizontal, FlipVertical, Rotate90
 from skitter.core.imaging import IMAGE_EXTENSIONS, load_image, visible_mask
 from skitter.ui import icons
@@ -289,10 +290,38 @@ class SourceStep(StepPage):
                 "The image is entirely transparent: nothing to make a mosaic of"
             )
             return False
+        track = self.session.project.camera_track
+        if track.keys and not self.session.source_is_committed:
+            keep = self.ask_keep_camera_keys(len(track.keys))
+            if keep is None:
+                return False
+            if not keep:  # one camera undo step brings them back
+                self.session.set_camera_track(CameraTrack((), track.stretch))
         if self.session.commit_source():
             h, w = self.session.project.source_final.shape[:2]
             self.status_message.emit(f"Source image ready: {w:,} × {h:,} px")
         return True
+
+    def ask_keep_camera_keys(self, count: int) -> bool | None:
+        """Keep (True) or remove (False) camera keys placed on the picture before it
+        changed; None: cancel (stay here, the edit can still be undone)."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setWindowTitle("Camera Keys")
+        noun = "camera key was" if count == 1 else "camera keys were"
+        box.setText(f"The source picture changed. Your {count:,} {noun} placed on the old "
+                    "picture and will frame different parts of the new one.")  # fmt: skip
+        box.setInformativeText(
+            "A crop, rotation, flip or new image moves what each key shows. Removed keys "
+            "come back with Undo on the Animate tab."
+        )
+        keep = box.addButton("Keep Keys", QMessageBox.ButtonRole.AcceptRole)
+        remove = box.addButton("Remove Keys", QMessageBox.ButtonRole.DestructiveRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(keep)
+        box.exec()
+        clicked = box.clickedButton()
+        return True if clicked is keep else False if clicked is remove else None
 
     def on_leave(self) -> None:
         self.cancel_crop()

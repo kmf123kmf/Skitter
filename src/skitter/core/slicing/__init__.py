@@ -21,7 +21,7 @@ from skitter.core.slicing.base import (
     operation_types,
     register_operation,
 )
-from skitter.core.slicing.layout import TILE_ASPECTS, TILE_UNIT, MosaicLayout
+from skitter.core.slicing.layout import CANVAS_WIDTH, TILE_ASPECTS, MosaicLayout
 from skitter.core.slicing.mask import mask_regions, touching
 from skitter.core.slicing.params import (
     BoolParam,
@@ -47,12 +47,12 @@ from skitter.core.slicing.plan import MAX_REGIONS, SlicingPlan, Stage, StageResu
 from skitter.core.slicing.regions import REGION_DTYPE, Region, RegionSet
 
 __all__ = [
+    "CANVAS_WIDTH",
     "CATEGORIES",
     "MAX_REGIONS",
     "NO_PROGRESS",
     "REGION_DTYPE",
     "TILE_ASPECTS",
-    "TILE_UNIT",
     "BoolParam",
     "BrickPattern",
     "ChoiceParam",

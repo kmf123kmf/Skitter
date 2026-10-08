@@ -523,8 +523,8 @@ def test_reslicing_clears_the_mosaic(sliced, photos):
     assert "Press Match Tiles" in step.status.text()
 
 
-def test_reslicing_smaller_fits_the_new_mosaic(sliced, photos):
-    # The last mosaic's area must not stay in what the view fits and scrolls over.
+def test_reslicing_with_fewer_columns_keeps_the_canvas(sliced, photos):
+    # The canvas keeps its size (CANVAS_WIDTH across); only the tiles get bigger.
     window = sliced
     build_library(window, photos)
     session = window.session
@@ -534,12 +534,13 @@ def test_reslicing_smaller_fits_the_new_mosaic(sliced, photos):
     session.wait_for_job()
     old = session.mosaic_size()
     assert step.viewer.canvas.bounds == (0.0, 0.0, *old)
+    tile = session.slice_context.tile_size
 
     layout = session.project.layout
     session.set_layout(replace(layout, columns=layout.columns - 3))
-    new = session.mosaic_size()
-    assert new[0] < old[0] and new[1] < old[1]
-    assert step.viewer.canvas.bounds == (0.0, 0.0, *new)
+    assert session.mosaic_size() == old
+    assert step.viewer.canvas.bounds == (0.0, 0.0, *old)
+    assert all(a > b for a, b in zip(session.slice_context.tile_size, tile, strict=True))
 
 
 def test_export_image_from_the_mosaic_menu(sliced, photos, tmp_path):

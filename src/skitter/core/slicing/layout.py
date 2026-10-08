@@ -3,10 +3,15 @@
 The user chooses a base tile shape (aspect ratio) and the number of
 columns. Nothing before export has a size in pixels: slicing and matching
 work in *mosaic units*, with the canvas being the final source image
-scaled uniformly to `columns` base tiles of TILE_UNIT units across. Its
-height follows the source's aspect ratio, so the canvas usually holds a
-fractional number of tile rows. Slicing tries to cover the whole canvas;
-tiles at the edges may overhang it.
+scaled uniformly to CANVAS_WIDTH units across, whatever the layout; a base
+tile is CANVAS_WIDTH / columns units wide. Its height follows the source's
+aspect ratio, so the canvas usually holds a fractional number of tile rows.
+Slicing tries to cover the whole canvas; tiles at the edges may overhang it.
+
+Because the canvas keeps its size, a point in mosaic units stays at the
+same place on the picture when the layout changes: what is kept by
+position (camera keys, say) needs no converting when the mosaic is sliced
+again with other columns or another tile shape.
 
 Pixels are chosen only when the mosaic is exported (see core/assembly.py),
 which also decides whether overhanging tiles are trimmed.
@@ -15,7 +20,7 @@ which also decides whether overhanging tiles are trimmed.
 import math
 from dataclasses import asdict, dataclass
 
-TILE_UNIT = 100.0  # mosaic units across a base tile (only sets the internal scale)
+CANVAS_WIDTH = 4000.0  # mosaic units across the canvas (base tiles of 100 at 40 columns)
 
 TILE_ASPECTS = (
     (1.0, "Square (1:1)"),
@@ -36,6 +41,11 @@ class MosaicLayout:
     def __post_init__(self):
         if self.columns < 1 or self.tile_aspect <= 0:
             raise ValueError(f"invalid layout {self}")
+
+    @property
+    def tile_width(self) -> float:
+        """A base tile's width in mosaic units."""
+        return CANVAS_WIDTH / self.columns
 
     def rows(self, source_width: int, source_height: int) -> float:
         """Tile rows the canvas holds (usually fractional)."""

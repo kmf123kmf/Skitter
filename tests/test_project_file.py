@@ -1,6 +1,7 @@
 """Project files (core/project_file.py), saved mosaics (matching/saved.py) and the
 File menu round trip in the app."""
 
+import io
 import json
 import zipfile
 
@@ -162,6 +163,47 @@ def rewrite(path, change):
     with zipfile.ZipFile(path, "w") as archive:
         for name, data in files.items():
             archive.writestr(name, data)
+
+
+def test_format_1_positions_are_scaled_to_the_fixed_canvas(tmp_path):
+    """Format 1 had base tiles 100 units wide (the canvas grew with the columns)."""
+    project = sample_project()  # 7 columns
+    path = tmp_path / "old.skitter"
+    save_project(path, project, committed=True, mosaic=None)
+    old = 100.0 / project.layout.tile_width  # format 1 units per today's unit
+
+    def format_1(doc):
+        doc["format"] = 1
+        for key in doc["camera_track"]["keys"]:
+            key["center"] = [v * old for v in key["center"]]
+
+    rewrite(path, format_1)
+    with zipfile.ZipFile(path) as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    with np.load(io.BytesIO(files["regions.npz"])) as npz:
+        regions = {name: npz[name] for name in npz.files}
+    regions["center"], regions["size"] = regions["center"] * old, regions["size"] * old
+    buffer = io.BytesIO()
+    np.savez(buffer, **regions)
+    files["regions.npz"] = buffer.getvalue()
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+
+    loaded = load_project(path).project
+    np.testing.assert_allclose(loaded.regions.center, project.regions.center, rtol=1e-12)
+    np.testing.assert_allclose(loaded.regions.size, project.regions.size, rtol=1e-12)
+    for a, b in zip(loaded.camera_track.keys, project.camera_track.keys, strict=True):
+        assert a.shot.center == pytest.approx(b.shot.center) and a.shot.zoom == b.shot.zoom
+
+
+def test_camera_keys_stay_on_the_picture_when_the_columns_change():
+    project = sample_project()
+    key = project.camera_track.keys[0].shot.center
+    before = SliceContext(project.source_final, project.layout)
+    after = SliceContext(project.source_final, project.layout.replace(columns=23))
+    share = (key[0] / before.width, key[1] / before.height)
+    assert (key[0] / after.width, key[1] / after.height) == pytest.approx(share)
 
 
 def test_loading_skips_what_this_version_does_not_know(tmp_path):

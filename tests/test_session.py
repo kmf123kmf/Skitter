@@ -105,7 +105,7 @@ def test_layout_before_commit_is_kept_and_used(session):
     session.set_layout(MosaicLayout(columns=2))  # no final image yet
     assert session.project.regions is None and session.mosaic_size() is None
     session.commit_source()  # 4 x 2 image -> 2 x 1 base tiles
-    assert session.mosaic_size() == (200.0, 100.0)  # in mosaic units (TILE_UNIT per tile)
+    assert session.mosaic_size() == (4000.0, 2000.0)  # in mosaic units (CANVAS_WIDTH across)
     assert len(session.project.regions) == 2  # 2 columns x 1 row
 
 
@@ -132,7 +132,8 @@ def test_layout_change_reslices_and_announces_new_size(session):
     session.layout_changed.connect(lambda: seen.append(session.mosaic_size()))
     sliced = record(session.slicing_changed)
     session.set_layout(MosaicLayout(tile_aspect=1.5, columns=3))
-    assert seen == [(300.0, 150.0)]  # listeners already see the new size
+    assert seen == [(4000.0, 2000.0)]  # listeners already see the new mosaic (same canvas)
+    assert session.slice_context.tile_size[0] == 4000.0 / 3
     assert len(sliced) == 2  # the old regions cleared at once, then the new ones
     assert session.slicing_summary.count == 3 * 3  # 2.25 rows of 3:2 tiles -> 3, overhanging
     session.set_layout(MosaicLayout(tile_aspect=1.5, columns=3))  # unchanged: no-op

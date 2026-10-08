@@ -4,8 +4,8 @@ import numpy as np
 import pytest
 
 from skitter.core.slicing import (
+    CANVAS_WIDTH,
     MAX_REGIONS,
-    TILE_UNIT,
     BoolParam,
     FloatParam,
     IntParam,
@@ -439,10 +439,20 @@ def test_layout_has_no_pixel_size():
 def test_context_sizes_the_canvas_in_mosaic_units():
     image = np.zeros((2000, 3000, 3), np.uint8)
     ctx = SliceContext(image, MosaicLayout(tile_aspect=4 / 3, columns=40))
-    assert ctx.tile_size == (TILE_UNIT, TILE_UNIT * 3 / 4)
-    assert (ctx.width, ctx.height) == (40 * TILE_UNIT, pytest.approx(40 * TILE_UNIT * 2 / 3))
-    assert ctx.scale == pytest.approx(40 * TILE_UNIT / 3000)
+    tile = CANVAS_WIDTH / 40
+    assert ctx.tile_size == (tile, tile * 3 / 4)
+    assert (ctx.width, ctx.height) == (CANVAS_WIDTH, pytest.approx(CANVAS_WIDTH * 2 / 3))
+    assert ctx.scale == pytest.approx(CANVAS_WIDTH / 3000)
     assert ctx.height / ctx.tile_size[1] == pytest.approx(ctx.layout.rows(3000, 2000))
+
+
+def test_the_canvas_keeps_its_size_whatever_the_layout():
+    """Positions stay put on the picture when the layout changes (camera keys, say)."""
+    image = np.zeros((2000, 3000, 3), np.uint8)
+    for layout in (MosaicLayout(columns=7), MosaicLayout(tile_aspect=9 / 16, columns=300)):
+        ctx = SliceContext(image, layout)
+        assert (ctx.width, ctx.height) == pytest.approx((CANVAS_WIDTH, CANVAS_WIDTH * 2 / 3))
+        assert ctx.width / ctx.tile_size[0] == pytest.approx(layout.columns)
 
 
 def test_slicing_does_not_depend_on_the_unit_size():

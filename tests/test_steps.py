@@ -86,6 +86,48 @@ def test_editing_after_commit_locks_slicing_until_next(window, source):
     assert window.tabs.currentIndex() == 1
 
 
+def test_changing_the_picture_asks_about_camera_keys(window, source):
+    from skitter.core.animation.camera import Shot
+    from skitter.core.animation.keyframes import CameraKey, CameraTrack, KeyTime
+
+    session = window.session
+    window.next_button.click()
+    window.back_button.click()
+    keys = CameraTrack((CameraKey(KeyTime("build", 0.5), Shot((100.0, 200.0), 2.0)),))
+    session.set_camera_track(keys)
+    asked = []
+
+    def answer(value):
+        def ask(count):
+            asked.append(count)
+            return value
+
+        return ask
+
+    source.ask_keep_camera_keys = answer(None)
+    window.next_button.click()  # unchanged picture: nothing to ask
+    assert asked == [] and window.tabs.currentIndex() == 1
+    window.back_button.click()
+
+    source.flip_h_action.trigger()
+    window.next_button.click()  # Cancel: stays here, nothing committed
+    assert asked == [1] and window.tabs.currentIndex() == 0
+    assert not session.source_is_committed and session.project.camera_track == keys
+
+    source.ask_keep_camera_keys = answer(True)
+    window.next_button.click()  # Keep
+    assert session.source_is_committed and session.project.camera_track == keys
+    window.back_button.click()
+
+    source.flip_h_action.trigger()
+    source.ask_keep_camera_keys = answer(False)
+    window.next_button.click()  # Remove, as one camera undo step
+    assert asked == [1, 1, 1] and window.tabs.currentIndex() == 1
+    assert session.project.camera_track.keys == ()
+    session.undo_camera()
+    assert session.project.camera_track == keys
+
+
 def test_next_disabled_while_cropping(window, source):
     source.crop_action.trigger()
     assert not window.next_button.isEnabled()
@@ -187,7 +229,7 @@ def flush(qapp):
 
 
 def test_slicing_shows_default_grid_of_base_tiles(slicing):
-    # 40x30 image, default layout: 40 columns of square tiles, TILE_UNIT mosaic units each.
+    # 40x30 image, default layout: 40 columns of square tiles across a CANVAS_WIDTH canvas.
     regions = slicing.session.project.regions
     assert len(regions) == 40 * 30
     assert slicing.viewer.world_size == (4000, 3000)
@@ -208,14 +250,14 @@ def test_layout_controls_resize_mosaic_and_reslice(slicing, qapp):
     assert slicing.session.project.layout.columns == 10
     assert len(slicing.session.project.regions) == 10 * 8  # 7.5 rows -> 8 with overhang
     assert slicing._rows.text() == "7.50 (8 whole)"
-    assert slicing.viewer.world_size == (1000, 750)
+    assert slicing.viewer.world_size == (4000, 3000)  # the canvas keeps its size
     assert slicing._source_px.styleSheet() == ""  # 4 source px per tile
 
     slicing.tile_aspect.setCurrentIndex(1)  # 4:3
     flush(qapp)
     assert len(slicing.session.project.regions) == 10 * 10
     assert slicing._rows.text() == "10"
-    assert slicing.viewer.world_size == (1000, 750)  # same canvas, flatter tiles
+    assert slicing.viewer.world_size == (4000, 3000)  # same canvas, flatter tiles
     assert not hasattr(slicing, "tile_width")  # pixel sizes are chosen on export
 
 

@@ -36,7 +36,7 @@ import numpy as np
 from scipy import ndimage
 
 from skitter.core.imaging import fill_hidden, visible_mask
-from skitter.core.slicing.layout import TILE_UNIT, MosaicLayout
+from skitter.core.slicing.layout import MosaicLayout
 from skitter.core.slicing.params import Configurable
 from skitter.core.slicing.regions import Region, RegionSet
 
@@ -118,9 +118,9 @@ class SliceContext:
     read the image through `patch`, which handles the scaling. Results do
     not depend on the unit size other than by scale.
 
-    tile_width is the base tile's width in mosaic units: TILE_UNIT by
-    default, or one unit per source pixel (1 px tiles) when no layout is
-    given, which tests use.
+    tile_width is the base tile's width in mosaic units: the layout's (the
+    canvas is CANVAS_WIDTH across) by default, or one unit per source pixel
+    (1 px tiles) when no layout is given, which tests use.
 
     The image may be RGBA (sources are; see imaging.py). Its alpha is a
     mask: `visible` marks pixels at least half opaque (None: all of them),
@@ -148,7 +148,7 @@ class SliceContext:
         h, w = image.shape[:2]
         self.source_height, self.source_width = h, w
         if tile_width is None:
-            tile_width = 1.0 if layout is None else TILE_UNIT
+            tile_width = 1.0 if layout is None else layout.tile_width
         self.layout = layout or MosaicLayout(columns=w)
         self.tile_width = float(tile_width)
         self.width = self.layout.columns * self.tile_width

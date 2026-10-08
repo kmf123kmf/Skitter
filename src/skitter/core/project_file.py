@@ -20,8 +20,11 @@ reported in `ProjectFile.problems`. Older animation settings are carried
 over (`_old_animation`): the video's start and end holds become the build's
 hold before and the last phase's hold after, the Still show becomes the
 build's hold after, and "deconstruct" (the clear phase's first name) loads
-as clear. Files are written to a temporary name
-and then renamed, so a failed save never damages an existing project.
+as clear. Files of format 1 had a base tile 100 mosaic units wide (the
+canvas grew with the columns); their regions and camera keys are scaled to
+today's canvas, CANVAS_WIDTH across (`_old_units`). Files are written to a
+temporary name and then renamed, so a failed save never damages an
+existing project.
 
 `document` is the JSON part alone; the app compares it to tell whether a
 project has unsaved changes.
@@ -31,7 +34,7 @@ import io
 import json
 import os
 import zipfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import numpy as np
@@ -50,7 +53,8 @@ from skitter.core.matching.settings import MatchSettings
 from skitter.core.project import Project
 from skitter.core.slicing import MosaicLayout, RegionSet, SlicingPlan
 
-FORMAT = 1  # raise when a change would mislead older versions
+FORMAT = 2  # raise when a change would mislead older versions (2: a fixed canvas width)
+OLD_TILE_WIDTH = 100.0  # format 1: a base tile's width in mosaic units
 EXTENSION = ".skitter"
 REGION_FIELDS = ("center", "size", "rotation", "z")
 
@@ -160,6 +164,8 @@ def load_project(path) -> ProjectFile:
         project.source_final = final
         if regions is not None:
             project.regions = RegionSet.from_arrays(*(regions[f] for f in REGION_FIELDS))
+    if doc.get("format", 0) < 2:
+        _old_units(project, project.layout.tile_width / OLD_TILE_WIDTH)
     saved = None
     if mosaic is not None and project.regions is not None and "mosaic" in doc:
         try:
@@ -247,6 +253,23 @@ def _old_animation(project: Project, holds, still) -> None:
     last = project.phase_holds[played[-1]]
     pause = _seconds((still or {}).get("duration"), 2.0) if still is not None else 0.0
     last.update(hold_after=min(_seconds(end, 2.0) + pause, 60.0))
+
+
+def _old_units(project: Project, factor: float) -> None:
+    """Positions of a format 1 file (mosaic units of 100 per base tile) scaled by factor to
+    today's units (the canvas CANVAS_WIDTH across)."""
+    if factor == 1.0:
+        return
+    regions = project.regions
+    if regions is not None:
+        project.regions = RegionSet.from_arrays(regions.center * factor, regions.size * factor,
+                                                regions.rotation, regions.z)  # fmt: skip
+    track = project.camera_track
+    keys = []
+    for key in track.keys:
+        x, y = key.shot.center
+        keys.append(replace(key, shot=replace(key.shot, center=(x * factor, y * factor))))
+    project.camera_track = replace(track, keys=tuple(keys))
 
 
 def _seconds(value, default: float) -> float:
