@@ -7,8 +7,8 @@ name = "skitter"
 version = "0.1.0"
 description = "Photo mosaic generator with an animated graphical interface"
 readme = "README.md"
-# Capped until moderngl, numba and faiss-cpu publish wheels for newer Pythons.
-requires-python = ">=3.11,<3.14"
+# Capped until faiss-cpu publishes wheels for newer Pythons.
+requires-python = ">=3.11,<3.15"
 dependencies = [
     "numpy>=1.26",
     "Pillow>=11.1",

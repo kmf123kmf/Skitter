@@ -22,12 +22,17 @@ Any folder can be left out of matching (`set_included`): its photos stay
 read, but `ids` and `len()` count only the photos in use, and `selection`
 changes (not `version`). `readable_ids` are all the photos read.
 
-A library is used from one thread at a time.
+A library may be read from one thread while another updates it: every use
+of the database holds a lock (`_query` for reads, `_transaction` for
+writes). Sharing one connection without it lets two threads step the same
+cached statement, and a read can come back with wrong rows.
 """
 
 import os
 import sqlite3
+import threading
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -143,6 +148,7 @@ class TileLibrary:
         self.folder = Path(folder)
         self.folder.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(self.folder / "library.sqlite", check_same_thread=False)
+        self._lock = threading.RLock()  # held for every use of _db (see the module docstring)
         self._db.executescript(_SCHEMA)
         self._thumbs_path = self.folder / "thumbs.u8"
         self._thumbs: np.memmap | None = None
@@ -151,17 +157,29 @@ class TileLibrary:
 
     def close(self) -> None:
         self._thumbs = None
-        self._db.close()
+        with self._lock:
+            self._db.close()
         self.closed = True
+
+    def _query(self, sql: str, params=()) -> list[tuple]:
+        """Every row a read returns, fetched while holding the lock."""
+        with self._lock:
+            return self._db.execute(sql, params).fetchall()
+
+    @contextmanager
+    def _transaction(self):
+        """Hold the lock and commit (or roll back) the writes made inside."""
+        with self._lock, self._db:
+            yield
 
     # Roots
 
     @property
     def roots(self) -> list[Path]:
-        return [Path(p) for (p,) in self._db.execute("SELECT path FROM roots ORDER BY path")]
+        return [Path(p) for (p,) in self._query("SELECT path FROM roots ORDER BY path")]
 
     def set_roots(self, roots) -> None:
-        with self._db:
+        with self._transaction():
             self._db.execute("DELETE FROM roots")
             self._db.executemany(
                 "INSERT INTO roots VALUES (?)", [(str(Path(r).resolve()),) for r in roots]
@@ -188,7 +206,7 @@ class TileLibrary:
         them need matching again). Returns how many photos were dropped."""
         key = folder_key(root)
         slots = self._slots_under(key)
-        with self._db:
+        with self._transaction():
             self._db.executemany("DELETE FROM tiles WHERE slot = ?", [(int(s),) for s in slots])
             self._db.execute("DELETE FROM roots WHERE path = ?", (str(Path(root).resolve()),))
             self._delete_rules_under(key)
@@ -213,7 +231,7 @@ class TileLibrary:
                                  f"({found} of {len(sample)} checked found)")  # fmt: skip
         rows = [(new + self._paths[s][len(old) :], int(s)) for s in slots]
         rules = self._rules()
-        with self._db:
+        with self._transaction():
             self._db.executemany("UPDATE tiles SET path = ? WHERE slot = ?", rows)
             moved = (str(Path(new_root).resolve()), str(Path(root).resolve()))
             self._db.execute("UPDATE roots SET path = ? WHERE path = ?", moved)
@@ -232,7 +250,7 @@ class TileLibrary:
     def set_included(self, folder, included: bool) -> None:
         """Use (or leave out of matching) the photos in folder and all its subfolders."""
         key = folder_key(folder)
-        with self._db:
+        with self._transaction():
             self._delete_rules_under(key)
             if self._rule_for(key, self._rules()) != included:
                 self._db.execute("INSERT INTO folder_rules VALUES (?, ?)", (key, int(included)))
@@ -255,7 +273,7 @@ class TileLibrary:
         return tuple(sorted(self._rules().items()))
 
     def _rules(self) -> dict[str, bool]:
-        return {path: bool(on) for path, on in self._db.execute("SELECT * FROM folder_rules")}
+        return {path: bool(on) for path, on in self._query("SELECT * FROM folder_rules")}
 
     @staticmethod
     def _rule_for(folder: str, rules: dict[str, bool]) -> bool:
@@ -269,7 +287,7 @@ class TileLibrary:
                 return True
             path = parent
 
-    def _delete_rules_under(self, folder: str) -> None:
+    def _delete_rules_under(self, folder: str) -> None:  # inside a _transaction
         self._db.executemany(
             "DELETE FROM folder_rules WHERE path = ?",
             [(path,) for path in self._rules() if is_under(path, folder)],
@@ -279,7 +297,7 @@ class TileLibrary:
         return np.array([s for s, p in enumerate(self._paths) if p and is_under(p, folder)],
                         np.int64)  # fmt: skip
 
-    def _bump_version(self) -> None:
+    def _bump_version(self) -> None:  # inside a _transaction
         self._db.execute("INSERT OR REPLACE INTO meta VALUES ('version', ?)",
                          (str(self.version + 1),))  # fmt: skip
 
@@ -342,8 +360,8 @@ class TileLibrary:
 
     @property
     def version(self) -> int:
-        row = self._db.execute("SELECT value FROM meta WHERE key = 'version'").fetchone()
-        return int(row[0]) if row else 0
+        rows = self._query("SELECT value FROM meta WHERE key = 'version'")
+        return int(rows[0][0]) if rows else 0
 
     def __len__(self) -> int:
         """Number of tiles in use (readable, in a folder not left out)."""
@@ -385,9 +403,9 @@ class TileLibrary:
         return sum(p.stat().st_size for p in self.folder.iterdir() if p.is_file())
 
     def _reload(self) -> None:
-        rows = self._db.execute(
+        rows = self._query(
             "SELECT slot, path, width, height, tw, th, status FROM tiles ORDER BY slot"
-        ).fetchall()
+        )
         n = max(rows[-1][0] + 1 if rows else 0, self._next_slot())
         self._paths = [""] * n
         self.width = np.zeros(n, np.int64)  # upright full-size image width
@@ -407,8 +425,8 @@ class TileLibrary:
 
     def _next_slot(self) -> int:
         """Slots below this have been used (forgotten photos' slots aren't reused)."""
-        row = self._db.execute("SELECT value FROM meta WHERE key = 'next_slot'").fetchone()
-        return int(row[0]) if row else 0
+        rows = self._query("SELECT value FROM meta WHERE key = 'next_slot'")
+        return int(rows[0][0]) if rows else 0
 
     def _open_thumbs(self, slots: int) -> None:
         item = THUMB * THUMB * 3
@@ -436,12 +454,12 @@ class TileLibrary:
         report = UpdateReport()
         known = {
             path: (slot, size, mtime, status)
-            for slot, path, size, mtime, status in self._db.execute(
+            for slot, path, size, mtime, status in self._query(
                 "SELECT slot, path, size, mtime, status FROM tiles"
             )
         }
         # Missing photos read before keep their thumbnails: back unchanged, they're not read.
-        was_read = {slot for (slot,) in self._db.execute(
+        was_read = {slot for (slot,) in self._query(
             "SELECT slot FROM tiles WHERE status = ? AND width > 0", (MISSING,))}  # fmt: skip
         revived: list[int] = []
         found: dict[str, tuple[int, float]] = {}
@@ -529,11 +547,11 @@ class TileLibrary:
         finally:
             self._write(rows)
             if gone and not report.cancelled:
-                with self._db:
+                with self._transaction():
                     self._db.executemany(
                         "UPDATE tiles SET status = ? WHERE slot = ?", [(MISSING, s) for s in gone]
                     )
-            with self._db:
+            with self._transaction():
                 self._db.executemany("UPDATE tiles SET status = ? WHERE slot = ?",
                                      [(OK, s) for s in revived])  # fmt: skip
                 self._db.execute("INSERT OR REPLACE INTO meta VALUES ('next_slot', ?)",
@@ -548,7 +566,7 @@ class TileLibrary:
         if not rows:
             return
         self._thumbs.flush()
-        with self._db:
+        with self._transaction():
             self._db.executemany(
                 "INSERT OR REPLACE INTO tiles VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows
             )

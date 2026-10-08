@@ -354,7 +354,7 @@ tests/              pytest suite (headless; Qt widgets run offscreen)
 
 ## Setup
 
-Python 3.11 to 3.13 (moderngl, numba and faiss-cpu have no wheels for 3.14 yet).
+Python 3.11 to 3.14 (faiss-cpu has no wheels for 3.15 yet).
 
 ```powershell
 py -3.13 -m venv .venv
