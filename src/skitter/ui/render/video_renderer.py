@@ -151,18 +151,17 @@ class VideoRenderer:
     def render(self, timeline: Timeline, k: int, path: CameraPath | None = None) -> np.ndarray:
         """Frame k as (height, width, 4) uint8 RGBA (straight alpha; opaque unless plan.alpha).
 
-        path: the camera on the video clock (keyframes.CameraTrack.path); each moment
-        blended into the frame is seen through its own shot, so camera motion blurs
-        too. None: the plan's view throughout.
+        path: the camera (keyframes.CameraTrack.path); each moment blended into the
+        frame is seen through its own shot, so camera motion blurs too. None: the
+        plan's view throughout.
         """
         ctx, plan = self.ctx, self.plan
-        moments = plan.video_moments(k)  # video time: the camera's clock
-        tiles = plan.moments(k)  # the same moments in animation time: the tiles'
+        moments = plan.moments(k)
         self.accum.use()
         self.accum.clear(0.0, 0.0, 0.0, 0.0)
         weight = 1.0 / len(moments)
-        for t, a in zip(moments, tiles, strict=True):
-            layers = frame_layers(self.base, timeline.frame(float(a)), self.table_camera)
+        for t in moments:
+            layers = frame_layers(self.base, timeline.frame(float(t)), self.table_camera)
             for layer, instances in zip(self._layers(), layers, strict=True):
                 layer.instances = instances
                 layer.mark_dirty()

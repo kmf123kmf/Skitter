@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from skitter.core.animation import Choreography
+from skitter.core.animation import Choreography, PhaseHolds, plan_phases
 from skitter.core.animation.encode import VideoWriter
 from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.animation.look import AnimationLook, TableCamera
@@ -29,7 +29,8 @@ os.environ.setdefault("SVT_LOG", "1")  # AV1 encoder: errors only, not its banne
 class VideoJob:
     path: Path
     scene: MosaicScene
-    choreography: Choreography  # a copy
+    choreographies: dict[str, Choreography | None]  # copies, per phase (None: left out)
+    holds: dict[str, PhaseHolds]  # copies, per phase
     track: CameraTrack  # the camera's keys (immutable)
     settings: VideoSettings  # a copy
     background: str  # "#rrggbb" or "transparent"
@@ -58,7 +59,7 @@ def run_video_job(job: VideoJob, progress, cancelled) -> VideoReport:
     start = time.perf_counter()
     plan, settings = job.plan, job.settings
     fmt = settings.video_format
-    timeline = job.choreography.timeline(job.scene, job.look)
+    timeline = plan_phases(job.choreographies, job.scene, job.look, job.holds)
     path = job.track.path(plan.video_clock, plan.view)
 
     def report_textures(message, fraction):

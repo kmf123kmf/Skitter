@@ -106,12 +106,28 @@ class CandidateSet:
         )
         return extended, index
 
+    def only(self, tiles) -> "CandidateSet":
+        """The candidates of these tiles (library slots), in this set's order."""
+        keep = np.isin(self.tile, tiles)
+        if keep.all():
+            return self
+        return CandidateSet(self.aspect, self.tile[keep], self.rect[keep], self.mirrored[keep],
+                            self.retained[keep], self.desc[keep])  # fmt: skip
+
+    def merged(self, other: "CandidateSet") -> "CandidateSet":
+        """This set followed by other's candidates (of other tiles)."""
+        return CandidateSet(
+            self.aspect, *(np.concatenate([getattr(self, name), getattr(other, name)])
+                           for name in ("tile", "rect", "mirrored", "retained", "desc")),
+        )  # fmt: skip
+
 
 def build_candidates(
     library: TileLibrary, aspect: float, crops: int = 3, mirrored: bool = False,
-    progress: Progress = _quiet,
+    progress: Progress = _quiet, ids=None,
 ) -> CandidateSet:  # fmt: skip
-    ids = library.ids
+    """Crop candidates of the tiles in use (or of the given slots)."""
+    ids = library.ids if ids is None else np.asarray(ids, np.int64)
     c = crop_candidates(library.width[ids], library.height[ids], aspect, max_crops=crops)
     tile = ids[c.tile]
 

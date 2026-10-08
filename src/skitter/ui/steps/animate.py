@@ -1,10 +1,13 @@
 """Step 5: animate the construction of the finished mosaic.
 
-Pick a choreography (core/animation), edit its settings and the background,
-then play or scrub its timeline, and export it as a video (Export
-Animation). The choreographies, the camera's keys, the look and the video
-settings live in the project, so the export renders exactly what this tab
-shows.
+Pick a choreography for each phase of the animation (core/animation,
+phases.py: Build, then optionally Show and Clear, chosen on the Animation
+group's tabs, each with its own holds before and after), edit their settings
+and the look, then play or scrub the timeline (its strip shows the phases and
+their holds), and export it as a video (Export Animation): the video is
+exactly this animation. The choreographies, the camera's keys, the look and
+the video settings live in the project, so the export renders exactly what
+this tab shows.
 
 The camera is its keyframes (camera_keys.py: the Look through camera
 viewfinder, keys on the timeline, the Keyframes group). The Video group
@@ -28,13 +31,16 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
 
+from skitter.core.animation import PHASE_NAMES, PHASES, PhasedTimeline
 from skitter.core.animation.camera import CameraPath, Shot, home_shot
 from skitter.core.animation.look import TableCamera
-from skitter.core.animation.video import ClockedTimeline, VideoClock, output_size, view_rect
+from skitter.core.animation.phases import OPTIONAL
+from skitter.core.animation.video import output_size, view_rect
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import ColorParam
 from skitter.ui import preferences
@@ -64,7 +70,7 @@ class AnimateStep(StepPage):
         super().__init__(session, parent)
         self.scene: MosaicScene | None = None
         self.textures: TileTextures | None = None
-        self.camera_path: CameraPath | None = None  # the camera over the video clock
+        self.camera_path: CameraPath | None = None  # the camera over the video
         self._stale = False  # manual picks changed the mosaic while this tab was hidden
 
         self.canvas = MosaicCanvas()
@@ -88,7 +94,7 @@ class AnimateStep(StepPage):
         column.addWidget(self.canvas, stretch=1)
         column.addWidget(self.transport)
         self.transport.install_shortcuts(view)
-        self.keys.install_shortcuts(view)
+        self.keys.install_shortcuts(self)  # the side panel too: after editing a key's fields
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -98,6 +104,7 @@ class AnimateStep(StepPage):
             side_panel(
                 self.keys.build_group(),  # first: it works with the strip under the view
                 self._build_settings_group(),
+                self._build_look_group(),
                 self._build_video_group(),
             )  # fmt: skip
         )
@@ -119,33 +126,58 @@ class AnimateStep(StepPage):
     # Construction
 
     def _build_settings_group(self) -> QGroupBox:
-        self.look_form = ParamForm()
-        self.look_form.set_target(self.project.animation_look)
-        self.look_form.changed.connect(lambda _: self.session.animation_edited())
-        self.choreography_box = QComboBox()
-        for choreography in self.project.choreographies.values():
-            self.choreography_box.addItem(choreography.name, choreography.id)
-            index = self.choreography_box.count() - 1
-            self.choreography_box.setItemData(
-                index, choreography.description, Qt.ItemDataRole.ToolTipRole
-            )
-        self.choreography_box.setCurrentIndex(
-            self.choreography_box.findData(self.project.choreography_id)
+        """The phases (Build, Show, Clear) as tabs, each with its choreography and holds."""
+        self.phase_tabs = QTabBar()
+        self.phase_tabs.setExpanding(True)
+        self.phase_tabs.setDocumentMode(True)
+        # The style draws the chosen tab much like the others: mark it plainly.
+        self.phase_tabs.setStyleSheet(
+            "QTabBar::tab { padding: 4px 6px; border-bottom: 2px solid transparent; }"
+            "QTabBar::tab:selected { font-weight: bold;"
+            " border-bottom: 2px solid palette(highlight); }"
         )
+        for phase in PHASES:
+            self.phase_tabs.addTab(PHASE_NAMES[phase])
+        self.phase_tabs.setTabToolTip(0, "Putting the mosaic together.")
+        self.phase_tabs.setTabToolTip(1, "Something happening on the finished mosaic "
+                                         "(optional).")  # fmt: skip
+        self.phase_tabs.setTabToolTip(2, "Clearing the mosaic away (optional).")
+        self.phase_tabs.currentChanged.connect(lambda _: self._show_phase())
+        self.choreography_box = QComboBox()
         self.choreography_box.currentIndexChanged.connect(self._on_choreography)
         self.description = muted(QLabel())
+        self.description.setWordWrap(True)
         self.form = ParamForm()
         self.form.changed.connect(lambda _: self.session.animation_edited())
+        self.holds_form = ParamForm()  # the phase's holds (phases.PhaseHolds)
+        self.holds_form.changed.connect(lambda _: self.session.animation_edited())
         group = QGroupBox("Animation")
         layout = QVBoxLayout(group)
-        layout.addWidget(self.look_form)
+        layout.addWidget(self.phase_tabs)
         top = QFormLayout()
         top.addRow("Choreography:", self.choreography_box)
         layout.addLayout(top)
         layout.addWidget(self.description)
+        layout.addWidget(self.holds_form)  # the phase's, so above its choreography's settings
         layout.addWidget(self.form)
-        self._show_choreography()
+        self._show_phase()
         return group
+
+    def _build_look_group(self) -> QGroupBox:
+        self.look_form = ParamForm()
+        self.look_form.set_target(self.project.animation_look)
+        self.look_form.changed.connect(lambda _: self.session.animation_edited())
+        group = QGroupBox("Look")
+        QVBoxLayout(group).addWidget(self.look_form)
+        return group
+
+    @property
+    def phase(self) -> str:
+        """The phase whose choreography the Animation group shows."""
+        return PHASES[max(self.phase_tabs.currentIndex(), 0)]
+
+    def show_phase(self, phase: str) -> None:
+        self.phase_tabs.setCurrentIndex(PHASES.index(phase))
 
     def _build_video_group(self) -> QGroupBox:
         self.show_frame = QCheckBox("Show export frame")
@@ -179,10 +211,6 @@ class AnimateStep(StepPage):
         layout.addWidget(self.video_form)
         layout.addWidget(self.export_button)
         return group
-
-    @property
-    def choreography(self):
-        return self.project.choreography
 
     # Step
 
@@ -229,7 +257,7 @@ class AnimateStep(StepPage):
         self.textures.patched.connect(self._on_textures)  # crops for picks read meanwhile
         self.textures.status_changed.connect(self.transport.status.setText)
         self.transport.status.setText(self.textures.status)
-        timeline = self._clocked_timeline()
+        timeline = self.project.animation(scene)
         self.player.set_timeline(timeline, time=timeline.duration)  # open on the finished mosaic
         self._plan_camera()
         self.player.set_camera(TableCamera.for_scene(scene, self.project.animation_look))
@@ -248,21 +276,44 @@ class AnimateStep(StepPage):
     def _on_project_replaced(self) -> None:
         self.look_form.set_target(self.project.animation_look)
         self.video_form.set_target(self.project.video_settings, only=FRAME_SETTINGS)
-        self.choreography_box.blockSignals(True)
-        self.choreography_box.setCurrentIndex(
-            self.choreography_box.findData(self.project.choreography_id)
-        )
-        self.choreography_box.blockSignals(False)
-        self._show_choreography()
+        self._show_phase()
         self.keys.selected = -1
         self.keys.refresh()
 
+    def _show_phase(self) -> None:
+        """The current phase tab's choices (None for an optional phase), and the chosen one."""
+        phase, box = self.phase, self.choreography_box
+        box.blockSignals(True)
+        box.clear()
+        if phase in OPTIONAL:
+            box.addItem("None", None)
+            box.setItemData(0, f"No {PHASE_NAMES[phase].lower()} phase.",
+                            Qt.ItemDataRole.ToolTipRole)  # fmt: skip
+        for choreography in self.project.choreographies.values():
+            if choreography.phase == phase:
+                box.addItem(choreography.name, choreography.id)
+                box.setItemData(box.count() - 1, choreography.description,
+                                Qt.ItemDataRole.ToolTipRole)  # fmt: skip
+        box.setCurrentIndex(max(box.findData(self.project.phase_choices.get(phase)), 0))
+        box.blockSignals(False)
+        self._show_choreography()
+
     def _show_choreography(self) -> None:
-        self.description.setText(self.choreography.description)
-        self.form.set_target(self.choreography)
+        chosen = self.project.phase_choreography(self.phase)
+        if chosen is not None:
+            self.description.setText(chosen.description)
+        elif self.choreography_box.count() > 1:
+            self.description.setText(f"No {PHASE_NAMES[self.phase].lower()} phase: choose one "
+                                     "to add it.")  # fmt: skip
+        else:
+            self.description.setText(f"No {PHASE_NAMES[self.phase].lower()} choreographies "
+                                     "yet.")  # fmt: skip
+        self.form.set_target(chosen)
+        # A phase left out has no holds.
+        self.holds_form.set_target(None if chosen is None else self.project.phase_holds[self.phase])
 
     def _on_choreography(self) -> None:
-        self.project.choreography_id = self.choreography_box.currentData()
+        self.project.phase_choices[self.phase] = self.choreography_box.currentData()
         self._show_choreography()
         self.session.animation_edited()
 
@@ -270,6 +321,7 @@ class AnimateStep(StepPage):
         """Choreography, camera, look or video settings edited (here or in Export Animation)."""
         self.video_form.refresh()
         self.look_form.refresh()
+        self.holds_form.refresh()
         self._apply_look()
         self._replan()
         self._sync_transport()
@@ -283,24 +335,21 @@ class AnimateStep(StepPage):
         if self.scene is None:
             return
         at_end = self.player.time >= self.player.duration
-        timeline = self._clocked_timeline()
+        timeline = self.project.animation(self.scene)
         self._plan_camera(timeline)
         self.player.set_timeline(timeline, timeline.duration if at_end else None)
 
-    def _clocked_timeline(self) -> ClockedTimeline:
-        """The choreography on the video's clock: its start and end holds play too, as in
-        the exported video."""
-        timeline = self.choreography.timeline(self.scene, self.project.animation_look)
-        return ClockedTimeline(timeline, VideoClock.of(self.project.video_settings,
-                                                       timeline.duration))  # fmt: skip
-
     def _sync_transport(self) -> None:
-        """Frame steps match the export's frames; controls follow whether there's a timeline."""
+        """Frame steps match the export's frames; controls follow whether there's a timeline;
+        the strip shows the phases and their holds."""
         self.transport.frame_step = 1.0 / float(self.project.video_settings.fps)
+        timeline = self.player.timeline
+        if timeline is not None:
+            self.transport.set_sections(timeline.spans)
         self.transport.refresh()
 
-    def _plan_camera(self, timeline: ClockedTimeline | None = None) -> None:
-        """The camera over the video clock, framed like the video."""
+    def _plan_camera(self, timeline: PhasedTimeline | None = None) -> None:
+        """The camera over the video, framed like the video."""
         timeline = timeline or self.player.timeline
         if self.scene is None or timeline is None:
             self.camera_path = None

@@ -3,6 +3,7 @@
 import os
 
 import numpy as np
+import pytest
 from PIL import Image
 
 from skitter.core.tiles.ingest import THUMB, load_thumbnail, load_thumbnails
@@ -81,6 +82,136 @@ def test_library_ingests_rescans_and_tracks_changes(tmp_path):
     assert len(reopened) == 1 and reopened.roots == [photos.resolve()]
     np.testing.assert_array_equal(reopened.thumbs[slot, 0, 0], (0, 0, 255))
     reopened.close()
+
+
+def folder_library(tmp_path):
+    """photos/{a,b}/n.png (2 + 3 photos), read."""
+    photos = tmp_path / "photos"
+    for name, count in (("a", 2), ("b", 3)):
+        (photos / name).mkdir(parents=True)
+        for i in range(count):
+            save(photos / name / f"{i}.png", (20, 20), (i * 50, 0, 0))
+    lib = TileLibrary(tmp_path / "cache")
+    lib.set_roots([photos])
+    lib.update(workers=0)
+    return lib, photos
+
+
+def test_folders_can_be_left_out_and_back_in_without_rereading(tmp_path):
+    lib, photos = folder_library(tmp_path)
+    version, everything = lib.version, lib.ids
+    root = lib.folder_info(photos)
+    assert (root.photos, root.used, root.state) == (5, 5, "on")
+    assert [os.path.basename(c) for c in root.children] == ["a", "b"]
+
+    lib.set_included(photos / "b", False)
+    assert len(lib) == 2 and len(lib.readable_ids) == 5 and lib.version == version
+    assert lib.folder_info(photos).state == "partial"
+    assert lib.folder_info(photos / "b").state == "off"
+    assert all("\\b\\" not in p and "/b/" not in p for p in lib.paths(lib.ids))
+    # A folder inside a left-out one can be put back; turning the root on resets all.
+    lib.set_included(photos / "b", True)
+    np.testing.assert_array_equal(lib.ids, everything)
+    lib.set_included(photos, False)
+    assert len(lib) == 0 and lib.folder_info(photos / "a").state == "off"
+    lib.set_included(photos / "a", True)
+    assert len(lib) == 2 and lib.folder_info(photos).state == "partial"
+    lib.set_included(photos, True)
+    assert len(lib) == 5 and lib.selection == ()
+    # Choices persist, and an update rereads nothing.
+    lib.set_included(photos / "a", False)
+    assert lib.update(workers=0).unchanged == 5 and len(lib) == 3
+    lib.close()
+    reopened = TileLibrary(tmp_path / "cache")
+    assert len(reopened) == 3 and reopened.folder_info(photos / "a").state == "off"
+    # Adding a folder inside a root just puts it back in use.
+    reopened.add_root(photos / "a")
+    assert reopened.roots == [photos.resolve()] and len(reopened) == 5
+    reopened.close()
+
+
+def test_update_skips_folders_left_out_before_they_were_read(tmp_path):
+    photos = tmp_path / "photos"
+    for name, count in (("a", 2), ("b", 3)):
+        (photos / name / "deep").mkdir(parents=True)
+        for i in range(count):
+            save(photos / name / "deep" / f"{i}.png", (20, 20), (i * 50, 0, 0))
+    lib = TileLibrary(tmp_path / "cache")
+    lib.add_root(photos)
+    lib.set_included(photos / "b", False)  # before anything is read
+    assert lib.folder_info(photos).state == "partial"  # no photos to count: its rules say
+    assert lib.folder_info(photos / "a").state == "on"
+    assert lib.folder_info(photos / "b" / "deep").state == "off"
+    report = lib.update(workers=0)
+    assert (report.added, report.skipped) == (2, 0)  # b isn't even scanned
+    assert lib.folder_info(photos / "b").known == 0 and len(lib) == 2
+    # Ticked back, it's read; a part put back inside a left-out folder is read too.
+    lib.set_included(photos, False)
+    lib.set_included(photos / "b" / "deep", True)
+    assert lib.update(workers=0).added == 3 and len(lib) == 3
+    # A new photo in a folder left out that was read isn't read; its others stay fresh.
+    save(photos / "a" / "deep" / "new.png")
+    report = lib.update(workers=0)
+    assert (report.added, report.skipped, report.unchanged) == (0, 1, 5)
+    lib.set_included(photos, True)
+    assert lib.update(workers=0).added == 1 and len(lib) == 6
+    lib.close()
+
+
+def test_an_offline_folder_keeps_its_photos(tmp_path):
+    lib, photos = folder_library(tmp_path)
+    version = lib.version
+    photos.rename(tmp_path / "moved")  # like an unplugged drive
+    assert not lib.is_online(lib.roots[0])
+    report = lib.update(workers=0)
+    assert report.offline == [str(photos.resolve())] and report.missing == 0
+    assert len(lib) == 5 and lib.version == version
+
+    # Relinking finds them at the new place: nothing is read again.
+    with pytest.raises(ValueError):
+        lib.relink(photos, tmp_path)  # not there
+    assert lib.relink(photos, tmp_path / "moved") == 5
+    assert lib.roots == [(tmp_path / "moved").resolve()] and lib.version > version
+    assert all(os.path.exists(p) for p in lib.paths(lib.ids))
+    again = lib.update(workers=0)
+    assert (again.unchanged, again.added, again.missing) == (5, 0, 0)
+    lib.close()
+
+
+def test_missing_photos_coming_back_unchanged_are_not_read_again(tmp_path):
+    lib, photos = folder_library(tmp_path)
+    slot = int(lib.ids[0])
+    thumb = lib.thumbs[slot].copy()
+    lib.set_roots([])  # how folders used to be removed: their photos went missing
+    assert lib.update(workers=0).missing == 5 and len(lib) == 0
+    lib.add_root(photos)
+    # Before updating, the folder shows what the library knows of it, browsable.
+    info = lib.folder_info(photos)
+    assert (info.photos, info.missing, info.known, len(info.children)) == (0, 5, 5, 2)
+    new = tmp_path / "new"
+    new.mkdir()
+    lib.add_root(new)
+    assert lib.folder_info(new).known == 0  # never read
+    report = lib.update(workers=0)
+    assert (report.unchanged, report.updated, report.added) == (5, 0, 0) and len(lib) == 5
+    np.testing.assert_array_equal(lib.thumbs[slot], thumb)
+    lib.close()
+
+
+def test_forgetting_a_folder_drops_its_photos_and_slots_stay_unique(tmp_path):
+    lib, photos = folder_library(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    save(other / "x.png")
+    lib.add_root(other)
+    lib.update(workers=0)
+    last = int(lib.ids.max())
+    assert lib.forget(other) == 1
+    assert lib.roots == [photos.resolve()] and len(lib) == 5
+    lib.add_root(other)
+    lib.update(workers=0)
+    assert int(lib.ids.max()) > last  # a forgotten photo's slot isn't reused
+    lib.close()
 
 
 def test_library_grows_thumbnail_store(tmp_path):

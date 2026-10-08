@@ -16,7 +16,11 @@ A project file is a zip archive:
 
 Loading is forgiving: settings or operations this version doesn't know (saved
 by an older or newer one) keep their defaults or are left out, and each is
-reported in `ProjectFile.problems`. Files are written to a temporary name
+reported in `ProjectFile.problems`. Older animation settings are carried
+over (`_old_animation`): the video's start and end holds become the build's
+hold before and the last phase's hold after, the Still show becomes the
+build's hold after, and "deconstruct" (the clear phase's first name) loads
+as clear. Files are written to a temporary name
 and then renamed, so a failed save never damages an existing project.
 
 `document` is the JSON part alone; the app compares it to tell whether a
@@ -33,9 +37,10 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from skitter.core.animation import choreography_types
+from skitter.core.animation import PHASE_NAMES, PHASES, choreography_types
 from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.animation.look import AnimationLook
+from skitter.core.animation.phases import OPTIONAL, PhaseHolds
 from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
 from skitter.core.edits import apply_edits, edit_from_dict, edit_to_dict
@@ -89,7 +94,9 @@ def document(project: Project, committed: bool) -> dict:
         "match_settings": project.match_settings.values(),
         "export_settings": project.export_settings.values(),
         "choreographies": {key: c.values() for key, c in project.choreographies.items()},
-        "choreography": project.choreography_id,
+        "choreography": project.choreography_id,  # the build's (the only phase, once)
+        "phases": {phase: project.phase_choices.get(phase) for phase in OPTIONAL},
+        "phase_holds": {phase: holds.values() for phase, holds in project.phase_holds.items()},
         "camera_track": project.camera_track.to_dict(),
         "animation_look": project.animation_look.values(),
         "video_settings": project.video_settings.values(),
@@ -195,17 +202,58 @@ def _project(doc: dict, source: np.ndarray, problems: list[str]) -> Project:
                                                          "Export")  # fmt: skip
     project.animation_look = AnimationLook.from_values(doc.get("animation_look", {}), problems,
                                                        "Animation look")  # fmt: skip
-    project.video_settings = VideoSettings.from_values(doc.get("video_settings", {}), problems,
-                                                       "Video")  # fmt: skip
+    video = dict(doc.get("video_settings", {}))
+    old_holds = (video.pop("hold_start", None), video.pop("hold_end", None))
+    project.video_settings = VideoSettings.from_values(video, problems, "Video")
     saved = doc.get("choreographies", {})
     for cls in choreography_types():
         if cls.id in saved:
             project.choreographies[cls.id] = cls.from_values(saved[cls.id], problems, cls.name)
-    if doc.get("choreography") in project.choreographies:
-        project.choreography_id = doc["choreography"]
+    choices = {"build": doc.get("choreography"), **(doc.get("phases") or {})}
+    if "deconstruct" in choices:
+        choices.setdefault("clear", choices.pop("deconstruct"))
+    still = choices.get("show") == "still"  # the Still show: a pause, now the build's hold
+    if still:
+        choices["show"] = None
+    for phase, holds in (doc.get("phase_holds") or {}).items():
+        if phase in project.phase_holds and isinstance(holds, dict):
+            project.phase_holds[phase] = PhaseHolds.from_values(
+                holds, problems, f"{PHASE_NAMES[phase]} holds")  # fmt: skip
+    for phase, choice in choices.items():
+        known = project.choreographies.get(choice) if isinstance(choice, str) else None
+        if phase not in PHASES:
+            continue
+        if known is not None and known.phase == phase:
+            project.phase_choices[phase] = choice
+        elif choice is not None:
+            problems.append(f"{PHASE_NAMES[phase]}: {choice!r} isn't available; "
+                            f"{'the default' if phase == 'build' else 'none'} is used")  # fmt: skip
+    if "phase_holds" not in doc:
+        _old_animation(project, old_holds, saved.get("still") if still else None)
     if isinstance(doc.get("camera_track"), dict):
         project.camera_track = CameraTrack.from_dict(doc["camera_track"], problems)
     return project
+
+
+def _old_animation(project: Project, holds, still) -> None:
+    """Holds of a file from before phases had their own: the video's start hold before the
+    build, its end hold (and a Still show's time) after the last phase played."""
+    start, end = holds
+    build = project.phase_holds["build"]
+    build.update(hold_before=_seconds(start, 0.0))
+    played = [phase for phase in PHASES if project.phase_choices.get(phase) is not None]
+    for phase in PHASES:
+        project.phase_holds[phase].update(hold_after=0.0)
+    last = project.phase_holds[played[-1]]
+    pause = _seconds((still or {}).get("duration"), 2.0) if still is not None else 0.0
+    last.update(hold_after=min(_seconds(end, 2.0) + pause, 60.0))
+
+
+def _seconds(value, default: float) -> float:
+    try:
+        return min(max(float(value), 0.0), 60.0)
+    except (TypeError, ValueError):
+        return default
 
 
 def _png(image: np.ndarray) -> bytes:

@@ -1,19 +1,25 @@
-"""Animation framework: choreographies that build the mosaic tile by tile.
+"""Animation framework: choreographies that move the mosaic's tiles.
 
 A choreography is a configurable recipe (settings declared as Params, like
 slicing operations) that, given a MosaicScene, plans a Timeline. A timeline
 is a pure function of time: `frame(t)` returns every tile's state at t, so
 it can be played at any speed, paused, scrubbed, or rendered frame by frame
-to a video. Its last frame, at `duration`, is exactly the finished mosaic
-(TileFrame.final), drawn in stacking order.
+to a video.
 
-To add a choreography: subclass `Choreography`, set `id`, `name` and
-`description`, declare parameters, implement `timeline(scene)` (precompute
-per-tile values there, keeping `frame` cheap), and decorate the class with
-`@register_choreography`. `FlightTimeline` covers the common case of every
-tile travelling from a start state to its final state; `TossTimeline` throws
-tiles onto the table under gravity, with bounces (see look.py for the camera
-looking down at the table, and the shadows).
+Each choreography belongs to one phase of the animation (`phase`, see
+phases.py): it builds the mosaic (its last frame, at `duration`, is exactly
+the finished mosaic, TileFrame.final, drawn in stacking order), shows it
+(first and last frames are exactly the finished mosaic) or clears it away
+(the first frame is exactly the finished mosaic).
+
+To add a choreography: subclass `Choreography`, set `id` (unique across
+phases), `name`, `description` and `phase`, declare parameters, implement
+`timeline(scene)` (precompute per-tile values there, keeping `frame` cheap),
+and decorate the class with `@register_choreography`. `FlightTimeline`
+covers the common case of every tile travelling from a start state to its
+final state; `TossTimeline` throws tiles onto the table under gravity, with
+bounces (see look.py for the camera looking down at the table, and the
+shadows).
 
 Overlapping tiles (a photo pile) must land bottom first; landing.py makes
 such orders, for orderings with a direction and for random ones.
@@ -88,15 +94,21 @@ class Timeline(ABC):
 
     @abstractmethod
     def frame(self, t: float) -> TileFrame:
-        """The state at time t (clamped to [0, duration]); frame(duration) is final."""
+        """The state at time t (clamped to [0, duration]); at its phase's boundaries it is
+        exactly the finished mosaic (see Choreography.phase)."""
 
 
 class Choreography(Configurable, ABC):
-    """A configurable way to build the mosaic; plans a Timeline for a scene."""
+    """A configurable way to move the tiles in one phase; plans a Timeline for a scene.
+
+    phase: "build" (ends at the finished mosaic), "show" (starts and ends at it) or
+    "clear" (starts at it); see phases.py.
+    """
 
     id: ClassVar[str] = ""
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""
+    phase: ClassVar[str] = "build"
 
     @abstractmethod
     def timeline(self, scene: MosaicScene, look: "AnimationLook | None" = None) -> Timeline:
@@ -392,6 +404,8 @@ def register_choreography(cls: type[Choreography]) -> type[Choreography]:
     """Class decorator making a choreography available to the UI."""
     if not cls.id or not cls.name:
         raise TypeError(f"{cls.__name__} must define id and name")
+    if cls.phase not in ("build", "show", "clear"):
+        raise TypeError(f"{cls.__name__} has no phase it plays in: {cls.phase!r}")
     existing = _registry.get(cls.id)
     if existing is not None and existing is not cls:
         raise ValueError(f"choreography id {cls.id!r} is already used by {existing.__name__}")
@@ -399,9 +413,15 @@ def register_choreography(cls: type[Choreography]) -> type[Choreography]:
     return cls
 
 
-def choreography_types() -> list[type[Choreography]]:
-    """Registered choreographies, by name."""
-    return sorted(_registry.values(), key=lambda cls: cls.name)
+def choreography_types(phase: str | None = None) -> list[type[Choreography]]:
+    """Registered choreographies (of one phase, or all), by name."""
+    return sorted((cls for cls in _registry.values() if phase in (None, cls.phase)),
+                  key=lambda cls: cls.name)  # fmt: skip
+
+
+def unregister_choreography(type_id: str) -> None:
+    """Take a choreography out of the registry (tests registering their own)."""
+    _registry.pop(type_id, None)
 
 
 def get_choreography(type_id: str) -> type[Choreography]:

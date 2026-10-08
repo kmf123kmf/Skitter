@@ -6,7 +6,9 @@ from dataclasses import replace
 import numpy as np
 import pytest
 from PIL import Image
+from test_phases import fade  # noqa: F401 (fixture)
 
+from skitter.core.animation.phases import PhaseSpan
 from skitter.core.imaging import save_image
 from skitter.ui.render.atlas import PAGE, build_atlas, cell_size
 
@@ -82,13 +84,144 @@ def test_tiles_step_builds_library_in_background(sliced, photos):
     build_library(window, photos)
     assert window.session.busy is None
     assert step.is_complete() and window.next_button.isEnabled()
-    assert step._tiles.text() == "40" and step.folders.count() == 1
+    assert step._tiles.text() == "40" and step.folders.topLevelItemCount() == 1
     assert "Added 40" in step.status.text()
     assert window.tabs.isTabEnabled(3)
 
-    step.folders.setCurrentRow(0)
-    step.remove_folder()
-    assert window.session.library.roots == []
+    step.folders.setCurrentItem(step.folders.topLevelItem(0))
+    assert step.forget_folder(confirm=False)
+    assert window.session.library.roots == [] and len(window.session.library) == 0
+
+
+def test_tiles_step_folder_tree_leaves_folders_out_and_relinks(sliced, tmp_path, qapp):
+    from PySide6.QtCore import Qt
+
+    window, session = sliced, sliced.session
+    photos = tmp_path / "library"
+    rng = np.random.default_rng(1)
+    for folder, count in (("Birds", 12), ("cats", 18)):
+        (photos / folder).mkdir(parents=True)
+        for i in range(count):
+            color = tuple(int(c) for c in rng.integers(0, 256, 3))
+            Image.new("RGB", (60, 60), color).save(photos / folder / f"{i}.png")
+    step = tiles_step(window)
+    step.add_folder(photos)
+    new = step.folders.topLevelItem(0)
+    assert new.text(1) == "not read yet" and "Update Library" in step.status.text()
+    new.setExpanded(True)  # its subfolders on disk, before anything is read
+    assert [(new.child(i).text(0), new.child(i).text(1)) for i in range(new.childCount())] == [
+        ("Birds", "not read yet"), ("cats", "not read yet")]  # fmt: skip
+    build_library(window, photos)
+    tree = step.folders
+    root = tree.topLevelItem(0)
+    assert root.text(1) == "30" and root.checkState(0) == Qt.CheckState.Checked
+    root.setExpanded(True)
+    assert [root.child(i).text(0) for i in range(2)] == ["Birds", "cats"]  # as the disk spells
+
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.start_matching()
+    session.wait_for_job()
+    assert session.mosaic_is_valid and session.matching_is_current
+
+    root.child(0).setCheckState(0, Qt.CheckState.Unchecked)  # leave Birds out
+    qapp.processEvents()
+    assert len(session.library) == 18 and step._tiles.text() == "18 in use of 30"
+    root = tree.topLevelItem(0)  # the tree was rebuilt, still open
+    assert root.isExpanded() and root.checkState(0) == Qt.CheckState.PartiallyChecked
+    assert root.text(1) == "18 of 30" and root.child(0).checkState(0) == Qt.CheckState.Unchecked
+    # The mosaic still shows; matching again would use only the cats.
+    assert session.mosaic_is_valid and not session.matching_is_current
+
+    # The folder moves: its root goes offline, keeps its photos, and can be located.
+    photos.rename(tmp_path / "moved")
+    step.update_library()
+    session.wait_for_job()
+    assert tree.topLevelItem(0).text(1) == "offline" and "offline" in step.status.text()
+    assert len(session.library) == 18 and session.mosaic_is_valid
+    tree.setCurrentItem(tree.topLevelItem(0))
+    assert step.locate_folder(tmp_path / "moved")
+    assert session.library.roots == [(tmp_path / "moved").resolve()]
+    assert tree.topLevelItem(0).text(1) == "18 of 30" and session.mosaic_is_valid
+
+    # Forgetting it drops its photos: the mosaic that shows them needs matching again.
+    assert session.mosaic_uses_folder(tmp_path / "moved") == len(session.project.regions)
+    tree.setCurrentItem(tree.topLevelItem(0))
+    assert step.forget_folder(confirm=False)
+    assert tree.topLevelItemCount() == 0 and not session.mosaic_is_valid
+    assert not matching_step(window).is_complete()
+
+
+def test_tiles_step_lists_subfolders_not_read(sliced, tmp_path, qapp):
+    from PySide6.QtCore import Qt
+
+    window, session = sliced, sliced.session
+    photos = tmp_path / "library"
+    for folder in ("2013", "2014", "2015"):
+        (photos / folder).mkdir(parents=True)
+        Image.new("RGB", (60, 60), (200, 40, 40)).save(photos / folder / "a.png")
+    step = tiles_step(window)
+    step.add_folder(photos)
+    session.set_folder_included(photos / "2014", False)  # before its first read
+    step.update_library()
+    session.wait_for_job()
+    assert len(session.library) == 2
+    root = step.folders.topLevelItem(0)
+    root.setExpanded(True)
+    rows = [(root.child(i).text(0), root.child(i).text(1), root.child(i).checkState(0))
+            for i in range(root.childCount())]  # fmt: skip
+    assert rows == [("2013", "1", Qt.CheckState.Checked),
+                    ("2014", "not read", Qt.CheckState.Unchecked),
+                    ("2015", "1", Qt.CheckState.Checked)]  # fmt: skip
+    root.child(1).setCheckState(0, Qt.CheckState.Checked)  # ticked: read on the next update
+    qapp.processEvents()
+    step.update_library()
+    session.wait_for_job()
+    assert len(session.library) == 3
+
+
+def test_tiles_step_panel_and_folder_list_resize_and_views_never_flash(sliced, photos, qapp):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from skitter.ui import preferences
+    from skitter.ui.steps.tiles import COLOR_MAP
+
+    window = sliced
+    window.resize(1400, 800)
+    window.show()
+    window.next_button.click()  # to Tiles
+    step = build_library(window, photos)
+    step.wait_for_colors(30)
+    assert step._shown[0] == COLOR_MAP
+
+    # The side panel widens by dragging the splitter, remembered for next time.
+    splitter = step.splitter
+    narrow = splitter.sizes()[1]
+    splitter.moveSplitter(splitter.sizes()[0] - 200, 1)
+    assert splitter.sizes()[1] >= narrow + 150
+    assert int(preferences.settings().value("tiles/panel_width")) == splitter.sizes()[1]
+
+    # The folder list's grip sets its height (and remembers it).
+    grip, tree = step.folders_grip, step.folders
+    before = tree.height()
+    QTest.mousePress(grip, Qt.MouseButton.LeftButton, pos=QPoint(10, 4))
+    QTest.mouseMove(grip, QPoint(10, 124))
+    QTest.mouseRelease(grip, Qt.MouseButton.LeftButton, pos=QPoint(10, 124))
+    assert tree.height() == before + 120
+    assert int(preferences.settings().value("tiles/folders_height")) == before + 120
+
+    # Rescanning keeps the color map up (not the tile sample) while colors are analyzed
+    # again for the new photos.
+    Image.new("RGB", (60, 60), (10, 200, 30)).save(photos / "new.png")
+    shown = []
+    window.session.library_changed.connect(lambda: shown.append(step._shown))
+    step.update_library()
+    window.session.wait_for_job()
+    qapp.processEvents()
+    assert step._colors_job is not None or step._colors_version == window.session.library.state
+    assert shown and {s[0] for s in shown} == {COLOR_MAP}
+    step.wait_for_colors(30)
+    assert step._shown[0] == COLOR_MAP and step._shown[3] == window.session.library.state
 
 
 def test_tiles_step_shows_what_the_library_can_paint(sliced, photos):
@@ -657,7 +790,8 @@ def test_export_animation_from_the_animate_tab(sliced, photos, tmp_path, qapp):
         assert len(frames) == 1 * 10 + 2 * 10 + 1  # animation + 2 s hold at the end
 
     # Cancelling leaves nothing behind (a long export, so it can't finish first).
-    session.project.video_settings.update(resolution="1080p", hold_end=60.0, motion_blur=16)
+    session.project.video_settings.update(resolution="1080p", motion_blur=16)
+    session.project.phase_holds["build"].update(hold_after=60.0)
     dialog.path.setText(str(tmp_path / "cancelled.webm"))
     dialog._refresh()
     job = session.start_video_export(tmp_path / "cancelled.webm")
@@ -732,6 +866,61 @@ def test_back_from_animate_and_next_again(sliced, photos, qapp):
     assert window.tabs.isTabEnabled(window.tabs.indexOf(animate))
     window.next_button.click()
     assert window.tabs.currentWidget() is animate
+
+
+def overflowing_panels(window, qapp) -> list[str]:
+    """Steps whose side panel content needs more width than the panel has."""
+    from PySide6.QtWidgets import QScrollArea
+
+    too_wide = []
+    for step in window.steps:
+        window.tabs.setCurrentWidget(step)
+        qapp.processEvents()
+        for scroll in step.findChildren(QScrollArea):
+            content = scroll.widget()
+            if content is None or content.layout() is None:
+                continue
+            need, have = content.minimumSizeHint().width(), scroll.viewport().width()
+            if need > have:
+                too_wide.append(f"{type(step).__name__}: needs {need} px, has {have}")
+    return too_wide
+
+
+@pytest.fixture
+def windows_font(qapp):
+    """The font as on Windows (Segoe UI 9 pt), for a window to measure widths as users
+    see them: offscreen Qt otherwise falls back to a much wider font. (Set it on the
+    window, not the app: the app's font would stay changed for later tests.)"""
+    import os
+
+    from PySide6.QtGui import QFont, QFontDatabase
+
+    path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "segoeui.ttf")
+    font = QFontDatabase.addApplicationFont(path) if os.path.exists(path) else -1
+    if font < 0:
+        pytest.skip("needs the Windows UI font (Segoe UI)")
+    yield QFont("Segoe UI", 9)
+    QFontDatabase.removeApplicationFont(font)
+
+
+def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):
+    """Side panels never scroll sideways: their content must fit (see AGENTS.md)."""
+    from skitter.ui.steps.animate import AnimateStep
+
+    window = sliced
+    window.setFont(windows_font)
+    window.resize(1400, 900)
+    window.show()
+    matched(window, photos, qapp)
+    assert overflowing_panels(window, qapp) == []
+    animate = window.step(AnimateStep)  # with a key selected, its fields show too
+    window.tabs.setCurrentWidget(animate)
+    animate.keys.add_key()
+    assert animate.keys.selected == 0
+    assert overflowing_panels(window, qapp) == []
+    animate.show_phase("show")  # another phase's tab, with its choreography's settings
+    animate.choreography_box.setCurrentIndex(animate.choreography_box.findData("still"))
+    assert overflowing_panels(window, qapp) == []
 
 
 def test_wheel_never_changes_an_unfocused_setting(sliced, photos, qapp):
@@ -1161,8 +1350,8 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
 
     # A pull back: the export frame starts small (close up), ends on the whole view.
     home = home_shot(base)
-    pull_back = [CameraKey(KeyTime("body", 0.0), Shot(home.center, 4.0)),
-                 CameraKey(KeyTime("body", 0.8), home)]  # fmt: skip
+    pull_back = [CameraKey(KeyTime("build", 0.0), Shot(home.center, 4.0)),
+                 CameraKey(KeyTime("build", 0.8), home)]  # fmt: skip
     session.set_camera_track(CameraTrack.of(pull_back))
     assert len(animate.transport.timeline.keys) == 2 and animate.keys.clear_button.isEnabled()
     animate.player.seek(0.0)
@@ -1185,8 +1374,8 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     assert animate._frame_line.instances["size"][0][0] == pytest.approx(base[2])
 
     # Turned keys: the frame is drawn turned, and a following view turns with it.
-    turned = [CameraKey(KeyTime("body", 0.0), Shot(home.center, 1.5, -math.pi / 4)),
-              CameraKey(KeyTime("body", 0.8), home)]  # fmt: skip
+    turned = [CameraKey(KeyTime("build", 0.0), Shot(home.center, 1.5, -math.pi / 4)),
+              CameraKey(KeyTime("build", 0.8), home)]  # fmt: skip
     session.set_camera_track(CameraTrack.of(turned))
     animate.follow.setChecked(True)
     animate.player.seek(0.0)
@@ -1196,6 +1385,110 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     assert animate.canvas.camera.rotation == pytest.approx(0.0)
     assert animate.keys.clear_keys(confirm=False) and not session.project.camera_track.keys
     assert not animate.transport.timeline.keys
+
+
+def test_animate_tab_chooses_a_choreography_and_holds_per_phase(fade, sliced, photos, qapp):  # noqa: F811
+    from skitter.core.animation.video import plan_video
+    from skitter.ui.steps.animate import AnimateStep
+
+    window, session = sliced, sliced.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.start_matching()
+    session.wait_for_job()
+    animate = window.step(AnimateStep)
+    window.tabs.setCurrentWidget(animate)
+    project, player, strip = session.project, animate.player, animate.transport.timeline
+    box, holds = animate.choreography_box, animate.holds_form
+    built = player.duration
+    assert animate.phase == "build" and box.currentData() == "assemble"
+    assert [s.phase for s in strip.phases if s.length > 0] == ["build"]
+    # The build's holds: none before, the finished mosaic 2 s after (the default).
+    assert holds._target is project.phase_holds["build"] and strip.phases[0].after == 2.0
+    assert "2 s after" in strip.section_at(1.0)
+    holds.editor("hold_before").widget.setValue(1.0)
+    assert player.duration == pytest.approx(built + 1.0) and session.modified
+    assert strip.phases[0].motion[0] == 1.0  # the build moves after its hold
+
+    # Show and Clear: None, or one of theirs (here the tests' own); a phase left out has
+    # no holds to set, a chosen one adds its time, and the strip shows it.
+    animate.show_phase("show")
+    assert [box.itemData(i) for i in range(box.count())] == [None, "test_blink"]
+    assert box.currentData() is None and "No show phase" in animate.description.text()
+    assert holds._target is None
+    box.setCurrentIndex(box.findData("test_blink"))
+    assert project.phase_choices["show"] == "test_blink"
+    assert holds._target is project.phase_holds["show"]
+    assert player.duration == pytest.approx(built + 1.0 + 2.0)
+    animate.show_phase("clear")
+    box.setCurrentIndex(box.findData("test_fade"))
+    holds.editor("hold_after").widget.setValue(0.5)
+    assert player.duration == pytest.approx(built + 1.0 + 2.0 + 1.0 + 0.5)
+    assert [s.phase for s in strip.phases if s.length > 0] == ["build", "show", "clear"]
+    assert strip.section_at(strip.phases[2].start + 0.5).startswith("Clear")
+    animate.show_phase("build")
+    assert box.currentData() == "assemble" and animate.form._target is project.choreography
+
+    # The export plays exactly this: the same phases and holds.
+    timeline = project.animation(session.scene)
+    plan = plan_video(session.scene, timeline.duration, project.video_settings,
+                      project.animation_look.background, timeline.spans)  # fmt: skip
+    assert plan.clock[-1] == pytest.approx(player.duration)
+    assert plan.video_clock.phase_span("clear")[1] == pytest.approx(player.duration)
+
+
+def test_keys_deselect_and_brackets_work_from_the_side_panel(sliced, photos, qapp):
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtTest import QTest
+
+    from skitter.core.animation.camera import Shot, home_shot
+    from skitter.core.animation.keyframes import CameraKey, CameraTrack, KeyTime
+    from skitter.ui.steps.animate import AnimateStep
+
+    window, session = sliced, sliced.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.start_matching()
+    session.wait_for_job()
+    window.show()
+    window.activateWindow()
+    animate = window.step(AnimateStep)
+    window.tabs.setCurrentWidget(animate)
+    qapp.processEvents()
+    keys, strip = animate.keys, animate.transport.timeline
+    home = home_shot(animate._frame_rect()[0])
+    session.set_camera_track(CameraTrack.of([
+        CameraKey(KeyTime("build", share), Shot(home.center, zoom))
+        for share, zoom in ((0.1, 2.0), (0.5, 1.5), (0.9, 1.0))]))  # fmt: skip
+    times = [t for t, _, _ in strip.keys]
+
+    # Clicking a key selects it (its fields show); Esc deselects (they hide).
+    lane = round(strip.key_y())
+    QTest.mouseClick(
+        strip, Qt.MouseButton.LeftButton, pos=QPoint(round(strip.x_of(times[1])), lane)
+    )
+    assert keys.selected == 1 and keys.form.isVisibleTo(animate)
+    assert "Esc" in keys.hint.text() and strip.hasFocus()  # the page's keys work at once
+    QTest.keyClick(strip, Qt.Key.Key_Escape)
+    assert keys.selected == -1 and not keys.form.isVisibleTo(animate)
+    # So does a click on empty timeline (it also scrubs there).
+    keys.select_and_go(0)
+    QTest.mouseClick(
+        strip,
+        Qt.MouseButton.LeftButton,
+        pos=QPoint(round(strip.x_of(0.5 * (times[1] + times[2]))), 19),
+    )
+    assert keys.selected == -1
+
+    # [ and ] work with the focus in a key field of the side panel.
+    keys.select_and_go(0)
+    field = keys.form.editor("zoom").widget
+    field.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(field, Qt.Key.Key_BracketRight)
+    assert keys.selected == 1 and animate.player.time == pytest.approx(times[1])
+    QTest.keyClick(field, Qt.Key.Key_BracketLeft)
+    assert keys.selected == 0
 
 
 def test_transport_bar_steps_jumps_loops_and_changes_speed(sliced, photos, qapp):
@@ -1271,7 +1564,8 @@ def test_timeline_strip_scrubs_and_drags_keys(qapp):
 
     strip = TimelineStrip()
     strip.resize(420, 46)
-    strip.set_timing(10.0, (1.0, 8.0))
+    strip.show()  # mouse moves reach only a shown widget (else it depends on earlier tests)
+    strip.set_timing(10.0, [PhaseSpan("build", 0.0, 10.0, 1.0, 2.0)])
     strip.set_keys([(2.0, True, "smooth"), (6.0, False, "hold")])
     assert strip.time_at(strip.x_of(3.5)) == pytest.approx(3.5)
     y = round(strip.key_y())
@@ -1327,7 +1621,8 @@ def test_camera_keys_through_the_viewfinder(sliced, photos, qapp):
     player.seek(2.0)
     keys.add_key()
     track = session.project.camera_track
-    assert len(track.keys) == 1 and track.keys[0].time == KeyTime("body", 2.0 / 8.0)
+    # 2 s into the build, of 10 s with its hold after (holds count: they're the phase's).
+    assert len(track.keys) == 1 and track.keys[0].time == KeyTime("build", 2.0 / 10.0)
     assert track.keys[0].shot.zoom == pytest.approx(1.0)  # the camera's shot (static)
     assert len(strip.keys) == 1 and keys.selected == 0 and keys.form.isVisible()
     assert keys.fields.time == pytest.approx(2.0) and session.modified

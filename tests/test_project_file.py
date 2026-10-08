@@ -56,9 +56,11 @@ def sample_project(alpha=True) -> Project:
     project.video_settings.update(frame_rate="24")
     project.choreography_id = "deal"
     project.choreographies["deal"].update(decks=3)
+    project.phase_holds["build"].update(hold_before=0.5, hold_after=3.0)
+    project.phase_holds["clear"].update(hold_after=1.5)
     project.camera_track = CameraTrack((
-        CameraKey(KeyTime("lead", 0.5), Shot((10.0, 20.0), 3.0, 0.25)),
-        CameraKey(KeyTime("body", 0.4), Shot((30.0, 25.0), 1.5), stop=False, motion="linear"),
+        CameraKey(KeyTime("build", 0.2), Shot((10.0, 20.0), 3.0, 0.25)),
+        CameraKey(KeyTime("build", 0.4), Shot((30.0, 25.0), 1.5), stop=False, motion="linear"),
     ), stretch=False)  # fmt: skip
     return project
 
@@ -78,9 +80,53 @@ def test_a_project_survives_a_round_trip(tmp_path):
     for name in ("center", "size", "rotation", "z"):
         np.testing.assert_array_equal(getattr(again.regions, name), getattr(project.regions, name))
     assert again.choreography.id == "deal" and again.choreographies["deal"].decks == 3
+    assert again.phase_choices == {"build": "deal", "show": None, "clear": None}
+    assert again.phase_holds["build"].values() == {"hold_before": 0.5, "hold_after": 3.0}
+    assert again.phase_holds["clear"].hold_after == 1.5
     assert again.camera_track == project.camera_track
     assert not again.slicing_plan.stages[1].enabled
     assert not (tmp_path / "test.skitter.part").exists()
+
+
+def test_older_animation_settings_are_carried_over(tmp_path):
+    path = tmp_path / "phases.skitter"
+    save_project(path, sample_project(), committed=True, mosaic=None)
+
+    def before_phases(doc):  # the video's holds; only "choreography": the build
+        for key in ("phases", "phase_holds"):
+            doc.pop(key)
+        doc["video_settings"].update(hold_start=1.5, hold_end=3.0)
+
+    rewrite(path, before_phases)
+    loaded = load_project(path)
+    project = loaded.project
+    assert loaded.problems == []  # the old holds aren't "unknown settings"
+    assert project.phase_choices == {"build": "deal", "show": None, "clear": None}
+    assert project.phase_holds["build"].values() == {"hold_before": 1.5, "hold_after": 3.0}
+    assert project.phase_holds["clear"].values() == {"hold_before": 0.0, "hold_after": 0.0}
+
+    # A file with the Still show (a pause, now part of the build's hold after) and the
+    # clear phase's first name.
+    def first_phases(doc):
+        doc.pop("phase_holds", None)
+        doc["phases"] = {"show": "still", "deconstruct": None}
+        doc["choreographies"]["still"] = {"duration": 2.5}
+        doc["video_settings"].update(hold_end=1.0)
+
+    rewrite(path, first_phases)
+    loaded = load_project(path)
+    assert loaded.problems == [] and loaded.project.phase_choices["show"] is None
+    assert loaded.project.phase_holds["build"].hold_after == 3.5
+
+
+def test_phase_choices_that_are_gone_or_misplaced_fall_back(tmp_path):
+    path = tmp_path / "phases.skitter"
+    save_project(path, sample_project(), committed=True, mosaic=None)
+    # A choreography this version doesn't have, or one of another phase, is left out.
+    rewrite(path, lambda doc: doc.update(phases={"show": "spin_dance", "clear": "assemble"}))
+    loaded = load_project(path)
+    assert loaded.project.phase_choices["show"] is None
+    assert loaded.project.phase_choices["clear"] is None and len(loaded.problems) == 2
 
 
 def test_view_state_is_kept_as_is_and_optional(tmp_path):

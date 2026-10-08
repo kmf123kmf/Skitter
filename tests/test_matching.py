@@ -476,6 +476,44 @@ def library(tmp_path_factory):
     lib.close()
 
 
+def test_matching_uses_only_folders_in_use_and_describes_tiles_once(tmp_path, monkeypatch):
+    from skitter.core.matching import matcher as matcher_module
+
+    root = tmp_path / "tiles"
+    rng = np.random.default_rng(5)
+    for folder in ("warm", "cool"):
+        (root / folder).mkdir(parents=True)
+        for i in range(30):
+            color = tuple(int(c) for c in rng.integers(0, 256, 3))
+            Image.new("RGB", (60, 60), color).save(root / folder / f"{i}.png")
+    lib = TileLibrary(tmp_path / "cache")
+    lib.set_roots([root])
+    lib.update(workers=0)
+    described = []
+    real = matcher_module.build_candidates
+
+    def counting(library, *args, ids=None, **kwargs):
+        described.append(len(ids))
+        return real(library, *args, ids=ids, **kwargs)
+
+    monkeypatch.setattr(matcher_module, "build_candidates", counting)
+    ctx = flat_ctx(target_image(), columns=8, tile=20)
+    regions = GridSlicer().apply(ctx.canvas(), ctx)
+    settings = MatchSettings(tint="none", refine_seconds=0.0, adaptive_rounds=0)
+    matcher = Matcher(lib)
+
+    lib.set_included(root / "cool", False)
+    warm = set(lib.ids.tolist())
+    result = matcher.run(regions, ctx, settings)
+    assert set(result.tile[result.tile >= 0].tolist()) <= warm and described == [30]
+    lib.set_included(root / "cool", True)  # only the cool photos are described now
+    result = matcher.run(regions, ctx, settings)
+    assert described == [30, 30] and not set(result.tile.tolist()) <= warm
+    lib.set_included(root / "cool", False)  # nothing new to describe
+    assert set(matcher.run(regions, ctx, settings).tile.tolist()) <= warm and len(described) == 2
+    lib.close()
+
+
 def target_image():
     image = np.zeros((120, 160, 3), np.uint8)
     image[:60, :80] = (230, 40, 40)

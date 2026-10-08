@@ -8,6 +8,7 @@ import pytest
 from PIL import Image
 from test_animation import grid_scene  # noqa: E402  (tests directory is on sys.path)
 
+from skitter.core.animation import PhasedTimeline
 from skitter.core.animation.assemble import AssembleChoreography
 from skitter.core.animation.encode import VideoWriter
 from skitter.core.animation.video import (
@@ -47,17 +48,15 @@ def test_view_matches_the_frame_shape(framing):
     assert margin[2] == pytest.approx(w / 0.8)
 
 
-def test_frame_times_hold_and_end_on_the_finished_mosaic():
-    settings = VideoSettings(frame_rate="30", hold_start=1.0, hold_end=2.0, motion_blur=8)
-    plan = plan_video(grid_scene(), 4.0, settings, "#000000")
+def test_frame_times_end_exactly_on_the_last_moment():
+    settings = VideoSettings(frame_rate="30", motion_blur=8)
+    plan = plan_video(grid_scene(), 7.0, settings, "#000000")  # the video is the animation
     assert plan.frames == 7 * 30 + 1 and plan.fps == 30
-    assert plan.times[0] == 0 and plan.times[30] == 0  # held start
-    assert plan.times[60] == pytest.approx(1.0)
-    assert plan.times[-1] == 4.0 and plan.times[-61] == 4.0  # held end, exactly final
+    assert plan.clock[30] == pytest.approx(1.0) and plan.clock[-1] == 7.0
     blur = plan.moments(75)
     assert len(blur) == 8 and blur.max() - blur.min() == pytest.approx(0.5 / 30 * 7 / 8)
-    assert set(plan.moments(0)) == {0.0} and set(plan.moments(29)) == {0.0}  # held: still
-    assert plan.moments(plan.frames - 1).tolist() == [4.0]  # exactly the finished mosaic
+    assert plan.moments(plan.frames - 1).tolist() == [7.0]  # exactly the last moment
+    assert plan.video_clock.phase_span("build") == (0.0, 7.0)  # no phases given: all build
     custom = VideoSettings(frame_rate="custom", custom_fps=29.97)
     assert plan_video(grid_scene(), 1.0, custom, "#000000").fps == pytest.approx(30000 / 1001)
 
@@ -200,7 +199,9 @@ def gpu():
         pytest.skip(f"no GPU context: {exc}")
 
 
-def render_setup(tmp_path, background="#000000", **settings):
+def render_setup(tmp_path, background="#000000", holds=(0.0, 0.0), **settings):
+    """A 2 x 2 mosaic built in 1 s (holds: the build's, before and after), its plan,
+    timeline and textures."""
     from test_assembly import context, result_for, tile_files
 
     from skitter.core.scene import MosaicScene
@@ -215,10 +216,11 @@ def render_setup(tmp_path, background="#000000", **settings):
     regions = RegionSet.grid(80, 80, 2, 2).replace(rotation=[0, 0.3, 0, 0])
     result = result_for(regions, [0, 1, 2, 3], shift=[[0.05, 0.02, 0]] * 4)
     scene = MosaicScene.from_result(result, context(80, 80))
-    defaults = dict(resolution="custom", width=160, height=160, margin=0.0, hold_end=0.0)
+    defaults = dict(resolution="custom", width=160, height=160, margin=0.0)
     video = VideoSettings(**{**defaults, **settings})
-    timeline = AssembleChoreography(duration=1.0, travel=0.5).timeline(scene)
-    plan = plan_video(scene, timeline.duration, video, background)
+    build = AssembleChoreography(duration=1.0, travel=0.5).timeline(scene)
+    timeline = PhasedTimeline({"build": build}, {"build": holds})
+    plan = plan_video(scene, timeline.duration, video, background, timeline.spans)
     request = DetailRequest.for_scene(scene, files, scale=plan.scale)
     detail = request.build(lambda m, f: None, lambda: False)
     layer, uv = detail.atlas.locate(request.image, scene.mirrored)
@@ -270,8 +272,10 @@ def test_transparent_and_colored_backgrounds(tmp_path, gpu):
 def test_motion_blur_only_blurs_motion(tmp_path, gpu):
     from skitter.ui.render.video_renderer import VideoRenderer
 
-    _, _, sharp_plan, timeline, pages, base = render_setup(tmp_path, motion_blur=0, hold_end=0.5)
-    _, _, blur_plan, _, _, _ = render_setup(tmp_path, motion_blur=8, hold_end=0.5)
+    _, _, sharp_plan, timeline, pages, base = render_setup(
+        tmp_path, motion_blur=0, holds=(0.0, 0.5)
+    )
+    _, _, blur_plan, _, _, _ = render_setup(tmp_path, motion_blur=8, holds=(0.0, 0.5))
     sharp = VideoRenderer(sharp_plan, pages, base, (0, 0, 0), supersampling=1)
     blur = VideoRenderer(blur_plan, pages, base, (0, 0, 0), supersampling=1)
     try:

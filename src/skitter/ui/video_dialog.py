@@ -217,9 +217,9 @@ class VideoExportDialog(QDialog):
 
     def _show_plan(self, scene) -> None:
         project = self.session.project
-        timeline = project.choreography.timeline(scene, project.animation_look)
+        timeline = project.animation(scene)
         plan = plan_video(scene, timeline.duration, self.settings,
-                          project.animation_look.background)  # fmt: skip
+                          project.animation_look.background, timeline.spans)  # fmt: skip
         closest = project.camera_track.path(plan.video_clock, plan.view).max_zoom
         fps = float(plan.fps)
         self.size_label.setText(f"{plan.width:,} × {plan.height:,} px at {fps:g} fps")

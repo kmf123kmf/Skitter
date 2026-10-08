@@ -9,6 +9,7 @@ from pathlib import Path
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
+from skitter.core.animation import PHASES, plan_phases
 from skitter.core.animation.video import check_video, plan_video, sync_size
 from skitter.core.assembly import (
     ExportCancelled,
@@ -37,7 +38,14 @@ from skitter.core.slicing import (
     mask_regions,
     summarize,
 )
-from skitter.core.tiles.library import OK, TileLibrary, UpdateReport, default_library_folder
+from skitter.core.tiles.library import (
+    OK,
+    TileLibrary,
+    UpdateReport,
+    default_library_folder,
+    folder_key,
+    is_under,
+)
 from skitter.ui.jobs import Job
 from skitter.ui.render.tile_textures import DetailRequest, TileTextures
 from skitter.ui.render.video_export import VideoJob, run_video_job
@@ -277,7 +285,8 @@ class Session(QObject):
                 if opened.restored is not None:
                     result, self.missing_tiles = opened.restored
                     mosaic = opened.loaded.mosaic
-                    key = (regions, opened.context, mosaic.library_version, mosaic.settings.key())
+                    state = (mosaic.library_version, self.library.selection)
+                    key = (regions, opened.context, state, mosaic.settings.key())
                     self._set_matches(result, key, opened.scene)
         self.matching_changed.emit()
         self.animation_edited()
@@ -541,6 +550,47 @@ class Session(QObject):
         self.library.set_roots(folders)
         self.library_changed.emit()
 
+    def add_library_folder(self, folder) -> None:
+        """Scan a folder too (one inside a library folder is put back in use instead)."""
+        self.library.add_root(folder)
+        self.library_changed.emit()
+
+    def set_folder_included(self, folder, included: bool) -> None:
+        """Use, or leave out of matching, a library folder's photos (instant: nothing
+        is read; the mosaic stays valid, matching becomes out of date)."""
+        self.library.set_included(folder, included)
+        self.library_changed.emit()
+
+    def forget_library_folder(self, root) -> int:
+        """Drop a library folder and its photos; a mosaic using them needs matching
+        again. Returns how many photos were dropped."""
+        dropped = self.library.forget(root)
+        self.library_changed.emit()
+        self.matching_changed.emit()  # the mosaic may no longer be valid
+        return dropped
+
+    def relink_library_folder(self, root, new_root) -> int:
+        """Point a moved library folder at its new place (ValueError if its photos
+        aren't there). A mosaic using its photos stays valid. Returns photos moved."""
+        valid = self.mosaic_is_valid
+        moved = self.library.relink(root, new_root)
+        if valid and self.project.matches is not None:
+            self._match_tiles = self._tile_snapshot(self.project.matches.tile)
+            regions, ctx, (_, selection), settings = self._match_key
+            self._match_key = (regions, ctx, (self.library.version, selection), settings)
+        self.library_changed.emit()
+        self.matching_changed.emit()
+        return moved
+
+    def mosaic_uses_folder(self, root) -> int:
+        """How many of the mosaic's tiles show photos in this folder."""
+        matches = self.project.matches
+        if matches is None or self.library is None:
+            return 0
+        tiles = matches.tile[matches.tile >= 0]
+        key = folder_key(root)
+        return sum(1 for p in self.library.paths(tiles) if p and is_under(p, key))
+
     @property
     def library_ready(self) -> bool:
         return self.library is not None and len(self.library) > 0 and self.busy != "library"
@@ -569,7 +619,7 @@ class Session(QObject):
         return (
             self.project.regions,
             self._slice_context,
-            library.version if library is not None else None,
+            library.state if library is not None else None,  # its contents and folders in use
             self.project.match_settings.key(),
         )
 
@@ -785,7 +835,8 @@ class Session(QObject):
         self.animation_edited()
 
     def animation_edited(self) -> None:
-        """The choreography, its settings, the look or the video settings changed."""
+        """The choreographies (of any phase), their settings, the look or the video
+        settings changed."""
         sync_size(self.project.video_settings, self.scene)
         self.animation_changed.emit()
 
@@ -805,17 +856,21 @@ class Session(QObject):
         if problems:
             raise RuntimeError(problems[0])
         project, scene = self.project, self.scene
-        choreography = project.choreography.copy()
+        choreographies = {}
+        for phase in PHASES:
+            chosen = project.phase_choreography(phase)
+            choreographies[phase] = None if chosen is None else chosen.copy()
+        holds = {phase: h.copy() for phase, h in project.phase_holds.items()}
         settings = project.video_settings.copy()
         background = project.animation_look.background
         look = project.animation_look.copy()
-        timeline = choreography.timeline(scene, look)
-        plan = plan_video(scene, timeline.duration, settings, background)
+        timeline = plan_phases(choreographies, scene, look, holds)
+        plan = plan_video(scene, timeline.duration, settings, background, timeline.spans)
         # Tiles show largest at the camera's closest: their textures need that detail.
         track = project.camera_track
         closest = track.path(plan.video_clock, plan.view).max_zoom
         job = VideoJob(
-            path=Path(path), scene=scene, choreography=choreography,
+            path=Path(path), scene=scene, choreographies=choreographies, holds=holds,
             track=track, settings=settings, background=background, look=look, plan=plan,
             # Read here: the library isn't threadsafe.
             request=DetailRequest.for_scene(scene, TileFiles.read(self.library, scene.slot),

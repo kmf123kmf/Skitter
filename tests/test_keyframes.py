@@ -1,8 +1,7 @@
-"""Camera keyframes (core/animation/keyframes.py) and the video clock (video.py)."""
+"""Camera keyframes (core/animation/keyframes.py) on the video clock (phases.py)."""
 
 import cmath
 import math
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -10,9 +9,18 @@ from test_video import gpu, render_setup  # noqa: F401 (fixture, helper)
 
 from skitter.core.animation.camera import Shot, home_shot
 from skitter.core.animation.keyframes import CameraKey, CameraTrack, KeyTime
-from skitter.core.animation.video import ClockedTimeline, VideoClock, VideoSettings, plan_video
+from skitter.core.animation.phases import PhaseSpan, VideoClock
 
-CLOCK = VideoClock(hold_start=1.0, duration=8.0, hold_end=2.0)  # 11 s of video
+
+def clock(build: float, show: float = 0.0, clear: float = 0.0) -> VideoClock:
+    """A video of these phase lengths (holds included; 0: left out)."""
+    spans = (PhaseSpan("build", 0.0, build, 1.0, 2.0),
+             PhaseSpan("show", build, build + show),
+             PhaseSpan("clear", build + show, build + show + clear))  # fmt: skip
+    return VideoClock(build + show + clear, spans)
+
+
+CLOCK = clock(11.0)  # an 11 s build: held 1 s before its motion, 2 s after
 BASE = (0.0, 0.0, 100.0, 80.0)
 HOME = (50.0, 40.0)
 
@@ -39,20 +47,20 @@ def velocity(path, t, dt=1e-4) -> np.ndarray:
 # Key times
 
 
-def test_key_times_anchor_to_their_part_of_the_video():
-    assert KeyTime.at(0.5, CLOCK) == KeyTime("lead", 0.5)
-    assert KeyTime.at(5.0, CLOCK) == KeyTime("body", 0.5)  # half way through the animation
-    assert KeyTime.at(10.0, CLOCK) == KeyTime("tail", 1.0)
-    assert KeyTime.at(5.0, CLOCK, stretch=False) == KeyTime("body", 4.0)
-    longer = VideoClock(hold_start=2.0, duration=16.0, hold_end=2.0)
-    assert KeyTime("lead", 0.5).seconds(longer) == 0.5  # seconds from the start
-    assert KeyTime("body", 0.5).seconds(longer) == 10.0  # still half way through
-    assert KeyTime("body", 4.0).seconds(longer, stretch=False) == 6.0  # 4 s in, pinned
-    assert KeyTime("tail", 1.0).seconds(longer) == 19.0  # a second after the end
-    shorter = VideoClock(hold_start=0.2, duration=2.0, hold_end=0.5)
-    assert KeyTime("lead", 0.5).seconds(shorter) == 0.2  # clamped into its part
-    assert KeyTime("body", 4.0).seconds(shorter, stretch=False) == 2.2
-    assert KeyTime("tail", 1.0).seconds(shorter) == pytest.approx(2.7)
+def test_key_times_anchor_to_their_phase():
+    assert KeyTime.at(5.5, CLOCK) == KeyTime("build", 0.5)  # half way through the build
+    assert KeyTime.at(5.5, CLOCK, stretch=False) == KeyTime("build", 5.5)
+    phases = clock(11.0, show=4.0, clear=5.0)
+    assert KeyTime.at(13.0, phases) == KeyTime("show", 0.5)
+    assert KeyTime.at(11.0, phases).part == "build"  # a boundary: the phase ending there
+    assert KeyTime.at(20.0, phases) == KeyTime("clear", 1.0)
+    longer = clock(22.0, show=8.0)
+    assert KeyTime("build", 0.5).seconds(longer) == 11.0  # still half way through
+    assert KeyTime("show", 0.5).seconds(longer) == 26.0  # the show moved along
+    assert KeyTime("build", 4.0).seconds(longer, stretch=False) == 4.0  # 4 s in, pinned
+    shorter = clock(2.0)
+    assert KeyTime("build", 4.0).seconds(shorter, stretch=False) == 2.0  # clamped into it
+    assert KeyTime("show", 0.5).seconds(shorter) == 2.0  # left out: where it would be
 
 
 # Paths
@@ -126,7 +134,7 @@ def test_tracks_edit_into_new_tracks_and_round_trip():
     assert len(added.without(0).keys) == 2 and len(t.keys) == 2  # t itself unchanged
     pinned = added.restretched(False, CLOCK)
     np.testing.assert_allclose(pinned.times(CLOCK), added.times(CLOCK))
-    assert not pinned.stretch and pinned.keys[1].time == KeyTime("body", 3.0)
+    assert not pinned.stretch and pinned.keys[1].time == KeyTime("build", 4.0)  # holds count
 
     again = CameraTrack.from_dict(added.to_dict())
     assert again == added
@@ -138,33 +146,31 @@ def test_tracks_edit_into_new_tracks_and_round_trip():
     assert len(loaded.keys) == 2 and loaded.keys[1].motion == "smooth" and problems
 
 
-# The video clock
+# Older files
 
 
-def test_the_video_clock_and_its_moments():
-    assert CLOCK.total == 11.0 and CLOCK.animation_end == 9.0
-    np.testing.assert_allclose(CLOCK.animation_time([0.0, 1.0, 5.0, 10.0]), [0.0, 0.0, 4.0, 8.0])
-    frames = SimpleNamespace(frame=lambda t: t)
-    clocked = ClockedTimeline(frames, CLOCK)
-    assert clocked.duration == 11.0 and clocked.frame(5.0) == 4.0 and clocked.frame(10.5) == 8.0
+def test_keys_of_older_files_load_in_their_phases():
+    def loaded(part, time):
+        data = {"keys": [{"part": part, "time": time, "center": [0, 0], "zoom": 1,
+                          "rotation": 0}]}  # fmt: skip
+        return CameraTrack.from_dict(data).keys[0].time
 
-    scene = SimpleNamespace(bounds=(0.0, 0.0, 100.0, 80.0), canvas=(100.0, 80.0))
-    settings = VideoSettings(frame_rate="30", hold_start=1.0, hold_end=2.0, motion_blur=8)
-    plan = plan_video(scene, 8.0, settings, "#000000")
-    assert plan.video_clock == CLOCK
-    video, tiles = plan.video_moments(300), plan.moments(300)  # 10 s: in the end hold
-    assert video.min() > 9.9 and np.all(tiles == 8.0)  # the camera's clock runs on
-    np.testing.assert_allclose(plan.moments(75), CLOCK.animation_time(plan.video_moments(75)))
+    assert loaded("body", 0.25) == KeyTime("build", 0.25)  # the animation was all build
+    assert loaded("lead", 0.5) == KeyTime("build", 0.0)  # the start hold: the build's start
+    assert loaded("tail", 1.0).seconds(clock(11.0)) == 11.0  # the end hold: the video's end
+    assert loaded("deconstruct", 0.5) == KeyTime("clear", 0.5)  # the clear phase's first name
 
 
-def test_the_camera_moves_over_the_finished_mosaic_in_the_end_hold(tmp_path, gpu):  # noqa: F811
+def test_the_camera_moves_over_the_finished_mosaic_in_the_build_hold(tmp_path, gpu):  # noqa: F811
     from skitter.ui.render.video_renderer import VideoRenderer
 
-    scene, _, plan, timeline, pages, base = render_setup(tmp_path, motion_blur=0, hold_end=1.0)
+    scene, _, plan, timeline, pages, base = render_setup(tmp_path, motion_blur=0,
+                                                         holds=(0.0, 1.0))  # fmt: skip
     clock = plan.video_clock
+    end = clock.phase_span("build")[1]
     center = home_shot(plan.view).center
-    push = CameraTrack((CameraKey(KeyTime("tail", 0.0), Shot(center)),
-                        CameraKey(KeyTime("tail", 1.0), Shot(center, 2.0))))  # fmt: skip
+    push = CameraTrack.of([CameraKey(KeyTime.at(end - 1.0, clock), Shot(center)),
+                           CameraKey(KeyTime.at(end, clock), Shot(center, 2.0))])  # fmt: skip
     path = push.path(clock, plan.view)
     renderer = VideoRenderer(plan, pages, base, (0, 0, 0), supersampling=1)
     try:

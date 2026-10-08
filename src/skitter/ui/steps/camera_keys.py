@@ -12,7 +12,7 @@
   the camera moves on, and Delete. [ and ] jump to the previous / next key.
 - The Keyframes group shows the selected key's exact values (time, where the
   frame's middle is across and down the mosaic, zoom, turn, stop, then) for
-  editing, and whether keys keep their share of the animation when its
+  editing, and whether keys keep their share of their phase when its
   length changes.
 
 Every change replaces the project's CameraTrack through the session
@@ -23,9 +23,11 @@ all see it.
 import math
 from dataclasses import replace
 
-from PySide6.QtCore import QObject, QSize, Qt
+from PySide6.QtCore import QEvent, QObject, QSize, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QApplication,
     QCheckBox,
     QGroupBox,
     QHBoxLayout,
@@ -36,6 +38,7 @@ from PySide6.QtWidgets import (
     QToolButton,
     QVBoxLayout,
 )
+from shiboken6 import isValid as shiboken_alive
 
 from skitter.core.animation.camera import Shot
 from skitter.core.animation.keyframes import MOTIONS, CameraKey, CameraTrack, KeyTime
@@ -44,6 +47,10 @@ from skitter.core.slicing.params import BoolParam, ChoiceParam, Configurable, Fl
 from skitter.ui import icons
 from skitter.ui.style import muted
 from skitter.ui.widgets.param_form import ParamForm
+
+# Keys of the camera shortcuts a number field has no use for: they pass it by.
+NUMBER_FIELD_PASSES = {Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight, Qt.Key.Key_K,
+                       Qt.Key.Key_C}  # fmt: skip
 
 
 class KeyFields(Configurable):
@@ -90,11 +97,13 @@ class CameraKeys(QObject):
         self.delete_action = self._action("Delete key", self.delete_key, "Delete")
         self.previous_action = self._action("Previous key", lambda: self.jump(-1), "[")
         self.next_action = self._action("Next key", lambda: self.jump(1), "]")
+        self.deselect_action = self._action("Deselect key", self.deselect, "Escape")
 
         strip = step.transport.timeline
         strip.key_clicked.connect(self.select_and_go)
         strip.key_moved.connect(self.retime)
         strip.key_menu.connect(self.show_menu)
+        strip.ground_clicked.connect(self.deselect)
         for action, icon in ((self.viewfinder_action, icons.viewfinder()),
                              (self.previous_action, icons.previous_key()),
                              (self.add_action, icons.add_key()),
@@ -117,12 +126,38 @@ class CameraKeys(QObject):
         return action
 
     def install_shortcuts(self, widget) -> None:
+        """Make the keys work anywhere in widget (the whole page). A text field with the
+        focus still gets the letters it types (Qt lets it override shortcuts); a number
+        field can't use these letters, so they pass it by (see eventFilter)."""
         for action in (self.viewfinder_action, self.add_action, self.delete_action,
-                       self.previous_action, self.next_action):  # fmt: skip
+                       self.previous_action, self.next_action,
+                       self.deselect_action):  # fmt: skip
             widget.addAction(action)
+        self._shortcut_scope = widget
+        QApplication.instance().focusChanged.connect(self._watch_focus)
+
+    def _watch_focus(self, old, new) -> None:
+        """Watch the number field on the page that has the focus (see eventFilter)."""
+        for box, on in ((old, False), (new, True)):
+            if (isinstance(box, QAbstractSpinBox) and shiboken_alive(box)
+                    and self._shortcut_scope.isAncestorOf(box)):  # fmt: skip
+                if on:
+                    box.installEventFilter(self)
+                else:
+                    box.removeEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:
+        """Let [ ] K C reach the shortcuts while a number field on the page has focus."""
+        held = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
+        if (event.type() == QEvent.Type.ShortcutOverride and event.key() in NUMBER_FIELD_PASSES
+                and not event.modifiers() & held):  # fmt: skip
+            event.ignore()  # not the field's: the shortcut runs
+            return True
+        return False
 
     def build_group(self) -> QGroupBox:
         self.count = QLabel()
+        self.count.setWordWrap(True)  # beside a button: long counts wrap, never widen the panel
         self.clear_button = QPushButton("Clear All…")
         self.clear_button.setToolTip("Remove every key: the camera shows the video's framing.")
         self.clear_button.clicked.connect(lambda: self.clear_keys())
@@ -133,8 +168,9 @@ class CameraKeys(QObject):
         self.hint.setWordWrap(True)
         self.stretch = QCheckBox("Keep keys in step with the animation")
         self.stretch.setToolTip(
-            "On: keys during the animation keep their share of it when its length changes. "
-            "Off: they keep their seconds from its start."
+            "On: each key keeps its share of its phase (Build, Show or Clear, holds "
+            "included) when the phase's length changes. Off: its seconds from the phase's "
+            "start."
         )
         self.stretch.toggled.connect(self._on_stretch)
         self.fields = KeyFields()
@@ -183,7 +219,7 @@ class CameraKeys(QObject):
         t = self.step.player.time
         shot = self.pending or self.step.shot()
         at = self._key_index_at(t)
-        old = self.track.keys[at] if at >= 0 else CameraKey(KeyTime("lead", 0.0), shot)
+        old = self.track.keys[at] if at >= 0 else CameraKey(KeyTime("build", 0.0), shot)
         key = CameraKey(KeyTime.at(t, clock, self.track.stretch), shot, old.stop, old.motion)
         self._set(self.track.with_key(key, clock), select=key)
 
@@ -203,6 +239,12 @@ class CameraKeys(QObject):
                 return False
         self._set(CameraTrack((), self.track.stretch))
         return True
+
+    def deselect(self) -> None:
+        """No key selected: the key fields hide, so nothing gets edited by accident."""
+        if self.selected >= 0:
+            self.selected = -1
+            self.refresh()
 
     def jump(self, direction: int) -> None:
         clock = self.clock()
@@ -352,6 +394,9 @@ class CameraKeys(QObject):
                     "turn, then Add Key (K).")  # fmt: skip
         elif not keys:
             hint = "Look through camera (C) to frame a shot, then Add Key (K)."
+        elif self.selected >= 0:
+            hint = ("Editing the selected key. Esc, or a click on empty timeline, deselects "
+                    "it; [ and ] go to the previous and next key.")  # fmt: skip
         else:
             hint = "Click a key on the timeline to select it; drag it to retime it."
         self.hint.setText(hint)

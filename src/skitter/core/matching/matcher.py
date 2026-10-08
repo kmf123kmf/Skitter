@@ -89,18 +89,32 @@ TINT_REBUILD = 0.15  # rebuild an index when the tint moves this far from its re
 class Matcher:
     def __init__(self, library: TileLibrary):
         self.library = library
-        self._candidates: dict[tuple, CandidateSet] = {}
+        # Candidates of every tile described so far, per (version, aspect, crops, mirror):
+        # leaving folders out and back in describes nothing again.
+        self._pools: dict[tuple, CandidateSet] = {}
+        self._candidates: dict[tuple, CandidateSet] = {}  # the tiles in use, per state
         self._indexes: dict[tuple, SearchIndex] = {}
 
     def candidates(
         self, aspect: float, settings: MatchSettings, progress=lambda message, fraction: None
     ) -> tuple[tuple, CandidateSet]:
-        key = (self.library.version, round(float(aspect), 4), settings.crops, settings.mirror)
+        library = self.library
+        shape = (round(float(aspect), 4), settings.crops, settings.mirror)
+        key = (library.state, *shape)
         if key not in self._candidates:
-            cands = build_candidates(self.library, aspect, settings.crops, settings.mirror,
-                                     progress)  # fmt: skip
-            self._candidates = {k: v for k, v in self._candidates.items() if k[0] == key[0]}
-            self._candidates[key] = cands
+            ids = library.ids
+            pool_key = (library.version, *shape)
+            pool = self._pools.get(pool_key)
+            new = ids if pool is None else np.setdiff1d(ids, pool.tile)
+            if pool is None or len(new):
+                more = build_candidates(library, aspect, settings.crops, settings.mirror,
+                                        progress, ids=new)  # fmt: skip
+                pool = more if pool is None else pool.merged(more)
+            self._pools = {k: v for k, v in self._pools.items() if k[0] == library.version}
+            self._pools[pool_key] = pool
+            self._candidates = {k: v for k, v in self._candidates.items()
+                                if k[0][0] == library.version}  # fmt: skip
+            self._candidates[key] = pool.only(ids)
         return key, self._candidates[key]
 
     def index(
@@ -114,7 +128,7 @@ class Matcher:
         index = self._indexes.get(full)
         if index is None or abs(index.tint_ref - settings.tint_value) > TINT_REBUILD:
             index = SearchIndex(cands, weights, settings.tint_value, progress=progress)
-            self._indexes = {k: v for k, v in self._indexes.items() if k[0][0] == key[0]}
+            self._indexes = {k: v for k, v in self._indexes.items() if k[0][0][0] == key[0][0]}
             self._indexes[full] = index
         return index
 

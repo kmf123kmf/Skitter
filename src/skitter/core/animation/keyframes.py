@@ -6,13 +6,20 @@ A `CameraKey` is a `Shot` (camera.py: the table point at the frame's middle,
 a zoom relative to the video's framing, a turn) at a `KeyTime`, whether the
 camera stops there, and how it moves on to the next key (`motion`).
 
-Keys live on the video's clock (video.py: start hold, animation, end hold),
-so the camera can move before the build starts and over the finished mosaic.
-A `KeyTime` anchors a key to one part of the video, so it stays put relative
-to that part when lengths change: "lead" (seconds from the start, during the
-start hold), "body" (a share of the animation, or seconds from its start
-when the track is pinned, see `CameraTrack.stretch`) or "tail" (seconds
-after the animation ends). Times past a part's end are clamped to it.
+Keys live on the video's clock (phases.py `VideoClock`: the phases, Build,
+Show and Clear, each with its holds), so the camera can move over the empty
+table while the build holds before it and over the finished mosaic while it
+holds after. A `KeyTime` anchors a key to its phase, so it stays put
+relative to the phase when lengths change: a share of the phase (holds
+included), or seconds from its start when the track is pinned (see
+`CameraTrack.stretch`). Times past a phase's end are clamped to it; a key in
+a phase that is left out sits where the phase would be.
+
+Older files: keys anchored to "body" (the whole animation, then all build)
+load as build keys; keys in the video's start hold ("lead") at the build's
+start and in its end hold ("tail") at the video's end (those holds are now
+the build's own: their exact seconds into the hold aren't kept); "deconstruct",
+the clear phase's first name, loads as clear.
 
 Motion
 ------
@@ -39,9 +46,11 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from skitter.core.animation.camera import CameraPath, Shot, StillPath, home_shot
-from skitter.core.animation.video import VideoClock
+from skitter.core.animation.phases import PHASES, VideoClock
 
-PARTS = ("lead", "body", "tail")
+PARTS = PHASES  # what keys anchor to, in time order
+OLD_PARTS = {"body": ("build", None), "lead": ("build", 0.0), "tail": ("clear", 1.0),
+             "deconstruct": ("clear", None)}  # fmt: skip
 MOTIONS = (("smooth", "Smooth"), ("linear", "Steady"), ("hold", "Hold, then cut"))
 PATH_SAMPLES = 256  # moments sampled for the path's closest zoom (texture detail)
 
@@ -50,30 +59,27 @@ PATH_SAMPLES = 256  # moments sampled for the path's closest zoom (texture detai
 class KeyTime:
     """When a key is, anchored to a part of the video (see the module docstring)."""
 
-    part: str  # "lead", "body" or "tail"
-    value: float  # lead / tail: seconds; body: share of the animation, or seconds if pinned
+    part: str  # a phase (PHASES)
+    value: float  # share of the phase, or seconds from its start if pinned
 
     def seconds(self, clock: VideoClock, stretch: bool = True) -> float:
         """Video time of the key."""
-        if self.part == "lead":
-            return min(max(self.value, 0.0), clock.hold_start)
-        if self.part == "tail":
-            return clock.animation_end + min(max(self.value, 0.0), clock.hold_end)
-        body = self.value * clock.duration if stretch else self.value
-        return clock.hold_start + min(max(body, 0.0), clock.duration)
+        start, end = clock.phase_span(self.part)
+        into = self.value * (end - start) if stretch else self.value
+        return start + min(max(into, 0.0), end - start)
 
     @classmethod
     def at(cls, t: float, clock: VideoClock, stretch: bool = True) -> "KeyTime":
-        """The anchored time of video time t (the animation itself takes its ends)."""
-        t = min(max(float(t), 0.0), clock.total)
-        if t < clock.hold_start - 1e-9:
-            return cls("lead", t)
-        if t > clock.animation_end + 1e-9:
-            return cls("tail", t - clock.animation_end)
-        body = t - clock.hold_start
+        """The anchored time of video time t: in the phase it falls in (at a boundary
+        between two, the earlier one)."""
+        t = min(max(float(t), 0.0), clock.duration)
+        spans = [(phase, *clock.phase_span(phase)) for phase in PHASES]
+        played = [s for s in spans if s[2] > s[1]] or spans[:1]
+        phase, start, end = next((s for s in played if t <= s[2] + 1e-9), played[-1])
+        into = min(max(t - start, 0.0), end - start)
         if stretch:
-            return cls("body", body / clock.duration if clock.duration > 0 else 0.0)
-        return cls("body", body)
+            return cls(phase, into / (end - start) if end > start else 0.0)
+        return cls(phase, into)
 
 
 @dataclass(frozen=True)
@@ -86,8 +92,8 @@ class CameraKey:
 
 @dataclass(frozen=True)
 class CameraTrack:
-    """The camera's keys. stretch: keys during the animation keep their share of it
-    when its length changes (else their seconds from its start)."""
+    """The camera's keys. stretch: keys keep their share of their phase when its length
+    changes (else their seconds from its start)."""
 
     keys: tuple[CameraKey, ...] = ()  # in time order (see _in_order)
     stretch: bool = True
@@ -152,11 +158,14 @@ class CameraTrack:
         motions = {m for m, _ in MOTIONS}
         for item in data.get("keys", []):
             try:
-                part = item["part"] if item["part"] in PARTS else "body"
+                part, value = item["part"], float(item["time"])
+                if part not in PARTS:  # older anchors (module docstring)
+                    part, at = OLD_PARTS.get(part, ("build", None))
+                    value = value if at is None else at
                 shot = Shot((float(item["center"][0]), float(item["center"][1])),
                             max(float(item["zoom"]), 1e-3), float(item["rotation"]))  # fmt: skip
                 motion = item.get("motion", "smooth")
-                keys.append(CameraKey(KeyTime(part, float(item["time"])), shot,
+                keys.append(CameraKey(KeyTime(part, value), shot,
                                       bool(item.get("stop", True)),
                                       motion if motion in motions else "smooth"))  # fmt: skip
             except (KeyError, TypeError, ValueError, IndexError) as exc:
@@ -167,8 +176,8 @@ class CameraTrack:
 
 
 def _in_order(keys) -> tuple[CameraKey, ...]:
-    """Keys in time order. Anchors alone decide it (start hold, animation, end hold, each
-    by value), so it holds for any lengths: tracks keep their keys in this order."""
+    """Keys in time order. Anchors alone decide it (the phases, each by value), so it
+    holds for any lengths: tracks keep their keys in this order."""
     return tuple(sorted(keys, key=lambda k: (PARTS.index(k.time.part), k.time.value)))
 
 

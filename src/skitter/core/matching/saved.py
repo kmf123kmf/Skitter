@@ -115,7 +115,7 @@ def restore(
     library; missing counts regions whose photo isn't there (they get no tile)."""
     if len(saved.photo) != len(regions):
         raise ValueError(f"the mosaic has {len(saved.photo)} regions, the plan {len(regions)}")
-    ids = library.ids
+    ids = library.readable_ids  # a photo in a folder left out still shows
     slot_of = dict(zip(library.paths(ids), ids.tolist(), strict=True))
     photo_slot = np.array([slot_of.get(p, -1) for p in saved.paths] + [-1], np.int64)
     tile = photo_slot[np.where(saved.photo >= 0, saved.photo, len(saved.paths))]

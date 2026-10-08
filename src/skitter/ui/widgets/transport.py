@@ -1,6 +1,6 @@
 """Playback controls for a TimelinePlayer, laid out under its canvas.
 
-A full-width timeline strip (timeline_strip.py: ruler, holds, playhead and
+A full-width timeline strip (timeline_strip.py: ruler, sections, playhead and
 any keys the page shows on it) over one row: the time and the page's own
 tools (`left_tools`) on the left; to start, previous frame, play / pause,
 next frame and to end in the middle; loop, speed, a status line and the
@@ -175,9 +175,10 @@ class TransportBar(QWidget):
         self.player.pause()
         self.player.seek(t)
 
-    def set_holds(self, start: float, end: float) -> None:
-        """Where the animation starts and ends on the player's clock (shaded either side)."""
-        self.timeline.set_timing(self.player.duration, (start, end))
+    def set_sections(self, spans) -> None:
+        """Where the animation's phases lie, with their holds (phases.PhaseSpan): the strip
+        shows them under its track."""
+        self.timeline.set_timing(self.player.duration, spans)
 
     def _on_loop(self, checked: bool) -> None:
         self.player.loop = checked
@@ -198,7 +199,7 @@ class TransportBar(QWidget):
         has = self.player.timeline is not None
         for widget in (self.timeline, self.speed):
             widget.setEnabled(has)
-        self.timeline.set_timing(self.player.duration, self.timeline.holds)
+        self.timeline.set_timing(self.player.duration)
         for action in (self.start_action, self.back_action, self.play_action,
                        self.forward_action, self.end_action, self.second_back,
                        self.second_forward, self.loop_action):  # fmt: skip
@@ -212,7 +213,7 @@ class TransportBar(QWidget):
         duration = self.player.duration
         self.time_label.setText(f"{t:6.2f} s / {duration:.2f} s" if duration else "—")
         if abs(self.timeline.duration - duration) > 1e-9:
-            self.timeline.set_timing(duration, self.timeline.holds)
+            self.timeline.set_timing(duration)
         self.timeline.set_time(t)
 
     def _show_playing(self, playing: bool) -> None:

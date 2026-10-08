@@ -1,4 +1,8 @@
-"""A timeline strip: a time ruler, the video's holds, the playhead and keys.
+"""A timeline strip: a time ruler, the video's sections, the playhead and keys.
+
+Under the track a thin band shows the animation's phases (Build, Show,
+Clear, each its color; see core/animation/phases.py), their holds before and
+after the motion paler; hovering the track names the phase and its holds.
 
 It replaces a plain slider under a player. It has two lanes: the ruler and
 track on top, where clicking or dragging scrubs (`scrubbed`) even right above
@@ -6,15 +10,17 @@ a key, and the keys' row below. Keys show there as marks (a diamond where the
 camera stops, a circle where it passes through); a key can be clicked
 (`key_clicked`), dragged to a new time (`key_moved`, on release) or
 right-clicked (`key_menu`), and the cursor turns to a hand over one. Empty
-ground in the keys' row scrubs too. Times map to x the same way for
-everything, so keys and the playhead always line up.
+ground in the keys' row scrubs too; a click on empty ground anywhere is also
+reported (`ground_clicked`, to deselect). Clicking takes the keyboard focus, so
+the page's keys work at once. Times map to x the same way for everything, so
+keys and the playhead always line up.
 """
 
 import math
 
-from PySide6.QtCore import QPointF, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QMouseEvent, QPainter, QPainterPath, QPen, QPolygonF
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
 PAD = 10  # px at each end, so marks at the ends show whole
 HIT = 7  # px around a key that pick it
@@ -24,6 +30,11 @@ KEY_LANE = 11  # px from the bottom: the middle of the keys' row
 HEIGHT = 46
 TICKS = (0.1, 0.25, 0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300)  # ruler steps, seconds
 MIN_LABEL_GAP = 64  # px between labelled ticks
+BAND_Y, BAND_H = 24, 3  # the sections band, just under the track
+PHASE_COLORS = {"build": QColor(74, 144, 217), "show": QColor(224, 160, 48),
+                "clear": QColor(208, 80, 106)}  # fmt: skip
+PHASE_LABELS = {"build": "Build", "show": "Show", "clear": "Clear"}
+HOLD_ALPHA = 0.35  # a phase's holds: its color, paler
 
 
 class TimelineStrip(QWidget):
@@ -31,12 +42,13 @@ class TimelineStrip(QWidget):
     key_clicked = Signal(int)
     key_moved = Signal(int, float)  # a key dragged to a new time (on release)
     key_menu = Signal(int, object)  # right click on a key: (index, global QPoint)
+    ground_clicked = Signal()  # a left click away from any key
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.duration = 0.0
         self.time = 0.0
-        self.holds = (0.0, 0.0)  # video times where the animation starts and ends
+        self.phases = []  # phases.PhaseSpan of each phase (holds included)
         self.keys: list[tuple[float, bool, str]] = []  # (time, stop, motion), in time order
         self.selected = -1
         self._dragging_key = -1
@@ -46,14 +58,32 @@ class TimelineStrip(QWidget):
         self.setMinimumHeight(HEIGHT)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.setMouseTracking(True)
-        self.setToolTip("Click or drag to move through the video; drag a key (bottom row) "
-                        "to retime it, right-click it for its options.")  # fmt: skip
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
+        self.help = ("Click or drag to move through the video; drag a key (bottom row) to "
+                     "retime it, right-click it for its options.")  # fmt: skip
+        self.setToolTip(self.help)
 
     # State
 
-    def set_timing(self, duration: float, holds=(0.0, 0.0)) -> None:
-        self.duration, self.holds = max(float(duration), 0.0), holds
+    def set_timing(self, duration: float, phases=None) -> None:
+        """The video's length, and (if given) where its phases lie (phases.PhaseSpan)."""
+        self.duration = max(float(duration), 0.0)
+        if phases is not None:
+            self.phases = list(phases)
         self.update()
+
+    def section_at(self, t: float) -> str:
+        """The phase time t is in, as the tooltip names it (with its holds)."""
+        for span in self.phases:
+            if span.end > span.start and t <= span.end + 1e-9:
+                text = f"{PHASE_LABELS.get(span.phase, span.phase)}: {span.start:g}–{span.end:g} s"
+                holds = [
+                    f"{s:g} s {when}"
+                    for s, when in ((span.before, "before"), (span.after, "after"))
+                    if s > 0
+                ]
+                return text + (f" (holds {' and '.join(holds)})" if holds else "")
+        return ""
 
     def set_time(self, t: float) -> None:
         self.time = float(t)
@@ -91,6 +121,16 @@ class TimelineStrip(QWidget):
 
     # Input
 
+    def event(self, event) -> bool:
+        """Tooltips: over the track, the section there; elsewhere, how to use the strip."""
+        if event.type() == QEvent.Type.ToolTip:
+            pos = event.pos()
+            near_track = pos.y() < BAND_Y + BAND_H + 2 and self.duration > 0
+            section = self.section_at(self.time_at(pos.x())) if near_track else ""
+            QToolTip.showText(event.globalPos(), section or self.help, self)
+            return True
+        return super().event(event)
+
     def mousePressEvent(self, event: QMouseEvent) -> None:
         pos = event.position()
         i = self.key_at(pos.x(), pos.y())
@@ -105,6 +145,7 @@ class TimelineStrip(QWidget):
             self.setCursor(Qt.CursorShape.ClosedHandCursor)
             self.key_clicked.emit(i)
         else:
+            self.ground_clicked.emit()
             self._scrubbing = True
             self.scrubbed.emit(self.time_at(pos.x()))
 
@@ -165,9 +206,17 @@ class TimelineStrip(QWidget):
             shade = QColor(text)
             shade.setAlphaF(0.12)
             p.setBrush(shade)
-            for a, b in ((0.0, self.holds[0]), (self.holds[1], self.duration)):
-                if b > a:
-                    p.drawRect(QRectF(self.x_of(a), mid - 3, self.x_of(b) - self.x_of(a), 6))
+            for span in self.phases:
+                color = PHASE_COLORS.get(span.phase, accent)
+                pale = QColor(color)
+                pale.setAlphaF(HOLD_ALPHA)
+                motion = span.motion
+                for (a, b), fill in (((span.start, motion[0]), pale), (motion, color),
+                                     ((motion[1], span.end), pale)):  # fmt: skip
+                    if b > a:
+                        p.setBrush(fill)
+                        p.drawRect(QRectF(self.x_of(a), BAND_Y, self.x_of(b) - self.x_of(a),
+                                          BAND_H))  # fmt: skip
             p.setBrush(accent)
             played = QRectF(x0, mid - 3, self.x_of(self.time) - x0, 6)
             p.drawRoundedRect(played, 3, 3)

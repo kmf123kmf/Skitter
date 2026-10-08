@@ -45,8 +45,8 @@ def test_the_video_renders_each_frame_through_its_shot(tmp_path, gpu):  # noqa: 
     # Push in on the top-left tile (a quarter of the 2 x 2 mosaic) to 2x: it fills the frame.
     x0, y0, x1, y1 = content_rect(scene_)
     corner = ((3 * x0 + x1) / 4, (3 * y0 + y1) / 4)
-    keys = [CameraKey(KeyTime("body", 0.0), home_shot(plan.view)),
-            CameraKey(KeyTime("body", 1.0), Shot(corner, 2.0))]  # fmt: skip
+    keys = [CameraKey(KeyTime("build", 0.0), home_shot(plan.view)),
+            CameraKey(KeyTime("build", 1.0), Shot(corner, 2.0))]  # fmt: skip
     path = CameraTrack.of(keys).path(plan.video_clock, plan.view)
     # Turned a half turn, the finished mosaic shows upside down.
     upside_down = StillPath(Shot(home_shot(plan.view).center, 1.0, math.pi))

@@ -1,11 +1,13 @@
 """Base class for workflow step pages."""
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QFrame, QScrollArea, QStyle, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QFrame, QScrollArea, QSplitter, QStyle, QVBoxLayout, QWidget
 
+from skitter.ui import preferences
 from skitter.ui.session import Session
 
 SIDE_PANEL_WIDTH = 320  # content width; the panel adds room for its scrollbar
+SIDE_PANEL_MAX = 900  # the widest a resizable panel gets
 
 
 class StepPage(QWidget):
@@ -54,8 +56,9 @@ class StepPage(QWidget):
         """Called when the window closes: stop any background work of the step's own."""
 
 
-def side_panel(*widgets: QWidget, stretch_last: bool = False) -> QWidget:
-    """Fixed-width settings panel shown to the right of a step's main view.
+def side_panel(*widgets: QWidget, stretch_last: bool = False, resizable: bool = False) -> QWidget:
+    """Settings panel shown to the right of a step's main view: fixed width, or (resizable)
+    at least that wide, widened by dragging its edge (see view_and_panel).
 
     Scrolls vertically when its contents are taller than the window.
     """
@@ -75,5 +78,34 @@ def side_panel(*widgets: QWidget, stretch_last: bool = False) -> QWidget:
     # Leave room for the vertical scrollbar so content never gets clipped when it appears.
     style = scroll.style()
     scrollbar = style.pixelMetric(QStyle.PixelMetric.PM_ScrollBarExtent)
-    scroll.setFixedWidth(SIDE_PANEL_WIDTH + scrollbar + 2 * scroll.frameWidth())
+    width = SIDE_PANEL_WIDTH + scrollbar + 2 * scroll.frameWidth()
+    if resizable:
+        scroll.setMinimumWidth(width)
+        scroll.setMaximumWidth(SIDE_PANEL_MAX)
+    else:
+        scroll.setFixedWidth(width)
     return scroll
+
+
+def view_and_panel(view: QWidget, panel: QWidget, key: str) -> QSplitter:
+    """A step's main view with its (resizable) side panel, split by a handle the user
+    drags to widen the panel; the width is remembered under key. The view takes what
+    the window gains or loses."""
+    splitter = QSplitter(Qt.Orientation.Horizontal)
+    splitter.addWidget(view)
+    splitter.addWidget(panel)
+    splitter.setStretchFactor(0, 1)
+    splitter.setStretchFactor(1, 0)
+    splitter.setCollapsible(0, False)
+    splitter.setCollapsible(1, False)
+    name = f"{key}/panel_width"
+    try:
+        width = int(preferences.settings().value(name, 0))
+    except (TypeError, ValueError):
+        width = 0
+    if width > 0:
+        splitter.setSizes([100_000, width])  # the view absorbs the difference
+    splitter.splitterMoved.connect(
+        lambda *_: preferences.settings().setValue(name, splitter.sizes()[1])
+    )
+    return splitter
