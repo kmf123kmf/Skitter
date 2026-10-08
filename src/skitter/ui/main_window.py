@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from skitter.core.project_file import EXTENSION, ProjectFileError, load_project
+from skitter.core.project_file import EXTENSION, ProjectFileError
 from skitter.ui import preferences
 from skitter.ui.export_dialog import ExportDialog
 from skitter.ui.session import Session
@@ -177,8 +177,11 @@ class MainWindow(QMainWindow):
             return False
         try:
             with self._busy(f"Opening {Path(path).name}…"):
-                loaded = self._in_background(lambda: load_project(path))
-                self.session.open_project(path, loaded)
+                session = self.session
+                if session.library is None:
+                    session.open_library()  # here: it tells the tabs
+                opened = self._in_background(lambda: session.read_project(path))
+                session.open_project(path, opened)
                 self._until_drawn()
         except (ProjectFileError, OSError) as exc:
             QMessageBox.warning(self, "Open Project", str(exc))

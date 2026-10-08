@@ -56,6 +56,19 @@ class _Sliced:
     error: str | None = None
 
 
+@dataclass
+class _Opened:
+    """A project file read, with what showing it needs worked out (Session.read_project)."""
+
+    path: Path
+    loaded: ProjectFile
+    context: SliceContext | None = None  # committed projects only
+    summary: SliceSummary | None = None  # of the saved regions
+    restored: tuple[MatchResult, int] | None = None  # (mosaic, missing tiles)
+    scene: MosaicScene | None = None  # of the restored mosaic
+    problems: list[str] = field(default_factory=list)  # met restoring the mosaic
+
+
 class Session(QObject):
     """Holds the current Project and announces changes to it.
 
@@ -171,7 +184,8 @@ class Session(QObject):
 
     def new_project(self) -> None:
         """Start over with an empty project (the tile library stays open)."""
-        self.load_problems = self._replace_project(Project(), committed=False, mosaic=None)
+        self._replace_project(Project(), committed=False)
+        self.load_problems = []
         self.opened_view = {}
         self.project_path = None
         self._saved_state = self._state()
@@ -188,21 +202,47 @@ class Session(QObject):
         self.project_path = Path(path)
         self._saved_state = self._state()
 
-    def open_project(self, path: str | Path, loaded: ProjectFile | None = None) -> None:
+    def read_project(self, path: str | Path) -> "_Opened":
+        """Read path and do the work of showing it that needs no UI: its slicing
+        context, region summary and restored mosaic (ProjectFileError if it isn't a
+        project). Safe off the UI thread; the tile library opens first (on this one,
+        if it isn't open yet). Hand the result to open_project."""
+        library = self.library if self.library is not None else self.open_library()
+        loaded = load_project(path)
+        project, opened = loaded.project, _Opened(Path(path), loaded)
+        if not loaded.committed or project.source_final is None:
+            return opened
+        opened.context = SliceContext(project.source_final, project.layout)
+        regions = project.regions
+        if regions:
+            opened.summary = summarize(regions, opened.context)
+        if regions is not None and loaded.mosaic is not None:
+            try:
+                opened.restored = restore(loaded.mosaic, library, regions, opened.context)
+            except ValueError as exc:
+                opened.problems.append(f"The matched mosaic was left out ({exc}); match again")
+            else:
+                opened.scene = MosaicScene.from_result(opened.restored[0], opened.context)
+        return opened
+
+    def open_project(self, path: str | Path, opened: "_Opened | None" = None) -> None:
         """Replace the project with the one in path (ProjectFileError if it isn't
         one). load_problems and missing_tiles report what couldn't be restored.
-        loaded: path already read (load_project), e.g. off the UI thread."""
-        if loaded is None:
-            loaded = load_project(path)
-        problems = self._replace_project(loaded.project, loaded.committed, loaded.mosaic)
-        self.project_path = Path(path)
-        self.load_problems = loaded.problems + problems
+        opened: path already read by read_project (e.g. off the UI thread)."""
+        if opened is None or self.library is None:
+            opened = self.read_project(path)
+        loaded = opened.loaded
+        self._replace_project(loaded.project, loaded.committed, opened)
+        self.project_path = opened.path
+        self.load_problems = loaded.problems + opened.problems
         self.opened_view = loaded.view
         self._saved_state = self._state()
 
-    def _replace_project(self, project: Project, committed: bool, mosaic) -> list[str]:
-        """Make project the session's, replaying what it holds; returns problems met
-        restoring its mosaic."""
+    def _replace_project(
+        self, project: Project, committed: bool, opened: "_Opened | None" = None
+    ) -> None:
+        """Make project the session's, replaying what it holds (opened: what
+        read_project worked out for it)."""
         if self.busy:
             raise RuntimeError(f"a {self.busy} job is running")
         if self._slicing_job is not None:
@@ -222,35 +262,25 @@ class Session(QObject):
         self.dropped_picks = self.missing_tiles = 0
         self.project_replaced.emit()
         self.source_changed.emit()
-        problems = []
-        if committed and final is not None:
+        if committed and final is not None and opened is not None:
             project.source_final = final
             self._committed_key = self._source_key()
-            self._rebuild_slice_context()
+            self._slice_context, self._slicing_cache = opened.context, []
             self.layout_changed.emit()
             self.source_committed.emit()
             if regions is None:
                 self._evaluate_slicing(fresh=True)
             else:
                 project.regions = regions
-                self.slicing_summary = summarize(regions, self._slice_context) if regions else None
+                self.slicing_summary = opened.summary
                 self.slicing_changed.emit()
-                if mosaic is not None:
-                    problems += self._restore_mosaic(mosaic)
+                if opened.restored is not None:
+                    result, self.missing_tiles = opened.restored
+                    mosaic = opened.loaded.mosaic
+                    key = (regions, opened.context, mosaic.library_version, mosaic.settings.key())
+                    self._set_matches(result, key, opened.scene)
         self.matching_changed.emit()
         self.animation_edited()
-        return problems
-
-    def _restore_mosaic(self, mosaic) -> list[str]:
-        """Show a saved mosaic over the current regions; returns what went wrong."""
-        library = self.library if self.library is not None else self.open_library()
-        regions, ctx = self.project.regions, self._slice_context
-        try:
-            result, self.missing_tiles = restore(mosaic, library, regions, ctx)
-        except ValueError as exc:
-            return [f"The matched mosaic was left out ({exc}); match again"]
-        self._set_matches(result, (regions, ctx, mosaic.library_version, mosaic.settings.key()))
-        return []
 
     # Committing the source
 
@@ -692,8 +722,11 @@ class Session(QObject):
 
     # Export
 
-    def _set_matches(self, result: MatchResult | None, key: tuple | None = None) -> None:
-        """Replace project.matches, with its scene and textures (callers emit matching_changed)."""
+    def _set_matches(
+        self, result: MatchResult | None, key: tuple | None = None, scene: MosaicScene | None = None
+    ) -> None:
+        """Replace project.matches, with its scene (made here unless given) and textures
+        (callers emit matching_changed)."""
         if self.textures is not None:
             self.textures.cancel()
         self.project.matches, self._match_key = result, key
@@ -703,7 +736,9 @@ class Session(QObject):
             self._match_tiles = self.scene = self.textures = None
             return
         self._match_tiles = self._tile_snapshot(result.tile)
-        self.scene = MosaicScene.from_result(result, self._slice_context)
+        if scene is None:
+            scene = MosaicScene.from_result(result, self._slice_context)
+        self.scene = scene
         self.textures = TileTextures(self.scene, self.library, self)
 
     def _tile_snapshot(self, tiles) -> tuple:
