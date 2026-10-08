@@ -685,7 +685,10 @@ def test_animate_tab_plays_the_scene(sliced, photos, qapp):
     assert player.playing and transport.play_action.text() == "Pause"
     assert player.time == 0 and np.all(player.layer.instances["alpha"] == 0)
 
-    # The preview plays the whole video: the animation (8 s) and its end hold (2 s).
+    # The preview plays the whole video: the animation, with any holds (none by default).
+    assert player.duration == pytest.approx(8.0)
+    session.project.phase_holds["build"].update(hold_after=2.0)
+    session.animation_edited()
     assert player.duration == pytest.approx(8.0 + 2.0)
 
     # Scrubbing pauses; settings changes replan and keep the moment.
@@ -787,7 +790,7 @@ def test_export_animation_from_the_animate_tab(sliced, photos, tmp_path, qapp):
         stream = container.streams.video[0]
         frames = list(container.decode(stream))
         assert (stream.width, stream.height) == (160, 120) and stream.average_rate == 10
-        assert len(frames) == 1 * 10 + 2 * 10 + 1  # animation + 2 s hold at the end
+        assert len(frames) == 1 * 10 + 1  # the animation (no holds by default)
 
     # Cancelling leaves nothing behind (a long export, so it can't finish first).
     session.project.video_settings.update(resolution="1080p", motion_blur=16)
@@ -1403,9 +1406,12 @@ def test_animate_tab_chooses_a_choreography_and_holds_per_phase(fade, sliced, ph
     built = player.duration
     assert animate.phase == "build" and box.currentData() == "assemble"
     assert [s.phase for s in strip.phases if s.length > 0] == ["build"]
-    # The build's holds: none before, the finished mosaic 2 s after (the default).
-    assert holds._target is project.phase_holds["build"] and strip.phases[0].after == 2.0
+    # The build's holds: none by default; the finished mosaic held after, once set.
+    assert holds._target is project.phase_holds["build"] and strip.phases[0].after == 0.0
+    holds.editor("hold_after").widget.setValue(2.0)
+    assert player.duration == pytest.approx(built + 2.0) and strip.phases[0].after == 2.0
     assert "2 s after" in strip.section_at(1.0)
+    built += 2.0
     holds.editor("hold_before").widget.setValue(1.0)
     assert player.duration == pytest.approx(built + 1.0) and session.modified
     assert strip.phases[0].motion[0] == 1.0  # the build moves after its hold
@@ -1489,6 +1495,68 @@ def test_keys_deselect_and_brackets_work_from_the_side_panel(sliced, photos, qap
     assert keys.selected == 1 and animate.player.time == pytest.approx(times[1])
     QTest.keyClick(field, Qt.Key.Key_BracketLeft)
     assert keys.selected == 0
+
+
+def test_camera_undo_keeps_200_steps_and_merges_gestures(window, monkeypatch):
+    from skitter.core.animation.camera import Shot
+    from skitter.core.animation.keyframes import CameraKey, CameraTrack, KeyTime
+    from skitter.ui import session as session_module
+
+    session, now = window.session, [100.0]
+    monkeypatch.setattr(session_module.time, "monotonic", lambda: now[0])
+
+    def keyed(zoom):
+        return CameraTrack.of([CameraKey(KeyTime("build", 0.5), Shot((0, 0), zoom))])
+
+    for i in range(205):
+        session.set_camera_track(keyed(1.0 + i))
+    assert len(session._camera_undo) == session_module.CAMERA_UNDO == 200
+    session.set_camera_track(keyed(1.0 + 204))  # no change: no step
+    assert len(session._camera_undo) == 200
+
+    # A gesture (same merge key, edits close together) is one step; a pause ends it.
+    session._camera_undo.clear()
+    for zoom in (2.0, 2.5, 3.0):
+        now[0] += 0.1
+        session.set_camera_track(keyed(zoom), merge=("live", 0))
+    assert len(session._camera_undo) == 1
+    now[0] += session_module.CAMERA_MERGE + 0.1
+    session.set_camera_track(keyed(4.0), merge=("live", 0))
+    assert len(session._camera_undo) == 2
+    session.undo_camera()
+    assert session.project.camera_track == keyed(3.0)
+    session.undo_camera()
+    assert session.project.camera_track == keyed(205.0)  # as before the first gesture
+
+
+def test_ctrl_z_in_a_key_field_undoes_the_key_edit(sliced, photos, qapp):
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+
+    from skitter.ui.steps.animate import AnimateStep
+
+    window, session = sliced, sliced.session
+    build_library(window, photos)
+    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.start_matching()
+    session.wait_for_job()
+    window.show()
+    window.activateWindow()
+    animate = window.step(AnimateStep)
+    window.tabs.setCurrentWidget(animate)
+    keys = animate.keys
+    animate.player.seek(2.0)
+    keys.add_key()
+    field = keys.form.editor("zoom").widget
+    field.setValue(3.0)
+    assert session.project.camera_track.keys[0].shot.zoom == pytest.approx(3.0)
+    field.setFocus()
+    qapp.processEvents()
+    QTest.keyClick(field, Qt.Key.Key_Z, Qt.KeyboardModifier.ControlModifier)
+    assert session.project.camera_track.keys[0].shot.zoom == pytest.approx(1.0)
+    assert keys.fields.zoom == pytest.approx(1.0)  # the field shows the undone value
+    QTest.keyClick(field, Qt.Key.Key_Y, Qt.KeyboardModifier.ControlModifier)
+    assert session.project.camera_track.keys[0].shot.zoom == pytest.approx(3.0)
 
 
 def test_transport_bar_steps_jumps_loops_and_changes_speed(sliced, photos, qapp):
@@ -1621,8 +1689,7 @@ def test_camera_keys_through_the_viewfinder(sliced, photos, qapp):
     player.seek(2.0)
     keys.add_key()
     track = session.project.camera_track
-    # 2 s into the build, of 10 s with its hold after (holds count: they're the phase's).
-    assert len(track.keys) == 1 and track.keys[0].time == KeyTime("build", 2.0 / 10.0)
+    assert len(track.keys) == 1 and track.keys[0].time == KeyTime("build", 2.0 / 8.0)
     assert track.keys[0].shot.zoom == pytest.approx(1.0)  # the camera's shot (static)
     assert len(strip.keys) == 1 and keys.selected == 0 and keys.form.isVisible()
     assert keys.fields.time == pytest.approx(2.0) and session.modified
@@ -1656,9 +1723,25 @@ def test_camera_keys_through_the_viewfinder(sliced, photos, qapp):
     assert len(track.keys) == 2 and track.keys[1].shot == framing and keys.pending is None
     assert keys.selected == 1
 
-    # Moving in time drops a framing that wasn't keyed.
+    # On the selected key's moment, moving the view edits that key live: a drag (many
+    # moves) is one undo step.
+    assert keys.on_selected_key() and "Editing key 2" in keys.hint.text()
+    steps = len(session._camera_undo)
+    for _ in range(3):  # a drag: three moves of 1 unit
+        canvas.set_view(camera.center + (1.0, 0.0), camera.zoom)
+    live = session.project.camera_track.keys[1].shot
+    assert keys.pending is None and live.center[0] == pytest.approx(framing.center[0] + 3.0)
+    assert len(session._camera_undo) == steps + 1 and keys.selected == 1
+    keys.undo()  # the whole drag
+    assert session.project.camera_track.keys[1].shot == framing
+    keys.redo()
+    assert session.project.camera_track.keys[1].shot == live
+    keys.undo()
+
+    # Elsewhere (no key selected), the framing waits; moving in time drops it.
+    keys.deselect()
     canvas.set_view(camera.center + (3.0, 0.0), camera.zoom)
-    assert keys.pending is not None
+    assert keys.pending is not None and session.project.camera_track.keys[1].shot == framing
     player.seek(4.0)
     assert keys.pending is None
     keys.set_viewfinder(False)
@@ -1680,3 +1763,15 @@ def test_camera_keys_through_the_viewfinder(sliced, photos, qapp):
     assert not session.project.camera_track.stretch
     keys.delete_key()
     assert len(session.project.camera_track.keys) == 1
+
+    # Every edit undoes, back to no keys; redo replays them; a new edit ends the redos.
+    edited = session.project.camera_track
+    while keys.undo_action.isEnabled():
+        keys.undo_action.trigger()
+    assert not session.project.camera_track.keys and not keys.undo_action.isEnabled()
+    while keys.redo_action.isEnabled():
+        keys.redo_action.trigger()
+    assert session.project.camera_track == edited
+    keys.undo()
+    keys.add_key()
+    assert not keys.redo_action.isEnabled()

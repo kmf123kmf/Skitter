@@ -113,6 +113,7 @@ class AnimateStep(StepPage):
         session.matching_changed.connect(self._load_scene)
         session.mosaic_edited.connect(self._on_mosaic_edited)
         session.animation_changed.connect(self._on_animation_changed)
+        session.camera_changed.connect(self._on_camera_changed)
         for signal in session.export_signals():
             signal.connect(self._refresh_export)
         self._apply_look()
@@ -329,6 +330,15 @@ class AnimateStep(StepPage):
         self._show_export_frame()
         if self._following():
             self._fit()  # keep the whole frame in view as its shape changes
+
+    def _on_camera_changed(self) -> None:
+        """The camera's keys changed (edited, undone, redone): only the camera is planned
+        again, not the tiles, so editing keys live through the camera stays smooth."""
+        self._plan_camera()
+        self.keys.refresh()
+        self._show_export_frame()
+        if self._following() and not self.keys.editing_live:
+            self._fit()  # (live, the view already is the shot)
 
     def _replan(self) -> None:
         """New timeline for the current settings: at the same moment, or still at the end."""

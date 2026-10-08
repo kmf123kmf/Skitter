@@ -125,6 +125,8 @@ class VideoExportDialog(QDialog):
         for signal in session.export_signals():
             signal.connect(self._refresh)
         session.animation_changed.connect(self._on_animation_changed)
+        # The camera's closest zoom sets the texture detail; edits come fast (live keying).
+        session.camera_changed.connect(lambda: self._refresh() if self.isVisible() else None)
         self.path.setText(self._default_path())
         self._refresh()
 

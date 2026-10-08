@@ -4,9 +4,10 @@
 
 - **Look through camera** (C): the view becomes the camera. The export frame
   stays put in the view, and panning, zooming (wheel) and turning
-  (Shift+wheel) the mosaic under it frames a shot; Add Key (K) keeps it at
-  the current time (replacing a key there). Moving in time drops a framing
-  that wasn't keyed.
+  (Shift+wheel) the mosaic under it frames a shot. With a key selected and
+  the playhead on it, that edits the key live; otherwise the framing waits
+  for Add Key (K), which keeps it at the current time (replacing a key
+  there). Moving in time drops a framing that wasn't keyed.
 - Keys show on the transport's timeline strip: click one to select it and go
   there, drag it to retime it, right-click it for Stop / Pass through, how
   the camera moves on, and Delete. [ and ] jump to the previous / next key.
@@ -17,7 +18,8 @@
 
 Every change replaces the project's CameraTrack through the session
 (`set_camera_track`), so the preview, the export and unsaved-change tracking
-all see it.
+all see it, and each is an undo step (Ctrl+Z, Ctrl+Y or Ctrl+Shift+Z; a live
+drag or a held-down field is one step).
 """
 
 import math
@@ -48,9 +50,12 @@ from skitter.ui import icons
 from skitter.ui.style import muted
 from skitter.ui.widgets.param_form import ParamForm
 
-# Keys of the camera shortcuts a number field has no use for: they pass it by.
+# Keys of the camera shortcuts a number field has no use for: they pass it by. (A field
+# applies each change at once, so its own text undo has nothing to offer: Ctrl+Z, Ctrl+Y
+# and Ctrl+Shift+Z undo and redo key edits instead.)
 NUMBER_FIELD_PASSES = {Qt.Key.Key_BracketLeft, Qt.Key.Key_BracketRight, Qt.Key.Key_K,
                        Qt.Key.Key_C}  # fmt: skip
+UNDO_KEYS = {Qt.Key.Key_Z, Qt.Key.Key_Y}
 
 
 class KeyFields(Configurable):
@@ -98,6 +103,12 @@ class CameraKeys(QObject):
         self.previous_action = self._action("Previous key", lambda: self.jump(-1), "[")
         self.next_action = self._action("Next key", lambda: self.jump(1), "]")
         self.deselect_action = self._action("Deselect key", self.deselect, "Escape")
+        self.undo_action = self._action("Undo key edit", self.undo, "Ctrl+Z")
+        self.redo_action = self._action("Redo key edit", self.redo, "Ctrl+Y")
+        self.redo_action.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        self.undo_action.setIcon(icons.undo())
+        self.redo_action.setIcon(icons.redo())
+        self.editing_live = False  # a viewfinder move is editing the selected key
 
         strip = step.transport.timeline
         strip.key_clicked.connect(self.select_and_go)
@@ -130,8 +141,8 @@ class CameraKeys(QObject):
         focus still gets the letters it types (Qt lets it override shortcuts); a number
         field can't use these letters, so they pass it by (see eventFilter)."""
         for action in (self.viewfinder_action, self.add_action, self.delete_action,
-                       self.previous_action, self.next_action,
-                       self.deselect_action):  # fmt: skip
+                       self.previous_action, self.next_action, self.deselect_action,
+                       self.undo_action, self.redo_action):  # fmt: skip
             widget.addAction(action)
         self._shortcut_scope = widget
         QApplication.instance().focusChanged.connect(self._watch_focus)
@@ -147,10 +158,15 @@ class CameraKeys(QObject):
                     box.removeEventFilter(self)
 
     def eventFilter(self, obj, event) -> bool:
-        """Let [ ] K C reach the shortcuts while a number field on the page has focus."""
-        held = Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier
-        if (event.type() == QEvent.Type.ShortcutOverride and event.key() in NUMBER_FIELD_PASSES
-                and not event.modifiers() & held):  # fmt: skip
+        """Let [ ] K C, and undo / redo, reach the shortcuts while a number field on the page
+        has focus."""
+        if event.type() != QEvent.Type.ShortcutOverride:
+            return False
+        ctrl, alt = Qt.KeyboardModifier.ControlModifier, Qt.KeyboardModifier.AltModifier
+        mods = event.modifiers()
+        plain = event.key() in NUMBER_FIELD_PASSES and not mods & (ctrl | alt)
+        undo = event.key() in UNDO_KEYS and mods & ctrl and not mods & alt
+        if plain or undo:
             event.ignore()  # not the field's: the shortcut runs
             return True
         return False
@@ -163,6 +179,11 @@ class CameraKeys(QObject):
         self.clear_button.clicked.connect(lambda: self.clear_keys())
         top = QHBoxLayout()
         top.addWidget(self.count, stretch=1)
+        for action in (self.undo_action, self.redo_action):
+            button = QToolButton()
+            button.setDefaultAction(action)
+            button.setAutoRaise(True)
+            top.addWidget(button)
         top.addWidget(self.clear_button)
         self.hint = muted(QLabel())
         self.hint.setWordWrap(True)
@@ -196,10 +217,28 @@ class CameraKeys(QObject):
         timeline = self.step.player.timeline
         return None if timeline is None else timeline.clock
 
-    def _set(self, track: CameraTrack, select: CameraKey | None = None) -> None:
+    def _set(self, track: CameraTrack, select: CameraKey | None = None, merge=None) -> None:
+        """Make track the camera's (one undo step; merge: see Session.set_camera_track)
+        and select the key `select` in it."""
         self.pending = None
-        self.session.set_camera_track(track)  # replans and redraws (animation_changed)
         self.selected = track.keys.index(select) if select in track.keys else -1
+        self.session.set_camera_track(track, merge)  # the camera is planned and drawn again
+        self.refresh()
+
+    def undo(self) -> None:
+        if self.session.undo_camera():
+            self._after_history()
+
+    def redo(self) -> None:
+        if self.session.redo_camera():
+            self._after_history()
+
+    def _after_history(self) -> None:
+        """An undo or redo replaced the keys: no framing waits; the selection stays if its
+        key is still there."""
+        self.pending = None
+        if self.selected >= len(self.track.keys):
+            self.selected = -1
         self.refresh()
 
     def _key_index_at(self, t: float, tolerance: float = 1e-3) -> int:
@@ -315,7 +354,8 @@ class CameraKeys(QObject):
         track = self.track.replaced(self.selected, edited)
         if name == "time":  # it may now share a moment with another key: that one goes
             track = self.track.without(self.selected).with_key(edited, clock)
-        self._set(track, select=edited)
+        # A field held down (or stepped quickly) is one undo step.
+        self._set(track, select=edited, merge=("field", self.selected, name))
 
     # The viewfinder
 
@@ -338,14 +378,34 @@ class CameraKeys(QObject):
 
     def view_moved(self) -> None:
         """The view was panned, zoomed or turned by hand while looking through the camera:
-        the frame's content is a new framing."""
+        the frame's content is a new framing. On the selected key's moment it is that
+        key's new shot at once (live; one undo step per gesture); elsewhere it waits for
+        Add Key."""
         cam, base = self.step.canvas.camera, self.step.frame_rect()
         if self._frame_px is None or base is None:
             return
         zoom = base[2] * cam.zoom / self._frame_px[0]
-        self.pending = Shot((float(cam.center[0]), float(cam.center[1])), float(zoom),
-                            float(cam.rotation))  # fmt: skip
+        shot = Shot((float(cam.center[0]), float(cam.center[1])), float(zoom),
+                    float(cam.rotation))  # fmt: skip
+        if self.on_selected_key():
+            index = self.selected
+            key = replace(self.track.keys[index], shot=shot)
+            self.editing_live = True
+            try:
+                self._set(self.track.replaced(index, key), select=key, merge=("live", index))
+            finally:
+                self.editing_live = False
+            return
+        self.pending = shot
         self.refresh()
+
+    def on_selected_key(self) -> bool:
+        """A key is selected and the playhead is on its moment (through the camera, the
+        view then edits it)."""
+        clock = self.clock()
+        if clock is None or self.selected < 0 or self.selected >= len(self.track.keys):
+            return False
+        return abs(self.track.times(clock)[self.selected] - self.step.player.time) < 1e-6
 
     def time_moved(self) -> None:
         """Moving in time drops a framing that wasn't keyed."""
@@ -373,6 +433,8 @@ class CameraKeys(QObject):
         for action in (self.viewfinder_action, self.add_action):
             action.setEnabled(has)
         self.delete_action.setEnabled(has and bool(keys))
+        self.undo_action.setEnabled(self.session.can_undo_camera)
+        self.redo_action.setEnabled(self.session.can_redo_camera)
         self.previous_action.setEnabled(has and bool(keys))
         self.next_action.setEnabled(has and bool(keys))
         if not hasattr(self, "count"):
@@ -389,6 +451,9 @@ class CameraKeys(QObject):
             self._show_key(keys[self.selected], float(track.times(clock)[self.selected]))
         if self.pending is not None:
             hint = "Framing changed: Add Key (K) keeps it here; moving in time drops it."
+        elif self.viewfinder and self.on_selected_key():
+            hint = (f"Editing key {self.selected + 1} through the camera: dragging, the wheel "
+                    "and Shift+wheel change it directly (Ctrl+Z undoes).")  # fmt: skip
         elif self.viewfinder:
             hint = ("Looking through the camera: drag to pan, wheel to zoom, Shift+wheel to "
                     "turn, then Add Key (K).")  # fmt: skip

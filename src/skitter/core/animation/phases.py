@@ -60,10 +60,8 @@ class PhaseHolds(Configurable):
 
 
 def default_holds() -> dict[str, PhaseHolds]:
-    """New projects: the finished mosaic holds 2 s after the build."""
-    holds = {phase: PhaseHolds() for phase in PHASES}
-    holds["build"].update(hold_after=2.0)
-    return holds
+    """New projects: no holds."""
+    return {phase: PhaseHolds() for phase in PHASES}
 
 
 @dataclass(frozen=True)

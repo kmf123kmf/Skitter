@@ -25,6 +25,7 @@ dependencies = [
 dev = [
     "pytest>=8.0",
     "ruff>=0.5",
+    "pyinstaller>=6.10",  # standalone builds: skitter.spec
 ]
 
 [project.gui-scripts]

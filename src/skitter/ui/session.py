@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -51,6 +52,9 @@ from skitter.ui.render.tile_textures import DetailRequest, TileTextures
 from skitter.ui.render.video_export import VideoJob, run_video_job
 
 logger = logging.getLogger(__name__)
+
+CAMERA_UNDO = 200  # camera key edits that can be undone
+CAMERA_MERGE = 0.75  # seconds: edits closer than this, with the same merge key, are one step
 
 
 @dataclass(frozen=True)
@@ -122,6 +126,7 @@ class Session(QObject):
     )  # (path, ExportReport, error); cancelled: both None
     busy_changed = Signal()  # a background job started or stopped
     animation_changed = Signal()  # choreography, look or video settings edited
+    camera_changed = Signal()  # project.camera_track replaced (an edit, an undo or a redo)
     # Saved settings changed that nothing redraws for (export settings, camera moves):
     # the project now differs from its file (see modified).
     settings_edited = Signal()
@@ -160,6 +165,10 @@ class Session(QObject):
         self._job: Job | None = None
         self._job_kind: str | None = None
 
+        # Camera key edits (set_camera_track): tracks before each step, and undone ones.
+        self._camera_undo: list = []
+        self._camera_redo: list = []
+        self._camera_merge: tuple | None = None  # (merge key, when) of the last edit
         self.project_path: Path | None = None  # the file the project was opened from or saved to
         self.load_problems: list[str] = []  # what the last Open skipped
         self.opened_view: dict = {}  # how the opened project was shown (project_file "view")
@@ -268,6 +277,9 @@ class Session(QObject):
         self._slicing_cache = []
         self.slicing_error = self.slicing_summary = self.match_error = None
         self.dropped_picks = self.missing_tiles = 0
+        self._camera_undo.clear()  # another project's keys
+        self._camera_redo.clear()
+        self._camera_merge = None
         self.project_replaced.emit()
         self.source_changed.emit()
         if committed and final is not None and opened is not None:
@@ -829,10 +841,46 @@ class Session(QObject):
 
     # Animation
 
-    def set_camera_track(self, track) -> None:
-        """Replace the camera's keyframes (keyframes.CameraTrack, immutable)."""
+    def set_camera_track(self, track, merge=None) -> None:
+        """Replace the camera's keyframes (keyframes.CameraTrack, immutable), as one undo
+        step. merge: edits with the same merge key coming within CAMERA_MERGE seconds of
+        each other are one step (a drag through the camera, a spin box held down)."""
+        old = self.project.camera_track
+        if track == old:
+            return
+        now = time.monotonic()
+        last = self._camera_merge
+        if merge is None or last is None or last[0] != merge or now - last[1] > CAMERA_MERGE:
+            self._camera_undo.append(old)
+            del self._camera_undo[:-CAMERA_UNDO]
+        self._camera_merge = None if merge is None else (merge, now)
+        self._camera_redo.clear()
         self.project.camera_track = track
-        self.animation_edited()
+        self.camera_changed.emit()
+
+    @property
+    def can_undo_camera(self) -> bool:
+        return bool(self._camera_undo)
+
+    @property
+    def can_redo_camera(self) -> bool:
+        return bool(self._camera_redo)
+
+    def undo_camera(self) -> bool:
+        """Back to the camera's keys before the last edit (False: nothing to undo)."""
+        return self._step_camera(self._camera_undo, self._camera_redo)
+
+    def redo_camera(self) -> bool:
+        return self._step_camera(self._camera_redo, self._camera_undo)
+
+    def _step_camera(self, back: list, forth: list) -> bool:
+        if not back:
+            return False
+        forth.append(self.project.camera_track)
+        self.project.camera_track = back.pop()
+        self._camera_merge = None
+        self.camera_changed.emit()
+        return True
 
     def animation_edited(self) -> None:
         """The choreographies (of any phase), their settings, the look or the video

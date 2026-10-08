@@ -75,6 +75,7 @@ class MainWindow(QMainWindow):
             session.project_replaced, session.source_changed, session.source_edited,
             session.source_committed, session.layout_changed, session.slicing_changed,
             session.matching_changed, session.mosaic_edited, session.animation_changed,
+            session.camera_changed,
             session.settings_edited,
         ):  # fmt: skip
             signal.connect(self._update_title)
