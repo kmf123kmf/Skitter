@@ -52,6 +52,25 @@ def test_next_unavailable_until_source_loaded(window, image_file):
     assert window.windowTitle() == "Skitter — photo.png[*]" and window.isWindowModified()
 
 
+def test_source_offers_choose_then_change_and_edits_under_the_picture(window, image_file):
+    from PySide6.QtWidgets import QToolButton
+
+    from skitter.ui.steps.source import SourceStep
+
+    step = window.step(SourceStep)
+    assert step._view.currentWidget() is step._empty and step.change_button.isHidden()
+    step.load_file(image_file)
+    assert step._view.currentWidget() is step.viewer and not step.change_button.isHidden()
+    bar = step.viewer.tools
+    actions = [bar.itemAt(i).widget().defaultAction() for i in range(bar.count())
+               if isinstance(bar.itemAt(i).widget(), QToolButton)]  # fmt: skip
+    assert step.crop_action in actions and step.undo_action in actions
+    step.crop_action.trigger()
+    assert not step.change_button.isEnabled()  # finish the crop first
+    step.cancel_crop()
+    assert step.change_button.isEnabled()
+
+
 def test_next_commits_source_and_opens_slicing(window, source):
     from skitter.ui.steps.slicing import SlicingStep
 

@@ -71,14 +71,10 @@ def _polyline(p: QPainter, *points: tuple[float, float]) -> None:
 # Drawings
 
 
-def _folder(p: QPainter, color: QColor) -> None:
-    path = QPainterPath()
-    path.moveTo(3, 18.5)
-    for x, y in ((3, 5.5), (9, 5.5), (11, 7.5), (21, 7.5), (21, 18.5)):
-        path.lineTo(x, y)
-    path.closeSubpath()
-    p.drawPath(path)
-    p.drawLine(QPointF(3, 10.5), QPointF(21, 10.5))
+def _picture(p: QPainter, color: QColor) -> None:
+    p.drawRoundedRect(QRectF(3, 4.5, 18, 15), 2, 2)
+    _polyline(p, (3.5, 17), (9, 11.5), (13, 15.5), (15.5, 13), (20.5, 18))
+    p.drawEllipse(QPointF(15.5, 8.8), 1.7, 1.7)
 
 
 def _undo(p: QPainter, color: QColor) -> None:
@@ -221,8 +217,8 @@ def _viewfinder(p: QPainter, color: QColor) -> None:
 # Public icons
 
 
-def open_folder() -> QIcon:
-    return _make_icon(_folder)
+def picture() -> QIcon:
+    return _make_icon(_picture)
 
 
 def undo() -> QIcon:

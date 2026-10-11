@@ -166,9 +166,21 @@ class ImageViewer(QWidget):
         self._swatch.setFixedSize(12, 12)
         self._swatch.hide()
         self._cursor_label = QLabel()
-        layout.addWidget(self._swatch)
-        layout.addWidget(self._cursor_label)
-        layout.addStretch()
+        left = QHBoxLayout()
+        left.setSpacing(4)
+        left.addWidget(self._swatch)
+        left.addWidget(self._cursor_label)
+        left.addStretch()
+        # The page's own buttons (the Source tab's edits, say), centered under the view.
+        self.tools = QHBoxLayout()
+        self.tools.setSpacing(0)
+        right = QHBoxLayout()
+        right.setSpacing(4)
+        right.addStretch()
+        # Equal stretch either side keeps the tools centered.
+        layout.addLayout(left, stretch=1)
+        layout.addLayout(self.tools)
+        layout.addLayout(right, stretch=1)
 
         self.zoom_combo = ZoomCombo()
         self.zoom_combo.percent_requested.connect(self.set_zoom_percent)
@@ -185,7 +197,7 @@ class ImageViewer(QWidget):
                 button.setDefaultAction(item)
                 button.setAutoRaise(True)
                 item = button
-            layout.addWidget(item)
+            right.addWidget(item)
         return bar
 
     # Zoom

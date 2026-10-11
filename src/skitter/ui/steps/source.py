@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QFormLayout,
+    QFrame,
     QGroupBox,
     QHBoxLayout,
     QLabel,
@@ -17,7 +18,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QStackedWidget,
-    QToolBar,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -70,18 +71,13 @@ class SourceStep(StepPage):
         self.crop_overlay = CropOverlay(self.viewer.canvas)
         self.crop_overlay.box_changed.connect(self._sync_crop_fields)
 
-        self._empty = QLabel("Drop an image here\nor click Open")
-        self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty.setObjectName("emptyState")
-        self._empty.setStyleSheet(
-            "#emptyState { border: 2px dashed palette(mid); border-radius: 12px;"
-            " color: palette(placeholder-text); font-size: 16pt; margin: 24px; }"
-        )
+        self._empty = self._build_empty_state()
         self._view = QStackedWidget()
         self._view.addWidget(self._empty)
         self._view.addWidget(self.viewer)
 
         self._build_actions()
+        self._build_tools()
         body = QHBoxLayout()
         body.setSpacing(0)
         body.addWidget(self._view, stretch=1)
@@ -90,7 +86,6 @@ class SourceStep(StepPage):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self._build_toolbar())
         layout.addLayout(body)
 
         session.source_changed.connect(self._on_source_changed)
@@ -114,7 +109,6 @@ class SourceStep(StepPage):
 
     def _build_actions(self) -> None:
         session = self.session
-        self.open_action = self._action(icons.open_folder(), "Open", self.open_dialog)
         self.undo_action = self._action(
             icons.undo(), "Undo", session.undo, QKeySequence.StandardKey.Undo
         )
@@ -150,12 +144,31 @@ class SourceStep(StepPage):
         self.cancel_crop_action.triggered.connect(self.cancel_crop)
         self.addActions([self.apply_crop_action, self.cancel_crop_action])
 
-    def _build_toolbar(self) -> QToolBar:
-        toolbar = QToolBar()
-        toolbar.setIconSize(QSize(20, 20))
-        toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+    def _build_empty_state(self) -> QWidget:
+        drop = QLabel("Drop an image here")
+        drop.setStyleSheet("color: palette(placeholder-text); font-size: 16pt;")
+        either = QLabel("or")
+        either.setStyleSheet("color: palette(placeholder-text);")
+        self.choose_button = QPushButton(icons.picture(), "Choose Image…")
+        self.choose_button.setIconSize(QSize(20, 20))
+        self.choose_button.clicked.connect(self.open_dialog)
+
+        empty = QFrame()
+        empty.setObjectName("emptyState")
+        empty.setStyleSheet(
+            "#emptyState { border: 2px dashed palette(mid); border-radius: 12px; margin: 24px; }"
+        )
+        layout = QVBoxLayout(empty)
+        layout.setSpacing(10)
+        layout.addStretch()
+        for widget in (drop, either, self.choose_button):
+            layout.addWidget(widget, alignment=Qt.AlignmentFlag.AlignCenter)
+        layout.addStretch()
+        return empty
+
+    def _build_tools(self) -> None:
+        """The edit buttons, centered in the bar under the picture."""
         groups = (
-            (self.open_action,),
             (self.undo_action, self.redo_action),
             (
                 self.rotate_left_action,
@@ -166,11 +179,21 @@ class SourceStep(StepPage):
             ),
             (self.revert_action,),
         )
+        tools = self.viewer.tools
         for i, group in enumerate(groups):
             if i:
-                toolbar.addSeparator()
-            toolbar.addActions(group)
-        return toolbar
+                line = QFrame()
+                line.setFrameShape(QFrame.Shape.VLine)
+                line.setFrameShadow(QFrame.Shadow.Sunken)
+                tools.addSpacing(4)
+                tools.addWidget(line)
+                tools.addSpacing(4)
+            for action in group:
+                button = QToolButton()
+                button.setDefaultAction(action)
+                button.setAutoRaise(True)
+                button.setIconSize(QSize(20, 20))
+                tools.addWidget(button)
 
     def _build_panel(self) -> QWidget:
         return side_panel(
@@ -205,6 +228,10 @@ class SourceStep(StepPage):
             widget.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
             form.addRow(label, widget)
         self._name.setWordWrap(True)
+        self.change_button = QPushButton(icons.picture(), "Change Image…")
+        self.change_button.setToolTip("Use a different picture (or drop one on the view)")
+        self.change_button.clicked.connect(self.open_dialog)
+        form.addRow(self.change_button)
         return group
 
     def _build_crop_group(self) -> QGroupBox:
@@ -478,7 +505,9 @@ class SourceStep(StepPage):
         cropping = self.is_cropping()
         editable = has_image and not cropping
 
-        self.open_action.setEnabled(not cropping)
+        self.choose_button.setEnabled(not cropping)
+        self.change_button.setVisible(has_image)  # until then, the drop zone has one
+        self.change_button.setEnabled(not cropping)
         for action in (
             self.rotate_left_action,
             self.rotate_right_action,
