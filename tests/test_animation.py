@@ -116,7 +116,6 @@ CONFIGS = [(cls, {}) for cls in choreography_types()] + [
     (DealChoreography, {"position": "orbit", "decks": 3, "orbit_turns": 2.5, "order": "far"}),
     (DealChoreography, {"position": "orbit", "radius": 0.2, "orbit_direction": "counter"}),
     (DealChoreography, {"position": "orbit", "decks": 2, "order": "random", "orbit_turns": 0}),
-    (UnscrambleChoreography, {"motion": "slide"}),
     (UnscrambleChoreography, {"order": "center", "scrambled": 50.0}),
     (AssembleChoreography, {"order": "sweep", "sweep": "custom", "sweep_angle": 30.0}),
     (DealChoreography, {"order": "counter", "decks": 2}),

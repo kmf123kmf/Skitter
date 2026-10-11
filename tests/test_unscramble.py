@@ -2,11 +2,10 @@
 
 import numpy as np
 import pytest
-from test_animation import overlapping, pile_scene
+from test_animation import pile_scene
 from test_show import tiled_scene
 
-from skitter.core.animation.look import AnimationLook
-from skitter.core.animation.moves import LayeredTimeline, layers, swap_plan
+from skitter.core.animation.moves import swap_plan
 from skitter.core.animation.unscramble import (
     UnscrambleChoreography,
     batch_sizes,
@@ -37,7 +36,7 @@ def batched(n: int, batches: int) -> np.ndarray:
 def test_swap_plan_unscrambles_with_every_batch_putting_tiles_home(seed, batches):
     rng = np.random.default_rng(seed)
     n = 60
-    places, moves = swap_plan(n, rng.permutation(n), batched(n, batches), 0.5, rng)
+    places, moves = swap_plan(n, rng.permutation(n), batched(n, batches), rng)
     assert sorted(places.tolist()) == list(range(n))  # one tile per place
     home = places == np.arange(n)
     for state in replay(places, moves):
@@ -60,7 +59,7 @@ def test_swap_plan_tiles_go_home_in_order(centers):
     order = rng.permutation(n)
     times = batched(n, 8)
     grid = np.stack(np.meshgrid(np.arange(10.0), np.arange(8.0)), -1).reshape(-1, 2)
-    _, moves = swap_plan(n, order, times, 0.5, rng, centers=grid if centers else None,
+    _, moves = swap_plan(n, order, times, rng, centers=grid if centers else None,
                          reach=2.0)  # fmt: skip
     rank = np.empty(n, np.int64)
     rank[order] = np.arange(n)
@@ -73,7 +72,7 @@ def test_swap_plan_never_moves_a_tile_twice_at_once():
     n = 400
     grid = np.stack(np.meshgrid(np.arange(20.0), np.arange(20.0)), -1).reshape(-1, 2)
     for reach in (1.5, 100.0):
-        _, moves = swap_plan(n, rng.permutation(n), batched(n, 4), 0.5, rng, centers=grid,
+        _, moves = swap_plan(n, rng.permutation(n), batched(n, 4), rng, centers=grid,
                              reach=reach)  # fmt: skip
         for s in np.unique(moves.start):
             tiles = moves.tile[moves.start == s]
@@ -139,9 +138,11 @@ def test_unscramble_rests_between_batches():
     starts = np.unique(timeline.moves.start)
     assert len(starts) > 3
     for s in starts[:-1]:
-        frame = timeline.frame(s + timeline.travel + 0.5)  # in the pause after the batch
-        assert frame.at_rest().all() and not frame.heights().any()
-        assert (~timeline.frame(s + timeline.travel / 2).at_rest()).sum() >= 2  # moving
+        still = timeline.frame(s + timeline.travel + 0.5)  # in the pause after the batch
+        after = timeline.frame(s + timeline.travel + 0.9)
+        np.testing.assert_allclose(still.center, after.center)
+        mid = timeline.frame(s + timeline.travel / 2)
+        assert (np.hypot(*(mid.center - still.center).T) > 1e-6).sum() >= 2  # moving
 
 
 def test_unscramble_with_nothing_scrambled_is_the_mosaic_throughout():
@@ -164,137 +165,34 @@ def test_unscramble_fixes_tiles_in_its_order(order):
     assert np.corrcoef(last_home[moved], key[moved])[0, 1] > 0.9
 
 
-def test_unscramble_partners_pass_one_over_the_other():
+def test_unscramble_partners_pass_side_by_side_one_over_the_other():
     scene = tiled_scene(12, 8)
-    timeline = UnscrambleChoreography(motion="carry", wind_down=0.0).timeline(scene)
+    timeline = UnscrambleChoreography(wind_down=0.0).timeline(scene)
     m = timeline.moves
     s = m.start[0]
     pair = np.flatnonzero(m.start == s)[:2]
     frame = timeline.frame(s + timeline.travel / 2)
+    assert frame.at_rest().all() and not frame.heights().any()  # sliding on the table
     a, b = m.tile[pair]
-    assert frame.heights()[a] > 0 and frame.heights()[b] > 0
-    assert frame.heights()[a] != pytest.approx(frame.heights()[b])
     # Side by side, not through each other: their centers are apart mid-swap.
     gap = np.hypot(*(frame.center[a] - frame.center[b]))
     way = scene.center[m.target[pair[0]]] - scene.center[m.source[pair[0]]]
     assert gap > 0.2 * np.hypot(*way)
+    np.testing.assert_allclose(frame.rotation, scene.rotation)  # no tilt
 
 
-def test_unscramble_slides_stay_low_and_carries_stay_below_the_camera():
-    scene = tiled_scene(12, 8)
-    slide = UnscrambleChoreography(motion="slide").timeline(scene)
-    tops = [slide.frame(t).heights().max() for t in np.linspace(0, slide.duration, 41)]
-    assert 0 < max(tops) <= 0.01 * scene.tile_size[0] + 1e-9  # a hover, no visible shadow
-    look = AnimationLook(camera_height=0.5)
-    carry = UnscrambleChoreography(lift=10.0).timeline(scene, look)
-    extent = max(np.ptp(scene.corners[..., 0]), np.ptp(scene.corners[..., 1]))
-    tops = [carry.frame(t).heights().max() for t in np.linspace(0, carry.duration, 41)]
-    assert max(tops) <= 0.25 * 0.5 * extent + 1e-9
-
-
-def test_unscramble_carried_tiles_tilt_and_land_straight():
-    scene = tiled_scene(12, 8)
-    timeline = UnscrambleChoreography(tilt=20.0, wind_down=0.0).timeline(scene)
-    m = timeline.moves
-    k = int(np.argmax(np.abs(m.tilt)))
-    mid = timeline.frame(m.start[k] + timeline.travel / 2)
-    assert abs(mid.rotation[m.tile[k]] - scene.rotation[m.tile[k]]) > 0.05
-    landed = timeline.frame(m.start[k] + timeline.travel + 1e-6)
-    assert landed.rotation[m.tile[k]] == pytest.approx(scene.rotation[m.tile[k]])
-
-
-# Piles: exploded into layers
-
-
-def test_layers_put_every_tile_above_the_tiles_under_it():
-    scene = pile_scene()
-    layer = layers(scene)
-    lower, upper = scene.overlaps.T
-    assert (layer[upper] > layer[lower]).all()  # so one layer's tiles never overlap
-    on_table = np.setdiff1d(np.arange(len(scene)), upper)
-    assert (layer[on_table] == 0).all() and layer.max() > 2
-    assert not layers(tiled_scene(6, 4)).any()  # a grid is one layer
-
-
-def test_unscramble_explodes_a_pile_and_settles_it():
-    scene = pile_scene()
-    layer = layers(scene)
-    timeline = UnscrambleChoreography(pile_spread=20.0, pause=1.0).timeline(scene)
-    assert isinstance(timeline, LayeredTimeline)
-    start = timeline.frame(0.0)  # a flat, scrambled pile
-    assert start.at_rest().all() and not start.heights().any()
-    assert (timeline.places != np.arange(len(scene))).mean() > 0.9
-    np.testing.assert_allclose(start.center, scene.center[timeline.places])
-    # Apart (before the first swaps): layers evenly spaced, the higher spread further out.
-    apart = timeline.frame(timeline.explode)
-    place = timeline.places
-    np.testing.assert_allclose(apart.heights(), (layer[place] + 1) * timeline.gap)
-    middle = np.array([(scene.bounds[0] + scene.bounds[2]) / 2,
-                       (scene.bounds[1] + scene.bounds[3]) / 2])  # fmt: skip
-    out = np.hypot(*(apart.center - middle).T) / np.maximum(
-        np.hypot(*(scene.center[place] - middle).T), 1e-9
-    )
-    top = layer[place] == layer.max()
-    np.testing.assert_allclose(out[top], 1.2)
-    np.testing.assert_allclose(out[layer[place] == 0], 1.0)
-    # A photo takes on the turn of the spot it lies in.
-    np.testing.assert_allclose(apart.rotation, scene.rotation[place])
-    assert timeline.frame(timeline.duration - 1e-9).heights().max() < 1e-6 * timeline.gap
-
-
-def test_unscramble_swaps_a_pile_within_its_layers():
-    scene = pile_scene()
-    layer = layers(scene)
-    m = UnscrambleChoreography().timeline(scene).moves
-    assert len(m) and (layer[m.source] == layer[m.target]).all()
-    # The tile going home travels above its layer, its partner below it.
-    level = layer[m.source] + 1.0
-    assert ((m.lane > level) & (m.lane < level + 1))[~m.low].all()
-    assert ((m.lane < level) & (m.lane > level - 1))[m.low].all()
-
-
-@pytest.mark.parametrize("settings", [{}, {"order": "center"}, {"reach": 30.0, "travel": 0.4}])
-def test_unscramble_pile_tiles_never_pass_through_each_other(settings):
-    """Flat tiles at different heights never touch: a collision is two overlapping tiles
-    swapping which is higher between two moments close together."""
-    from scipy.spatial import cKDTree
-
-    scene = pile_scene(seed=5)
-    timeline = UnscrambleChoreography(**settings).timeline(scene)
-    reach = float(np.hypot(*scene.size.T).max())
-    times = np.linspace(0, timeline.duration, 1500)[1:-1]
-    before = timeline.frame(times[0])
-    for t in times[1:]:
-        now = timeline.frame(t)
-        i, j = cKDTree(now.center).query_pairs(reach, output_type="ndarray").T
-        h0, h1 = before.heights(), now.heights()
-        crossed = np.sign(h0[i] - h0[j]) * np.sign(h1[i] - h1[j]) < 0
-        i, j = i[crossed], j[crossed]
-        hit = overlapping(now.center[i], now.size[i], now.rotation[i], now.center[j],
-                          now.size[j], now.rotation[j])  # fmt: skip
-        assert not hit.any(), f"tiles pass through each other at {t:.3f} s"
-        before = now
-
-
-def test_unscramble_depth_shading_darkens_lower_layers():
-    scene = pile_scene()
-    layer = layers(scene)
-    timeline = UnscrambleChoreography(depth_shading=40.0).timeline(scene)
-    apart = timeline.frame(timeline.explode)
-    shade = apart.tint[:, 3]
-    deep = layer[timeline.places]
-    assert shade[deep == 0].mean() > shade[deep == deep.max()].mean() >= 0
-    assert (apart.tint[:, :3] == 0).all() and shade.max() <= 0.4
-    plain = UnscrambleChoreography(depth_shading=0.0).timeline(scene)
-    assert not plain.frame(plain.explode).tint.any()
-
-
-def test_unscramble_settings_saved_before_pile_spread_keep_it():
+def test_unscramble_settings_of_earlier_versions_are_left_out_quietly():
     problems = []
-    old = UnscrambleChoreography.from_values({"spread": 40.0, "order": "center"}, problems)
-    assert not problems
-    assert old.pile_spread == 40.0 and old.spread == 0.05 and old.order == "center"
-    new = UnscrambleChoreography(pile_spread=30.0, spread=0.2)
+    old = UnscrambleChoreography.from_values(
+        {"motion": "carry", "lift": 2.0, "tilt": 9.0, "stack_height": 0.3, "explode": 2.0,
+         "pile_spread": 30.0, "depth_shading": 20.0, "spread": 0.2, "order": "center"},
+        problems,
+    )  # fmt: skip
+    assert not problems and old.spread == 0.2 and old.order == "center"
+    # Saved before Pile spread had its name, "spread" was the pile's: left out too.
+    older = UnscrambleChoreography.from_values({"stack_height": 0.3, "spread": 40.0}, problems)
+    assert not problems and older.spread == UnscrambleChoreography().spread
+    new = UnscrambleChoreography(spread=0.2)
     assert UnscrambleChoreography.from_values(new.values()).values() == new.values()
 
 
@@ -310,3 +208,54 @@ def test_unscramble_spread_loosens_its_order():
         return np.corrcoef(last_home[moved], scene.reading_order[moved])[0, 1]
 
     assert fit(0.0) > fit(0.05) > fit(0.5)
+
+
+# Levels: tiles overlapping on the way (different sizes, a pile)
+
+
+def split_grid():
+    """A grid split by detail: big tiles and quarters of them."""
+    from test_animation import make_scene
+
+    from skitter.core.slicing import RegionSet
+
+    xs, ys, ws = [], [], []
+    for by in range(0, 120, 20):
+        for bx in range(0, 160, 20):
+            if (bx + by) // 20 % 3 == 0:
+                xs.append(bx), ys.append(by), ws.append(20)
+            else:
+                for dy in (0, 10):
+                    for dx in (0, 10):
+                        xs.append(bx + dx), ys.append(by + dy), ws.append(10)
+    w = np.array(ws, float)
+    regions = RegionSet.from_rects(np.array(xs, float), np.array(ys, float), w, w)
+    return make_scene(regions, np.arange(len(regions)) % 7)
+
+
+@pytest.mark.parametrize("scene_of", [split_grid, pile_scene, lambda: tiled_scene(12, 8)])
+@pytest.mark.parametrize("settings", [{}, {"order": "center", "reach": 30.0, "travel": 0.4}])
+def test_unscramble_keeps_every_tile_at_its_level(scene_of, settings):
+    """Photos in spots not their own hang over their neighbors (different sizes, a
+    pile): every tile keeps one level throughout, sliding on the table, so none ever
+    pops over or under another, and a pile ends in its own order."""
+    from skitter.core.animation import TileFrame
+
+    scene = scene_of()
+    timeline = UnscrambleChoreography(duration=6.0, **settings).timeline(scene)
+    order = timeline.frame(0.0).draw_order()
+    rank = np.empty(len(scene), np.int64)
+    rank[order] = np.arange(len(scene))
+    lower, upper = scene.overlaps.T
+    assert (rank[lower] < rank[upper]).all()  # a pile's levels keep its own order
+    assert (timeline.places != np.arange(len(scene))).mean() > 0.9  # scrambled
+    moved = False
+    for t in np.linspace(0, timeline.duration, 121)[:-1]:
+        frame = timeline.frame(t)
+        np.testing.assert_array_equal(frame.draw_order(), order)
+        assert not frame.heights().any() and frame.at_rest().all()  # on the table
+        np.testing.assert_allclose(frame.size, scene.size)  # each photo its own size
+        moved |= not np.allclose(frame.center, timeline.frame(0.0).center)
+    assert moved
+    final = timeline.frame(timeline.duration)
+    np.testing.assert_allclose(final.center, TileFrame.final(scene).center)
