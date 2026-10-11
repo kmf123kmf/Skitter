@@ -342,6 +342,7 @@ def test_the_jigsaw_runs_exports_and_saves_without_a_library(sliced, tmp_path, q
     step.method_box.setCurrentIndex(step.method_box.findData("jigsaw"))
     assert session.project.match_method_id == "jigsaw" and session.can_match
     assert "picture" in step.method_description.text()
+    assert step.settings_group.isHidden()  # the Jigsaw has no settings
     step.run_matching()
     session.wait_for_job()
     qapp.processEvents()

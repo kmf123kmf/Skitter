@@ -77,9 +77,9 @@ class MatchingStep(StepPage):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.viewer, stretch=1)
-        self.settings_group = self._build_settings_group()
+        self._build_settings_group()
         self.edit = EditMode(self)
-        self.edit.editing_changed.connect(lambda on: self.settings_group.setVisible(not on))
+        self.edit.editing_changed.connect(lambda _: self._show_settings_group())
         layout.addWidget(
             side_panel(
                 self._build_run_group(),
@@ -90,6 +90,7 @@ class MatchingStep(StepPage):
                 self._build_export_group(),
             )  # fmt: skip
         )
+        self._show_methods()  # once in the panel (showing a loose widget opens a window)
         session.project_replaced.connect(self._on_project_replaced)
         session.source_committed.connect(self._sync_image)
         session.layout_changed.connect(self._sync_image)
@@ -135,6 +136,10 @@ class MatchingStep(StepPage):
         self._error.setStyleSheet(WARNING_STYLE)
         group = QGroupBox("Matching")
         layout = QVBoxLayout(group)
+        top = QFormLayout()
+        top.addRow("Method:", self.method_box)  # made with the settings it chooses
+        layout.addLayout(top)
+        layout.addWidget(self.method_description)
         layout.addLayout(buttons)
         layout.addWidget(self.progress)
         layout.addWidget(self.status)
@@ -149,21 +154,21 @@ class MatchingStep(StepPage):
         self._show_methods()
 
     def _build_settings_group(self) -> QGroupBox:
+        """The chosen method's settings (the method itself is chosen in the Matching group)."""
         self.method_box = QComboBox()
         self.method_box.currentIndexChanged.connect(self._on_method)
         self.method_description = muted(QLabel())
         self.method_description.setWordWrap(True)
         self.form = ParamForm()
         self.form.changed.connect(lambda _: self.session.match_settings_edited())
-        group = QGroupBox("Settings")
-        layout = QVBoxLayout(group)
-        top = QFormLayout()
-        top.addRow("Method:", self.method_box)
-        layout.addLayout(top)
-        layout.addWidget(self.method_description)
-        layout.addWidget(self.form)
-        self._show_methods()
+        self.settings_group = group = QGroupBox("Settings")
+        QVBoxLayout(group).addWidget(self.form)
         return group
+
+    def _show_settings_group(self) -> None:
+        """Settings show unless editing tiles, or the method has none."""
+        method = self.session.project.match_method
+        self.settings_group.setVisible(not self.edit.editing and bool(method.params()))
 
     def _show_methods(self) -> None:
         """The project's matching methods, and the chosen one's settings."""
@@ -181,6 +186,7 @@ class MatchingStep(StepPage):
         method = self.session.project.match_method
         self.method_description.setText(method.description)
         self.form.set_target(method)
+        self._show_settings_group()
 
     def _on_method(self) -> None:
         self.session.project.match_method_id = self.method_box.currentData()
