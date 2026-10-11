@@ -22,14 +22,15 @@ INSTANCE_DTYPE = np.dtype(
         ("layer", "f4"),  # index into the layer's textures
         ("tint", "f4", 4),  # rgb in [0, 1], a = tint strength
         ("uv", "f4", 4),  # texture rect (u0, v0, u1, v1) the sprite shows, e.g. an atlas cell
+        ("skew", "f4", 2),  # (du/dt, dv/ds) turning that rect (scene.picture_uv); 0: upright
         ("offset", "f4", 3),  # OKLab shift of every texel (matching's tint), before `tint`
         ("blur", "f4"),  # > 0: a soft shadow, edges blurred this far (world units), no texture
     ]
 )
-_INSTANCE_FORMAT = "2f 2f 1f 1f 1f 4f 4f 3f 1f /i"
+_INSTANCE_FORMAT = "2f 2f 1f 1f 1f 4f 4f 2f 3f 1f /i"
 _INSTANCE_ATTRIBUTES = (
-    "in_pos", "in_size", "in_rotation", "in_alpha", "in_layer", "in_tint", "in_uv", "in_offset",
-    "in_blur",
+    "in_pos", "in_size", "in_rotation", "in_alpha", "in_layer", "in_tint", "in_uv", "in_skew",
+    "in_offset", "in_blur",
 )  # fmt: skip
 
 

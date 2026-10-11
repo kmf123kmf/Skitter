@@ -1,6 +1,8 @@
-"""Matching: choose a tile crop for every region of the sliced mosaic.
+"""Matching: decide what every region of the sliced mosaic shows.
 
-The pipeline (see matcher.py):
+A matching method decides (method.py); the Matching tab offers each
+registered one. The built-in Mosaic method chooses a tile crop for every
+region. Its pipeline (see matcher.py):
 
 1. `targets`: describe each region of the final image, noting which parts
    of it stay visible under overlapping regions.
@@ -18,3 +20,5 @@ The pipeline (see matcher.py):
 
 Nothing here imports Qt; long steps take progress and cancel callbacks.
 """
+
+from skitter.core.matching import jigsaw, mosaic  # noqa: E402, F401  (registers the built-ins)

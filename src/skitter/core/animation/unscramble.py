@@ -114,7 +114,7 @@ class UnscrambleChoreography(Choreography):
              "duration.)",
     )  # fmt: skip
     wind_down = FloatParam(
-        0.3, "Wind-down", min=0.0, max=0.5, step=0.05, suffix=" × duration",
+        0.0, "Wind-down", min=0.0, max=0.5, step=0.05, suffix=" × duration",
         help="Batches shrink over this last share of the duration, so the last few "
              "swaps happen one by one (0: batches alike to the end).",
     )  # fmt: skip

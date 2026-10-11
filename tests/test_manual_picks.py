@@ -19,8 +19,8 @@ from skitter.core.matching.edit import (
 )
 from skitter.core.matching.index import CandidateSet, exact_top, rerank
 from skitter.core.matching.matcher import Matcher
+from skitter.core.matching.mosaic import MosaicMethod
 from skitter.core.matching.quality import evaluate
-from skitter.core.matching.settings import MatchSettings
 from skitter.core.slicing import MosaicLayout, RegionSet, SliceContext
 from skitter.core.slicing.operations import GridSlicer
 from skitter.core.tiles.descriptors import DIM
@@ -57,7 +57,7 @@ def make_ctx(columns=12):
 def matched(library):
     ctx = make_ctx()
     regions = GridSlicer().apply(ctx.canvas(), ctx)
-    settings = MatchSettings(tint="subtle", max_uses=3, min_spacing=2.0, refine_seconds=0.2,
+    settings = MosaicMethod(tint="subtle", max_uses=3, min_spacing=2.0, refine_seconds=0.2,
                              mirror=True)  # fmt: skip
     return ctx, Matcher(library).run(regions, ctx, settings)
 

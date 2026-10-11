@@ -43,6 +43,7 @@ class MosaicScene:
     error: np.ndarray  # (N,) ΔE of the region against the image (nan: unknown)
     canvas: tuple[float, float]  # (width, height) of the image frame
     tile_size: tuple[float, float]  # base tile (width, height)
+    picture: bool = False  # tiles are pieces of the picture (see picture_uv), not photos
 
     @classmethod
     def from_result(cls, result: MatchResult, ctx: SliceContext) -> "MosaicScene":
@@ -70,6 +71,7 @@ class MosaicScene:
             error=np.asarray(error, dtype=np.float32),
             canvas=(float(ctx.width), float(ctx.height)),
             tile_size=tuple(float(v) for v in ctx.tile_size),
+            picture=bool(result.picture),
         )
 
     def __len__(self) -> int:
@@ -107,6 +109,23 @@ class MosaicScene:
         x0, y0 = corners.min(axis=0)
         x1, y1 = corners.max(axis=0)
         return (float(x0), float(y0), float(x1), float(y1))
+
+    def picture_uv(self) -> tuple[np.ndarray, np.ndarray]:
+        """((N, 4) uv, (N, 2) skew): where each piece of the picture lies on it, as
+        fractions of the picture (the canvas), for sprites (sprites.INSTANCE_DTYPE):
+        across a piece, u = u0 + s (u1 - u0) + t skew_u, v = v0 + t (v1 - v0) + s skew_v
+        for s, t in [0, 1] from its top-left corner. Pieces are at home in the scene,
+        so this is their own footprint, turned with them."""
+        w, h = self.size[:, 0], self.size[:, 1]
+        c, s = np.cos(self.rotation), np.sin(self.rotation)
+        top_left = self.corners[:, 0]
+        cw, ch = self.canvas
+        uv = np.column_stack([
+            top_left[:, 0] / cw, top_left[:, 1] / ch,
+            (top_left[:, 0] + w * c) / cw, (top_left[:, 1] + h * c) / ch,
+        ])  # fmt: skip
+        skew = np.column_stack([-h * s / cw, w * s / ch])
+        return uv.astype(np.float32), skew.astype(np.float32)
 
     # Attributes to order and group tiles by
 

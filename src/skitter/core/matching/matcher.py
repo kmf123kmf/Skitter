@@ -1,10 +1,12 @@
-"""The matching pipeline: regions + tile library + settings -> a mosaic.
+"""Matching: regions + tile library + a method (and its settings) -> a mosaic.
 
-See the package docstring for the steps; run.py does them (MatchRun, one
-method per phase) and result.py has what comes out. `Matcher` keeps candidate sets and
-search indexes between runs (keyed by library version and settings), so
-changing reuse rules or tint reuses them; changing the crop settings or the
-library rebuilds only what depends on them.
+`Matcher.run` runs a matching method (method.py). The rest of this
+docstring is about the Mosaic method's pipeline: see the package docstring
+for its steps; run.py does them (MatchRun, one method per phase) and
+result.py has what comes out. `Matcher` keeps candidate sets and search
+indexes between runs (keyed by library version and settings), so changing
+reuse rules or tint reuses them; changing the crop settings or the library
+rebuilds only what depends on them.
 
 Detail levels: an index ranks with fixed weights, but regions too small for
 some structure blocks (or hidden where they lie) leave them out of their
@@ -55,11 +57,13 @@ effort 1024, 300,000 photos: 512 regions +47%, 1,024 +16%, 2,048 +9%,
 """
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from skitter.core.matching.candidates import Pins
 from skitter.core.matching.index import CandidateSet, SearchIndex, build_candidates
+from skitter.core.matching.method import MatchMethod, Reporter
 from skitter.core.matching.result import (
     MatchCancelled,
     MatchPreview,
@@ -68,10 +72,11 @@ from skitter.core.matching.result import (
     Progress,
     RegretStats,
 )
-from skitter.core.matching.run import MatchRun, Reporter
-from skitter.core.matching.settings import MatchSettings
 from skitter.core.slicing import RegionSet, SliceContext
 from skitter.core.tiles.library import TileLibrary
+
+if TYPE_CHECKING:
+    from skitter.core.matching.mosaic import MosaicMethod
 
 __all__ = [
     "MatchCancelled",
@@ -87,7 +92,10 @@ TINT_REBUILD = 0.15  # rebuild an index when the tint moves this far from its re
 
 
 class Matcher:
-    def __init__(self, library: TileLibrary):
+    """Runs matching methods against a library (None: methods that need none), keeping
+    what Mosaic runs can share between runs."""
+
+    def __init__(self, library: TileLibrary | None):
         self.library = library
         # Candidates of every tile described so far, per (version, aspect, crops, mirror):
         # leaving folders out and back in describes nothing again.
@@ -96,7 +104,7 @@ class Matcher:
         self._indexes: dict[tuple, SearchIndex] = {}
 
     def candidates(
-        self, aspect: float, settings: MatchSettings, progress=lambda message, fraction: None
+        self, aspect: float, settings: "MosaicMethod", progress=lambda message, fraction: None
     ) -> tuple[tuple, CandidateSet]:
         library = self.library
         shape = (round(float(aspect), 4), settings.crops, settings.mirror)
@@ -118,7 +126,7 @@ class Matcher:
         return key, self._candidates[key]
 
     def index(
-        self, key: tuple, cands: CandidateSet, settings: MatchSettings,
+        self, key: tuple, cands: CandidateSet, settings: "MosaicMethod",
         progress=lambda message, fraction: None, weights=None,
     ) -> SearchIndex:  # fmt: skip
         """The search index over cands at the settings' weights (or the given ones, for
@@ -136,22 +144,17 @@ class Matcher:
         self,
         regions: RegionSet,
         ctx: SliceContext,
-        settings: MatchSettings,
+        method: MatchMethod,
         progress: Progress = lambda message, fraction: None,
         cancelled: Callable[[], bool] = lambda: False,
         pins: Pins | None = None,
         preview: Callable[[MatchPreview], None] | None = None,
         detail: Progress | None = None,
     ) -> MatchResult:
-        """Match tiles to regions: progress(message, fraction) at each step, detail(...)
-        within long steps, preview(MatchPreview) whenever there is something to show;
-        cancelled() stops it (MatchCancelled). Pins are kept in place."""
-        run = MatchRun(self, regions, ctx, settings, pins,
-                       Reporter(progress, cancelled, detail, preview))  # fmt: skip
-        run.analyze()
-        run.search()
-        run.pin()
-        run.assign()
-        run.refine()
-        run.adapt()
-        return run.result()
+        """Match with method (its settings): progress(message, fraction) at each step,
+        detail(...) within long steps, preview(MatchPreview) whenever there is something
+        to show; cancelled() stops it (MatchCancelled). Pins are kept in place."""
+        if method.needs_library and self.library is None:
+            raise ValueError(f"{method.name} needs a tile library")
+        report = Reporter(progress, cancelled, detail, preview)
+        return method.match(self, regions, ctx, pins, report)

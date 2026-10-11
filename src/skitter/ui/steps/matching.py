@@ -15,7 +15,7 @@ when matching again.
 """
 
 import numpy as np
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -146,15 +146,46 @@ class MatchingStep(StepPage):
 
     def _on_project_replaced(self) -> None:
         self.edit.set_editing(False)
-        self.form.set_target(self.session.project.match_settings)
+        self._show_methods()
 
     def _build_settings_group(self) -> QGroupBox:
+        self.method_box = QComboBox()
+        self.method_box.currentIndexChanged.connect(self._on_method)
+        self.method_description = muted(QLabel())
+        self.method_description.setWordWrap(True)
         self.form = ParamForm()
-        self.form.set_target(self.session.project.match_settings)
         self.form.changed.connect(lambda _: self.session.match_settings_edited())
         group = QGroupBox("Settings")
-        QVBoxLayout(group).addWidget(self.form)
+        layout = QVBoxLayout(group)
+        top = QFormLayout()
+        top.addRow("Method:", self.method_box)
+        layout.addLayout(top)
+        layout.addWidget(self.method_description)
+        layout.addWidget(self.form)
+        self._show_methods()
         return group
+
+    def _show_methods(self) -> None:
+        """The project's matching methods, and the chosen one's settings."""
+        project, box = self.session.project, self.method_box
+        box.blockSignals(True)
+        box.clear()
+        for method in project.match_methods.values():
+            box.addItem(method.name, method.id)
+            box.setItemData(box.count() - 1, method.description, Qt.ItemDataRole.ToolTipRole)
+        box.setCurrentIndex(max(box.findData(project.match_method_id), 0))
+        box.blockSignals(False)
+        self._show_method()
+
+    def _show_method(self) -> None:
+        method = self.session.project.match_method
+        self.method_description.setText(method.description)
+        self.form.set_target(method)
+
+    def _on_method(self) -> None:
+        self.session.project.match_method_id = self.method_box.currentData()
+        self._show_method()
+        self.session.match_settings_edited()
 
     def _build_result_group(self) -> QGroupBox:
         self._labels: dict[str, QLabel] = {}
@@ -350,13 +381,15 @@ class MatchingStep(StepPage):
         self.cancel_button.setEnabled(matching)
         self.progress.setVisible(matching)
         self.form.setEnabled(not matching)
+        self.method_box.setEnabled(not matching)
         self._error.setText(session.match_error or "")
         self._error.setVisible(bool(session.match_error))
         if not matching:
             if not session.can_match:
                 self.status.setText(
-                    "Slice the image and build a tile library first."
-                    if not session.library_ready
+                    f"{session.project.match_method.name} needs a tile library: build one on "
+                    "the Tiles tab, or choose a method that needs none."
+                    if session.project.match_method.needs_library and not session.library_ready
                     else "No regions to match."
                 )
             elif session.project.matches is None:
@@ -455,6 +488,13 @@ class MatchingStep(StepPage):
                 label.setText("—")
             return
         q, stats = result.quality, result.stats
+        if result.picture:  # pieces of the picture: nothing matched, nothing to score
+            for label in labels.values():
+                label.setText("—")
+                label.setStyleSheet("")
+            labels["tiles"].setText(f"{stats['placed']:,} pieces of the picture")
+            labels["time"].setText(f"{sum(stats['timings'].values()):.1f} s")
+            return
         labels["score"].setText(f"ΔE {q.score:.1f}")
         labels["scales"].setText(" / ".join(f"{v:.1f}" for v in q.by_scale.values()))
         labels["ssim"].setText(f"{q.ssim:.2f}")
@@ -477,13 +517,17 @@ class MatchingStep(StepPage):
 
     def _on_hover(self, x: float, y: float) -> None:
         library = self.session.library
-        if self._shown is None or library is None:
+        if self._shown is None or (library is None and not self._shown.picture):
             return
         result = self._shown.result
         index = result.regions.hit_test(x, y)
         self.edit.hover(index)
         if index < 0 or result.tile[index] < 0:
             self._hover.setText("—")
+            return
+        if result.picture:
+            self._hover.setText(f"Piece {index + 1:,} of the picture\n")
+            self._hover.setToolTip("")
             return
         path = library.paths([result.tile[index]])[0]
         error = result.quality.region_error[index]

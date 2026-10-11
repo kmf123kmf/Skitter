@@ -1,13 +1,25 @@
-"""Matching settings, declared as Params so the UI form is generated."""
+"""The Mosaic method: library photos matched to the picture, region by region.
 
-from skitter.core.slicing.params import BoolParam, ChoiceParam, Configurable, FloatParam, IntParam
+The pipeline is in run.py (see matcher.py for its steps); its settings are
+declared here as Params, so the UI form is generated.
+"""
+
+from skitter.core.matching.method import MatchMethod, register_method
+from skitter.core.matching.run import MatchRun
+from skitter.core.slicing.params import BoolParam, ChoiceParam, FloatParam, IntParam
 from skitter.core.tiles.descriptors import dim_weights
 
 TINT_PRESETS = {"none": 0.0, "subtle": 0.2}
 MAX_TINT = 0.6
 
 
-class MatchSettings(Configurable):
+@register_method
+class MosaicMethod(MatchMethod):
+    id = "mosaic"
+    name = "Mosaic"
+    description = ("A photo mosaic: every region shows the library photo (or a crop of one) "
+                   "that best matches the picture there.")  # fmt: skip
+
     tint = ChoiceParam(
         "subtle", "Tinting",
         choices=[("none", "None (purist)"), ("subtle", "Subtle"), ("custom", "Custom")],
@@ -75,3 +87,13 @@ class MatchSettings(Configurable):
 
     def weights(self):
         return dim_weights(self.color_weight, self.structure_weight, self.texture_weight)
+
+    def match(self, matcher, regions, ctx, pins, report):
+        run = MatchRun(matcher, regions, ctx, self, pins, report)
+        run.analyze()
+        run.search()
+        run.pin()
+        run.assign()
+        run.refine()
+        run.adapt()
+        return run.result()

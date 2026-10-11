@@ -19,7 +19,7 @@ from skitter.core.animation.video import VideoPlan, VideoSettings
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import ColorParam
 from skitter.ui.jobs import JobCancelled
-from skitter.ui.render.tile_textures import DetailRequest, scene_instances
+from skitter.ui.render.tile_textures import DetailRequest, PictureRequest
 from skitter.ui.render.video_renderer import VideoRenderer
 
 os.environ.setdefault("SVT_LOG", "1")  # AV1 encoder: errors only, not its banner
@@ -36,7 +36,7 @@ class VideoJob:
     background: str  # "#rrggbb" or "transparent"
     look: AnimationLook  # a copy: camera height, light and shadows
     plan: VideoPlan
-    request: DetailRequest  # tile crops at the plan's scale
+    request: DetailRequest | PictureRequest  # tile crops at the plan's scale, or the picture
 
 
 @dataclass(frozen=True)
@@ -65,11 +65,11 @@ def run_video_job(job: VideoJob, progress, cancelled) -> VideoReport:
     def report_textures(message, fraction):
         progress(message, None if fraction is None else 0.08 * fraction)
 
-    detail = job.request.build(report_textures, cancelled)
-    layer, uv = detail.atlas.locate(job.request.image, job.scene.mirrored)
+    pages, instances, detail_scale, failed = job.request.content(job.scene, report_textures,
+                                                                 cancelled)  # fmt: skip
     progress("Starting the renderer…", 0.08)
     renderer = VideoRenderer(
-        plan, detail.atlas.pages, scene_instances(job.scene, layer, uv),
+        plan, pages, instances,
         ColorParam.rgb(job.background) if job.background != ColorParam.TRANSPARENT else None,
         settings.supersampling, TableCamera.for_scene(job.scene, job.look),
     )  # fmt: skip
@@ -115,8 +115,8 @@ def run_video_job(job: VideoJob, progress, cancelled) -> VideoReport:
         seconds=plan.seconds,
         bytes=_disk_size(job.path),
         elapsed=time.perf_counter() - start,
-        detail_scale=detail.scale,
-        failed=detail.failed,
+        detail_scale=detail_scale,
+        failed=failed,
     )
 
 

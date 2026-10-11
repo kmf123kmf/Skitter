@@ -3,7 +3,7 @@
 Per region a project keeps the photo shown (by file path, so the mosaic
 survives library updates that renumber or add photos), its crop window, its
 mirroring and whether it was picked by hand, plus the tint targets, the
-costs and the run's settings and statistics.
+costs and the run's method (with its settings) and statistics.
 
 Candidate lists for picking by hand are not kept: their indices only mean
 something to the run that made them. A restored result has none; matching
@@ -12,6 +12,7 @@ again with the picks kept (Pins) rebuilds them.
 `restore` finds each photo by path in the current library (regions whose
 photo is gone get no tile and are counted), describes the crops again from
 the library thumbnails (as matching did), and evaluates their quality anew.
+A method that shows no photos rebuilds its result instead (MatchMethod.restore).
 """
 
 from dataclasses import asdict, dataclass, field
@@ -19,9 +20,9 @@ from dataclasses import asdict, dataclass, field
 import numpy as np
 
 from skitter.core.matching.edit import usage_stats
+from skitter.core.matching.method import DEFAULT_METHOD, MatchMethod, get_method
 from skitter.core.matching.quality import evaluate
 from skitter.core.matching.result import MatchResult, RegretStats
-from skitter.core.matching.settings import MatchSettings
 from skitter.core.slicing import RegionSet, SliceContext
 from skitter.core.tiles.descriptors import DIM, MEAN, cell_colors, mirror, tile_descriptors
 from skitter.core.tiles.library import TileLibrary
@@ -39,7 +40,7 @@ class SavedMosaic:
     cost: np.ndarray  # (R,) float32 matching cost
     tint_target: np.ndarray  # (R, 3) float32 OKLab color each tile is tinted toward
     tint: float
-    settings: MatchSettings  # the settings it was matched with
+    settings: MatchMethod  # the method it was matched with (its settings)
     library_version: int  # of the library it was matched against
     regret: list[RegretStats] = field(default_factory=list)
     stats: dict = field(default_factory=dict)
@@ -53,6 +54,7 @@ class SavedMosaic:
         return {
             "paths": self.paths,
             "tint": self.tint,
+            "method": self.settings.id,
             "settings": self.settings.values(),
             "library_version": self.library_version,
             "regret": [asdict(r) for r in self.regret],
@@ -76,7 +78,7 @@ class SavedMosaic:
             cost=np.asarray(arrays["cost"], np.float32),
             tint_target=np.asarray(arrays["tint_target"], np.float32),
             tint=float(meta["tint"]),
-            settings=MatchSettings.from_values(
+            settings=get_method(meta.get("method", DEFAULT_METHOD)).from_values(
                 meta.get("settings", {}), problems, "Matched with"
             ),  # fmt: skip
             library_version=int(meta.get("library_version", -1)),
@@ -85,15 +87,15 @@ class SavedMosaic:
         )
 
 
-def saved_mosaic(result: MatchResult, library: TileLibrary) -> SavedMosaic:
+def saved_mosaic(result: MatchResult, library: TileLibrary | None) -> SavedMosaic:
     """What a project file keeps of a result matched against library."""
-    placed = result.tile >= 0
+    placed = (result.tile >= 0) & (not result.picture)  # pieces of the picture: no photos
     slots, photo = np.unique(result.tile[placed], return_inverse=True)
     index = np.full(len(result.tile), -1, np.int32)
     index[placed] = photo
     manual = result.manual if result.manual is not None else np.zeros(len(result.tile), bool)
     return SavedMosaic(
-        paths=library.paths(slots),
+        paths=library.paths(slots) if len(slots) else [],
         photo=index,
         rect=np.asarray(result.rect, np.float32),
         mirrored=np.asarray(result.mirrored, bool),
@@ -101,18 +103,21 @@ def saved_mosaic(result: MatchResult, library: TileLibrary) -> SavedMosaic:
         cost=np.asarray(result.cost, np.float32),
         tint_target=np.asarray(result.tint_target, np.float32),
         tint=float(result.tint),
-        settings=(result.settings or MatchSettings()).copy(),
-        library_version=library.version,
+        settings=(result.settings or get_method(DEFAULT_METHOD)()).copy(),
+        library_version=library.version if library is not None else -1,
         regret=list(result.regret),
         stats=dict(result.stats),
     )
 
 
 def restore(
-    saved: SavedMosaic, library: TileLibrary, regions: RegionSet, ctx: SliceContext
+    saved: SavedMosaic, library: TileLibrary | None, regions: RegionSet, ctx: SliceContext
 ) -> tuple[MatchResult, int]:
     """(result, missing): the saved mosaic over regions, its photos found by path in
     library; missing counts regions whose photo isn't there (they get no tile)."""
+    rebuilt = saved.settings.restore(saved, library, regions, ctx)
+    if rebuilt is not None:
+        return rebuilt
     if len(saved.photo) != len(regions):
         raise ValueError(f"the mosaic has {len(saved.photo)} regions, the plan {len(regions)}")
     ids = library.readable_ids  # a photo in a folder left out still shows

@@ -153,3 +153,65 @@ def visible_share(center, size, rotation, max_pixels: int = 4_000_000) -> np.nda
     _paint(ids, np.arange(n, dtype=np.int64), center, size, rotation, x0, y0, px, painted)
     shown = np.bincount(ids[ids >= 0], minlength=n)
     return np.where(painted > 0, shown / np.maximum(painted, 1), 1.0)
+
+
+def may_show(center, size, rotation, max_pixels: int = MAX_RASTER_PIXELS) -> np.ndarray:
+    """(N,) bool: rectangles (painted bottom to top, array order) that may show anywhere.
+
+    Conservative where visible_share is not: a raster cell counts as covered by a
+    rectangle only if it lies wholly inside it, and a rectangle may show if any cell it
+    touches isn't covered by one above. So a rectangle that shows even a sliver
+    thinner than a cell is never called hidden (some wholly hidden ones may be kept,
+    where the ones covering them meet).
+    """
+    center = np.ascontiguousarray(center, np.float64)
+    size = np.ascontiguousarray(size, np.float64)
+    rotation = np.ascontiguousarray(rotation, np.float64)
+    n = len(center)
+    if not n:
+        return np.zeros(0, bool)
+    c, s = np.abs(np.cos(rotation)), np.abs(np.sin(rotation))
+    ex = c * size[:, 0] / 2 + s * size[:, 1] / 2
+    ey = s * size[:, 0] / 2 + c * size[:, 1] / 2
+    x0, y0 = float((center[:, 0] - ex).min()), float((center[:, 1] - ey).min())
+    x1, y1 = float((center[:, 0] + ex).max()), float((center[:, 1] + ey).max())
+    area = max(x1 - x0, 1e-9) * max(y1 - y0, 1e-9)
+    px = max(float(size.min()) / 16, math.sqrt(area / max_pixels), 1e-9)
+    x0, y0 = x0 - px, y0 - px  # a cell of room all around
+    shape = (math.ceil((y1 - y0) / px) + 2, math.ceil((x1 - x0) / px) + 2)
+    cover = np.full(shape, -1, np.int32)
+    shows = np.zeros(n, np.bool_)
+    _may_show(cover, center, size, rotation, x0, y0, px, shows)
+    return shows
+
+
+@njit(cache=True, nogil=True)
+def _may_show(cover, centers, sizes, rotations, x0, y0, px, shows):
+    height, width = cover.shape
+    half = px / 2
+    for phase in range(2):  # 0: the topmost rectangle wholly over each cell; 1: who shows
+        for r in range(len(centers)):
+            cx, cy = centers[r, 0], centers[r, 1]
+            hw, hh = sizes[r, 0] / 2, sizes[r, 1] / 2
+            c, s = math.cos(rotations[r]), math.sin(rotations[r])
+            ex = abs(c) * hw + abs(s) * hh
+            ey = abs(s) * hw + abs(c) * hh
+            m = half * (abs(c) + abs(s))  # a cell's half extent along the rectangle's axes
+            i0 = max(0, int(math.floor((cx - ex - x0) / px)) - 1)
+            i1 = min(width, int(math.ceil((cx + ex - x0) / px)) + 1)
+            j0 = max(0, int(math.floor((cy - ey - y0) / px)) - 1)
+            j1 = min(height, int(math.ceil((cy + ey - y0) / px)) + 1)
+            for j in range(j0, j1):
+                if phase == 1 and shows[r]:
+                    break
+                dy = y0 + (j + 0.5) * px - cy
+                for i in range(i0, i1):
+                    dx = x0 + (i + 0.5) * px - cx
+                    lx = abs(c * dx + s * dy)
+                    ly = abs(-s * dx + c * dy)
+                    if phase == 0:
+                        if lx + m <= hw and ly + m <= hh:  # the whole cell is inside
+                            cover[j, i] = r  # rectangles go bottom to top: the topmost wins
+                    elif lx - m <= hw and ly - m <= hh and cover[j, i] <= r:  # touched, not
+                        shows[r] = True  # wholly covered from above
+                        break

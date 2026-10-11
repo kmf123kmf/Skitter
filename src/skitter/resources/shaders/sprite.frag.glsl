@@ -92,6 +92,12 @@ void main() {
         color = mix(color, vec4(v_tint.rgb, 1.0), band(inside_px, u_outline_px) * u_line_alpha);
     } else {
         color = texture(u_textures, vec3(v_uv, v_layer));
+        // Past the texture's edge there is nothing (a piece of the picture hanging
+        // over its border). Texture rects of photos lie inside, but a pixel on a
+        // sprite's edge may sample a little past its rect (multisampling shades at the
+        // pixel center): a pixel's worth of slack keeps those.
+        vec2 slack = fwidth(v_uv);
+        if (any(lessThan(v_uv, -slack)) || any(greaterThan(v_uv, 1.0 + slack))) color.a = 0.0;
         color.rgb = oklab_shift(color.rgb, v_offset);
         color.rgb = mix(color.rgb, v_tint.rgb, v_tint.a);
     }

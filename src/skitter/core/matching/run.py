@@ -1,16 +1,16 @@
-"""One matching run, phase by phase (Matcher.run drives it; see matcher.py).
+"""One Mosaic matching run, phase by phase (MosaicMethod.match drives it; see matcher.py).
 
 `MatchRun` holds a run's state (targets, candidates, the assignment) and
 does one phase per method: analyze, search, pin, assign (with widening),
-refine, adapt, result. `Reporter` is how a run talks to the outside:
-progress steps (each checks for cancelling), progress within a step, and
-previews of the run so far.
+refine, adapt, result. Its `Reporter` (method.py) is how it talks to the
+outside: progress steps (each checks for cancelling), progress within a
+step, and previews of the run so far.
 """
 
 import math
 import time
-from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import faiss
 import numpy as np
@@ -25,17 +25,10 @@ from skitter.core.matching.index import (
     region_weights,
     rerank,
 )
+from skitter.core.matching.method import Reporter
 from skitter.core.matching.quality import evaluate, target_raster
 from skitter.core.matching.raster import rasterize
-from skitter.core.matching.result import (
-    MatchCancelled,
-    MatchPreview,
-    MatchResult,
-    PreviewStage,
-    Progress,
-    RegretStats,
-)
-from skitter.core.matching.settings import MatchSettings
+from skitter.core.matching.result import MatchPreview, MatchResult, PreviewStage, RegretStats
 from skitter.core.matching.targets import (
     FULL_DETAIL,
     detail_levels,
@@ -45,6 +38,9 @@ from skitter.core.matching.targets import (
 from skitter.core.slicing import RegionSet, SliceContext
 from skitter.core.tiles.crops import aspect_classes
 from skitter.core.tiles.descriptors import MEAN, cell_colors
+
+if TYPE_CHECKING:
+    from skitter.core.matching.mosaic import MosaicMethod
 
 REGRET_LIMIT = 0.03  # acceptable mean extra cost of approximate search, relative
 REGRET_SAMPLES = 128
@@ -56,59 +52,6 @@ MIN_BATCH, FIRST_BATCH, MAX_BATCH = 2048, 2048, 65_536  # regions per search bat
 WIDEN_SLACK = 2.0  # widening: photos searched per photo a group of regions needs
 WIDEN_MAX = 4096  # widening: deepest search for one group
 UNLIMITED_USES = 8  # widening: photos a group may reuse this often when uses are unlimited
-
-
-class Reporter:
-    """Progress, cancelling and previews for one run."""
-
-    def __init__(
-        self,
-        progress: Progress,
-        cancelled: Callable[[], bool],
-        detail: Progress | None,
-        preview: Callable[[MatchPreview], None] | None,
-    ):
-        self._progress, self._cancelled = progress, cancelled
-        self._detail, self._preview = detail, preview
-        self.timings: dict[str, float] = {}
-        self._clock = time.perf_counter()
-
-    @property
-    def previewing(self) -> bool:
-        return self._preview is not None
-
-    def step(self, message: str, fraction: float | None = None, timing: str | None = None):
-        """A new step; the time since the last one is added to timings[timing]."""
-        self.check()
-        now = time.perf_counter()
-        if timing:
-            self.timings[timing] = self.timings.get(timing, 0.0) + now - self._clock
-        self._clock = now
-        self._progress(message, fraction)
-
-    def detail(self, message: str, fraction: float) -> None:
-        """Progress within a long step."""
-        self.check()
-        if self._detail is not None:
-            self._detail(message, fraction)
-
-    def counter(self, message: str, total: int) -> Callable:
-        """A found(rows) callback reporting how many of total regions are done."""
-        done = [0]
-
-        def found(rows) -> None:
-            done[0] += len(rows)
-            self.detail(f"{message}: {done[0]:,} of {total:,} regions", done[0] / max(total, 1))
-
-        return found
-
-    def preview(self, item: MatchPreview) -> None:
-        if self._preview is not None:
-            self._preview(item)
-
-    def check(self) -> None:
-        if self._cancelled():
-            raise MatchCancelled()
 
 
 def search_batches(count: int):
@@ -154,7 +97,7 @@ class Search:
 class MatchRun:
     """One run of the pipeline; call the phases in order (see Matcher.run)."""
 
-    def __init__(self, matcher, regions: RegionSet, ctx: SliceContext, settings: MatchSettings,
+    def __init__(self, matcher, regions: RegionSet, ctx: SliceContext, settings: "MosaicMethod",
                  pins: Pins | None, report: Reporter):  # fmt: skip
         self.matcher, self.library = matcher, matcher.library
         self.regions, self.ctx, self.settings, self.pins = regions, ctx, settings, pins

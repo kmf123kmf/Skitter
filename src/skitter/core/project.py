@@ -13,7 +13,7 @@ from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
 from skitter.core.edits import Edit
 from skitter.core.matching.matcher import MatchResult
-from skitter.core.matching.settings import MatchSettings
+from skitter.core.matching.method import DEFAULT_METHOD, MatchMethod, method_types
 from skitter.core.slicing import MosaicLayout, RegionSet, SlicingPlan
 
 
@@ -31,7 +31,11 @@ class Project:
     slicing_plan: SlicingPlan = field(default_factory=SlicingPlan.default)
     regions: RegionSet | None = None  # slicing_plan evaluated on source_final, mosaic units
 
-    match_settings: MatchSettings = field(default_factory=MatchSettings)
+    # Matching step: one settings object per matching method, and the one chosen.
+    match_methods: dict[str, MatchMethod] = field(
+        default_factory=lambda: {cls.id: cls() for cls in method_types()}
+    )
+    match_method_id: str = DEFAULT_METHOD
     matches: MatchResult | None = None  # a tile for each region (None after re-slicing)
 
     export_settings: ExportSettings = field(default_factory=ExportSettings)
@@ -49,6 +53,11 @@ class Project:
     camera_track: CameraTrack = field(default_factory=CameraTrack)  # keyframes (keyframes.py)
     animation_look: AnimationLook = field(default_factory=AnimationLook)
     video_settings: VideoSettings = field(default_factory=VideoSettings)
+
+    @property
+    def match_method(self) -> MatchMethod:
+        """The chosen matching method (its settings)."""
+        return self.match_methods[self.match_method_id]
 
     def phase_choreography(self, phase: str) -> Choreography | None:
         """The choreography chosen for a phase (None: the phase is left out)."""

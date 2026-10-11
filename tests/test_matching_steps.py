@@ -79,9 +79,12 @@ def test_tiles_step_builds_library_in_background(sliced, photos):
     window.next_button.click()  # to Tiles
     step = tiles_step(window)
     assert window.tabs.currentWidget() is step
+    # Matching may follow without a library (some methods need none), not while it updates.
+    assert step.is_complete() and window.next_button.isEnabled()
+    step.add_folder(photos)
+    step.update_library()
     assert not step.is_complete() and not window.next_button.isEnabled()
-
-    build_library(window, photos)
+    window.session.wait_for_job()
     assert window.session.busy is None
     assert step.is_complete() and window.next_button.isEnabled()
     assert step._tiles.text() == "40" and step.folders.topLevelItemCount() == 1
@@ -118,7 +121,7 @@ def test_tiles_step_folder_tree_leaves_folders_out_and_relinks(sliced, tmp_path,
     root.setExpanded(True)
     assert [root.child(i).text(0) for i in range(2)] == ["Birds", "cats"]  # as the disk spells
 
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
     session.start_matching()
     session.wait_for_job()
     assert session.mosaic_is_valid and session.matching_is_current
@@ -272,7 +275,7 @@ def test_matching_step_runs_and_shows_mosaic(sliced, photos, qapp):
     assert window.tabs.currentWidget() is step
     assert step.run_button.isEnabled() and not step.is_complete()
 
-    settings = window.session.project.match_settings
+    settings = window.session.project.match_method
     settings.update(refine_seconds=0.5, adaptive_rounds=1)
     step.run_matching()
     assert window.session.busy == "matching" and not step.run_button.isEnabled()
@@ -330,7 +333,7 @@ def test_matching_shows_the_run_in_progress(sliced, photos, qapp):
     window.show()
     window.tabs.setCurrentWidget(matching_step(window))
     session, step = window.session, matching_step(window)
-    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1, max_uses=1)
+    session.project.match_method.update(refine_seconds=0.5, adaptive_rounds=1, max_uses=1)
     step.run_matching()
     session.wait_for_job()
     old = step._tile_layer
@@ -391,7 +394,7 @@ def test_indexing_shows_its_own_progress(sliced, photos, qapp):
     session, step = window.session, matching_step(window)
     window.tabs.setCurrentWidget(step)
     assert not step.sub_progress.isVisible() and not step.sub_status.isVisible()
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
 
     release, held = threading.Event(), threading.Event()
 
@@ -434,7 +437,7 @@ def test_run_frames_show_target_colors_then_tiles(sliced, photos):
     window = sliced
     build_library(window, photos)
     session = window.session
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0, max_uses=1)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0, max_uses=1)
     previews = []
     session.matching_preview.connect(previews.append)
     session.start_matching()
@@ -510,7 +513,7 @@ def test_reslicing_clears_the_mosaic(sliced, photos):
     build_library(window, photos)
     session = window.session
     step = matching_step(window)
-    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.project.match_method.update(refine_seconds=0.5, adaptive_rounds=1)
     step.run_matching()
     session.wait_for_job()
     assert session.project.matches is not None and step._tile_layer is not None
@@ -529,7 +532,7 @@ def test_reslicing_with_fewer_columns_keeps_the_canvas(sliced, photos):
     build_library(window, photos)
     session = window.session
     step = matching_step(window)
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
     step.run_matching()
     session.wait_for_job()
     old = session.mosaic_size()
@@ -549,7 +552,7 @@ def test_export_image_from_the_mosaic_menu(sliced, photos, tmp_path):
     button = matching_step(window).export_button
     assert not window.export_action.isEnabled() and not button.isEnabled()
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.project.match_method.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
     session.wait_for_job()
     assert window.export_action.isEnabled() and button.isEnabled()
@@ -616,7 +619,7 @@ def test_export_needs_a_valid_mosaic(sliced, photos, tmp_path):
     window = sliced
     session = window.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.project.match_method.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
     session.wait_for_job()
     action = window.export_action
@@ -629,7 +632,7 @@ def test_export_needs_a_valid_mosaic(sliced, photos, tmp_path):
     assert action.isEnabled()
 
     # Settings changes leave a valid (if out of date) mosaic.
-    session.project.match_settings.update(max_uses=1)
+    session.project.match_method.update(max_uses=1)
     session.match_settings_edited()
     assert action.isEnabled() and not session.matching_is_current
 
@@ -660,7 +663,7 @@ def test_animate_tab_plays_the_scene(sliced, photos, qapp):
     assert not window.tabs.isTabEnabled(index) and "match tiles" in animate.transport.status.text()
     assert not animate.transport.play_action.isEnabled()  # nothing to play yet
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.project.match_method.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
     session.wait_for_job()
     assert window.tabs.isTabEnabled(index)
@@ -723,7 +726,7 @@ def test_export_animation_from_the_animate_tab(sliced, photos, tmp_path, qapp):
     window = sliced
     session = window.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.project.match_method.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
     session.wait_for_job()
     animate = window.step(AnimateStep)
@@ -811,7 +814,7 @@ def test_animate_tab_and_export_window_share_video_framing(sliced, photos):
     window = sliced
     session = window.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.project.match_method.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
     session.wait_for_job()
     animate = window.step(AnimateStep)
@@ -852,7 +855,7 @@ def test_back_from_animate_and_next_again(sliced, photos, qapp):
     window = sliced
     session = window.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.project.match_method.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
     session.wait_for_job()
     matching, animate = matching_step(window), window.step(AnimateStep)
@@ -929,6 +932,13 @@ def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):
     for build in ("sort", "unscramble"):
         animate.choreography_box.setCurrentIndex(animate.choreography_box.findData(build))
         assert overflowing_panels(window, qapp) == [], build
+    step = matching_step(window)  # the Jigsaw Puzzle method, with its result
+    window.tabs.setCurrentWidget(step)
+    step.method_box.setCurrentIndex(step.method_box.findData("jigsaw"))
+    step.run_matching()
+    window.session.wait_for_job()
+    assert window.session.project.matches.picture
+    assert overflowing_panels(window, qapp) == []
 
 
 def test_wheel_never_changes_an_unfocused_setting(sliced, photos, qapp):
@@ -947,14 +957,14 @@ def test_wheel_never_changes_an_unfocused_setting(sliced, photos, qapp):
     window = sliced
     session = window.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.5, adaptive_rounds=1)
+    session.project.match_method.update(refine_seconds=0.5, adaptive_rounds=1)
     session.start_matching()
     session.wait_for_job()
     step = matching_step(window)
     window.tabs.setCurrentWidget(step)
     window.show()
     qapp.processEvents()
-    settings = session.project.match_settings
+    settings = session.project.match_method
     # Scrolling over the panel's controls (as when scrolling the panel) changes nothing.
     for name in ("max_uses", "tint", "candidates", "crops"):
         before = getattr(settings, name)
@@ -986,7 +996,7 @@ def matched(window, photos, qapp):
     window.next_button.click()  # Tiles
     window.next_button.click()  # Matching
     step = matching_step(window)
-    window.session.project.match_settings.update(refine_seconds=0.3, adaptive_rounds=1)
+    window.session.project.match_method.update(refine_seconds=0.3, adaptive_rounds=1)
     step.run_matching()
     window.session.wait_for_job()
     window.session.textures.wait()
@@ -1343,7 +1353,7 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     window = sliced
     session = window.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
     session.start_matching()
     session.wait_for_job()
     window.show()
@@ -1401,7 +1411,7 @@ def test_animate_tab_chooses_a_choreography_and_holds_per_phase(fade, sliced, ph
 
     window, session = sliced, sliced.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
     session.start_matching()
     session.wait_for_job()
     animate = window.step(AnimateStep)
@@ -1458,7 +1468,7 @@ def test_keys_deselect_and_brackets_work_from_the_side_panel(sliced, photos, qap
 
     window, session = sliced, sliced.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
     session.start_matching()
     session.wait_for_job()
     window.show()
@@ -1542,7 +1552,7 @@ def test_ctrl_z_in_a_key_field_undoes_the_key_edit(sliced, photos, qapp):
 
     window, session = sliced, sliced.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
     session.start_matching()
     session.wait_for_job()
     window.show()
@@ -1573,7 +1583,7 @@ def test_transport_bar_steps_jumps_loops_and_changes_speed(sliced, photos, qapp)
     window = sliced
     session = window.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
     session.start_matching()
     session.wait_for_job()
     window.show()
@@ -1679,7 +1689,7 @@ def test_camera_keys_through_the_viewfinder(sliced, photos, qapp):
     window = sliced
     session = window.session
     build_library(window, photos)
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
     session.start_matching()
     session.wait_for_job()
     window.show()

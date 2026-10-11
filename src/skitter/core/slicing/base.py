@@ -163,6 +163,17 @@ class SliceContext:
             rgb = fill_hidden(rgb, self.visible)
         return np.ascontiguousarray(rgb)
 
+    @cached_property
+    def picture(self) -> np.ndarray:
+        """(H, W, 4) uint8 RGBA: the picture as shown, hidden pixels transparent (the mask
+        is solid) and their color filled in, so filtering never pulls in a stray color."""
+        alpha = np.full((self.source_height, self.source_width, 1), 255, np.uint8)
+        if self.visible is not None:
+            alpha[~self.visible] = 0
+        picture = np.concatenate([self.image, alpha], axis=2)
+        picture.setflags(write=False)
+        return picture
+
     @property
     def tile_size(self) -> tuple[float, float]:
         """Base tile (width, height) in mosaic units."""

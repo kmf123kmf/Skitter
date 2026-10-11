@@ -21,8 +21,8 @@ from skitter.core.matching.index import (
     train_ivf,
 )
 from skitter.core.matching.matcher import MatchCancelled, Matcher, PreviewStage
+from skitter.core.matching.mosaic import MosaicMethod
 from skitter.core.matching.quality import evaluate, target_raster
-from skitter.core.matching.settings import MatchSettings
 from skitter.core.slicing import MosaicLayout, RegionSet, SliceContext, mask_regions
 from skitter.core.slicing.operations import GridSlicer
 from skitter.core.tiles.descriptors import DIM, MEAN, dim_weights
@@ -162,7 +162,7 @@ def test_calibration_keeps_the_cheaper_effort_when_more_does_not_help(monkeypatc
     desc = rng.normal(0, 0.1, (64, DIM)).astype(np.float32)
     desc[:, 15:] = 0
     run = SimpleNamespace(
-        settings=MatchSettings(search_effort=4, candidates=8, crop_penalty=0.0),
+        settings=MosaicMethod(search_effort=4, candidates=8, crop_penalty=0.0),
         targets=SimpleNamespace(desc=desc),
         weights=region_weights(dim_weights(), coarse_mask(64), 0.0),
         report=SimpleNamespace(detail=lambda *a: None),
@@ -240,7 +240,7 @@ def test_index_building_reports_progress_and_can_stop(monkeypatch):
 def test_matcher_reports_indexing_and_cancels_within_it(library):
     ctx = flat_ctx(target_image(), columns=8, tile=20)
     regions = GridSlicer().apply(ctx.canvas(), ctx)
-    settings = MatchSettings(adaptive_rounds=0, refine_seconds=0.1)
+    settings = MosaicMethod(adaptive_rounds=0, refine_seconds=0.1)
     details = []
     Matcher(library).run(regions, ctx, settings, detail=lambda *report: details.append(report))
     assert details[0][0].startswith("Describing tile crops: 0 of")
@@ -273,7 +273,7 @@ def test_batched_search_matches_one_big_batch(monkeypatch, exact):
     big_desc[regs] = desc
     big_w = np.zeros((3000, DIM), np.float32)
     big_w[regs] = weights
-    settings = MatchSettings()
+    settings = MosaicMethod()
 
     one = batched_search(cands, index, regs, big_desc, big_w, settings, 20, 8)  # one batch
     monkeypatch.setattr(run_module, "FIRST_BATCH", 37)  # many small ones
@@ -355,12 +355,12 @@ def test_plain_areas_keep_the_reuse_rules(library):
     ctx = flat_ctx(image, columns=20, tile=10)
     regions = GridSlicer().apply(ctx.canvas(), ctx)
     assert len(regions) == 300 and len(library) * 3 >= len(regions)
-    settings = MatchSettings(max_uses=3, min_spacing=0.0, refine_seconds=5.0, adaptive_rounds=1)
+    settings = MosaicMethod(max_uses=3, min_spacing=0.0, refine_seconds=5.0, adaptive_rounds=1)
     result = Matcher(library).run(regions, ctx, settings)
     assert result.stats["rule_violations"] == 0 and result.stats["forced"] == 0
     assert np.bincount(result.tile).max() <= 3
     # Too few photos even so: the breaks spread instead of piling onto one photo.
-    strict = Matcher(library).run(regions, ctx, MatchSettings(max_uses=1, refine_seconds=5.0,
+    strict = Matcher(library).run(regions, ctx, MosaicMethod(max_uses=1, refine_seconds=5.0,
                                                               adaptive_rounds=1))  # fmt: skip
     assert strict.stats["forced"] == len(regions) - len(library)
     assert np.bincount(strict.tile).max() <= 3  # 300 regions over 122 photos
@@ -499,7 +499,7 @@ def test_matching_uses_only_folders_in_use_and_describes_tiles_once(tmp_path, mo
     monkeypatch.setattr(matcher_module, "build_candidates", counting)
     ctx = flat_ctx(target_image(), columns=8, tile=20)
     regions = GridSlicer().apply(ctx.canvas(), ctx)
-    settings = MatchSettings(tint="none", refine_seconds=0.0, adaptive_rounds=0)
+    settings = MosaicMethod(tint="none", refine_seconds=0.0, adaptive_rounds=0)
     matcher = Matcher(lib)
 
     lib.set_included(root / "cool", False)
@@ -526,7 +526,7 @@ def target_image():
 def test_matcher_end_to_end(library):
     ctx = flat_ctx(target_image(), columns=16, tile=20)  # 16 x 12 grid of 20 px tiles
     regions = GridSlicer().apply(ctx.canvas(), ctx)
-    settings = MatchSettings(tint="none", max_uses=4, min_spacing=2.0, refine_seconds=1.0)
+    settings = MosaicMethod(tint="none", max_uses=4, min_spacing=2.0, refine_seconds=1.0)
     result = Matcher(library).run(regions, ctx, settings)
 
     assert (result.tile >= 0).all() and set(result.tile) <= set(library.ids)
@@ -550,13 +550,13 @@ def test_matcher_end_to_end(library):
     # for forcing, and adaptive passes never keep holes (the score doesn't see them).
     small = flat_ctx(target_image(), columns=40, tile=20)  # 4 source px per tile
     small_result = Matcher(library).run(GridSlicer().apply(small.canvas(), small), small,
-                                        MatchSettings(refine_seconds=0.1))  # fmt: skip
+                                        MosaicMethod(refine_seconds=0.1))  # fmt: skip
     assert (small_result.tile >= 0).all() and len(small_result.regret) == 1
     assert small_result.stats["placed"] == small_result.stats["regions"] == 1200
     assert small_result.regret[0].extra_de < 1e-3  # exact search: no regret
 
     # Tinting toward each region's color can only bring the proxy closer.
-    tinted = Matcher(library).run(regions, ctx, MatchSettings(tint="custom", tint_strength=0.5,
+    tinted = Matcher(library).run(regions, ctx, MosaicMethod(tint="custom", tint_strength=0.5,
                                                               max_uses=4, min_spacing=2.0,
                                                               refine_seconds=1.0))  # fmt: skip
     assert tinted.quality.score < result.quality.score
@@ -575,7 +575,7 @@ def test_matcher_on_a_transparent_source_matches_only_the_picture(library):
     ctx = flat_ctx(image, columns=16, tile=20)
     regions = mask_regions(GridSlicer().apply(ctx.canvas(), ctx), ctx)
     assert len(regions) == 9 * 12  # columns from 140 units on
-    settings = MatchSettings(tint="none", max_uses=8, refine_seconds=0.5)
+    settings = MosaicMethod(tint="none", max_uses=8, refine_seconds=0.5)
     result = Matcher(library).run(regions, ctx, settings)
     assert (result.tile >= 0).all()
     edge = regions.center[:, 0] < 160
@@ -591,7 +591,7 @@ def test_matcher_previews_the_run_without_changing_it(library):
     ctx = flat_ctx(target_image(), columns=16, tile=20)
     regions = GridSlicer().apply(ctx.canvas(), ctx)
     # Fewer allowed uses than regions need: the first assignment leaves regions waiting.
-    settings = MatchSettings(tint="custom", tint_strength=0.3, max_uses=1, min_spacing=2.0,
+    settings = MosaicMethod(tint="custom", tint_strength=0.3, max_uses=1, min_spacing=2.0,
                              refine_seconds=5.0, adaptive_rounds=2)  # fmt: skip
     plain = Matcher(library).run(regions, ctx, settings)
     previews = []
@@ -645,13 +645,13 @@ def test_matcher_skips_hidden_regions_and_uses_structure(library):
     image[:, :30] = 255
     ctx = flat_ctx(image, columns=1, tile=60)
     regions = RegionSet.from_rects([0, 0], [0, 0], 60, 60, z=[0, 1])  # one hides the other
-    result = Matcher(library).run(regions, ctx, MatchSettings(tint="none", adaptive_rounds=0))
+    result = Matcher(library).run(regions, ctx, MosaicMethod(tint="none", adaptive_rounds=0))
     assert result.tile[0] == -1 and result.stats["hidden"] == 1
     path = library.paths([result.tile[1]])[0]
     assert path.endswith("split.png") and not result.mirrored[1]
 
 
 def test_matcher_settings_round_trip():
-    s = MatchSettings(tint="custom", tint_strength=0.4)
-    assert s.tint_value == 0.4 and MatchSettings().tint_value == 0.2
+    s = MosaicMethod(tint="custom", tint_strength=0.4)
+    assert s.tint_value == 0.4 and MosaicMethod().tint_value == 0.2
     assert s.copy().key() == s.key()

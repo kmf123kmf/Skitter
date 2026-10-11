@@ -51,7 +51,7 @@ def sample_project(alpha=True) -> Project:
     project.slicing_plan = SlicingPlan(stages)
     ctx = SliceContext(project.source_final, project.layout)
     project.regions = project.slicing_plan.regions(ctx)
-    project.match_settings.update(max_uses=7, tint="custom", tint_strength=0.4)
+    project.match_method.update(max_uses=7, tint="custom", tint_strength=0.4)
     project.export_settings.update(format="jpeg", tile_px=55)
     project.animation_look.update(background="#123456")
     project.video_settings.update(frame_rate="24")
@@ -211,8 +211,8 @@ def test_loading_skips_what_this_version_does_not_know(tmp_path):
     save_project(path, sample_project(), committed=True, mosaic=None)
 
     def change(doc):
-        doc["match_settings"]["retired_setting"] = 1
-        doc["match_settings"]["max_uses"] = -5  # out of range
+        doc["match_methods"]["mosaic"]["retired_setting"] = 1
+        doc["match_methods"]["mosaic"]["max_uses"] = -5  # out of range
         doc["slicing_plan"]["stages"].insert(0, {"type": "hexagons", "params": {}})
         doc["choreographies"]["deal"]["decks"] = "many"
         doc["layout"]["columns"] = 0
@@ -222,9 +222,32 @@ def test_loading_skips_what_this_version_does_not_know(tmp_path):
     project, problems = loaded.project, " | ".join(loaded.problems)
     assert "retired_setting" in problems and "max_uses" in problems and "hexagons" in problems
     assert "decks" in problems and "layout" in problems.lower()
-    assert project.match_settings.max_uses == 3 and project.match_settings.tint_strength == 0.4
+    assert project.match_method.max_uses == 3 and project.match_method.tint_strength == 0.4
     assert [s.operation.id for s in project.slicing_plan.stages] == ["grid", "quadtree"]
     assert project.layout == MosaicLayout()
+
+
+def test_matching_settings_from_before_methods_are_the_mosaic_methods(tmp_path):
+    path = tmp_path / "p.skitter"
+    save_project(path, sample_project(), committed=True, mosaic=None)
+
+    def change(doc):
+        doc["match_settings"] = doc.pop("match_methods")["mosaic"]
+        del doc["match_method"]
+
+    rewrite(path, change)
+    loaded = load_project(path)
+    assert loaded.project.match_method_id == "mosaic" and not loaded.problems
+    assert loaded.project.match_method.max_uses == 7
+
+
+def test_an_unknown_matching_method_falls_back_to_the_default(tmp_path):
+    path = tmp_path / "p.skitter"
+    save_project(path, sample_project(), committed=True, mosaic=None)
+    rewrite(path, lambda doc: doc.update(match_method="telepathy"))
+    loaded = load_project(path)
+    assert loaded.project.match_method_id == "mosaic"
+    assert any("telepathy" in p for p in loaded.problems)
 
 
 def test_files_that_are_not_projects_are_refused(tmp_path):
@@ -287,7 +310,7 @@ def test_save_new_and_open_restore_the_whole_session(sliced, photos, tmp_path): 
     app.next_button.click()  # to Tiles
     build_library(app, photos)
     app.next_button.click()  # to Matching
-    session.project.match_settings.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
     matching_step(app).run_matching()
     session.wait_for_job()
     region = int(np.flatnonzero(session.project.matches.tile >= 0)[0])
@@ -332,7 +355,7 @@ def test_save_new_and_open_restore_the_whole_session(sliced, photos, tmp_path): 
     assert session.manual_picks == 1 and session.missing_tiles == 0
     assert project.choreographies["deal"].decks == 4
     step = matching_step(app)
-    assert step.form._target is project.match_settings  # forms follow the new project
+    assert step.form._target is project.match_method  # forms follow the new project
     assert not step.edit.can_edit() and "run matching again" in step.edit.picker.hint.text()
     assert not session.modified and app.windowTitle() == "Skitter — work.skitter[*]"
 

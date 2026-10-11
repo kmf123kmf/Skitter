@@ -16,6 +16,12 @@ the seam, and hidden parts of lower regions cost nothing.
 
 The image is rendered in horizontal strips so the tile crops held in memory
 stay within CROP_BUDGET texels.
+
+Pieces of the picture (the Jigsaw Puzzle method) all show the picture where
+they lie, so `render_picture` resamples the picture once (Lanczos) to the
+export size and keeps it wherever pieces cover it (the same coverage
+samples): exactly what drawing every piece would give, without a second
+resampling. At the picture's own size it is the picture, pixel for pixel.
 """
 
 import math
@@ -36,6 +42,7 @@ from skitter.core.tiles.render import render_crops_or_thumbs
 SUB = 4  # coverage samples per pixel along each axis
 FULL = (1 << SUB * SUB) - 1  # every sample of a pixel covered
 CROP_BUDGET = 64 * 2**20  # tile crop texels held at once (about 200 MB)
+PICTURE_STRIP = 4 * 2**20  # output pixels per strip of render_picture (about 300 MB at work)
 JPEG_MAX = 65_500  # largest JPEG side, pixels
 BACKGROUNDS = {"white": (255, 255, 255), "black": (0, 0, 0), "gray": (128, 128, 128)}
 TRANSPARENT = "transparent"
@@ -300,6 +307,83 @@ def render_mosaic(
     return image, ExportReport((width, height), n, len(failed))
 
 
+def render_picture(
+    scene: MosaicScene,
+    picture: np.ndarray,
+    settings: ExportSettings,
+    progress: Progress = lambda message, fraction: None,
+    cancelled: Callable[[], bool] = lambda: False,
+) -> tuple[np.ndarray, ExportReport]:
+    """A scene of picture pieces (scene.picture) as an image, like render_mosaic.
+    picture: (H, W, 4) uint8 RGBA (SliceContext.picture)."""
+    frame = export_frame(scene, settings)
+    width, height = frame.size
+    s = frame.scale
+    cw, ch = scene.canvas
+    src_h, src_w = picture.shape[:2]
+    # Output pixel edges x, y -> picture pixel edges ax x + bx, ay y + by.
+    ax, bx = src_w * frame.width / (cw * width), frame.x * src_w / cw
+    ay, by = src_h * frame.height / (ch * height), frame.y * src_h / ch
+    left = int(np.clip(math.ceil(-bx / ax - 1e-9), 0, width))
+    right = int(np.clip(math.floor((src_w - bx) / ax + 1e-9), left, width))
+    first = int(np.clip(math.ceil(-by / ay - 1e-9), 0, height))
+    last = int(np.clip(math.floor((src_h - by) / ay + 1e-9), first, height))
+
+    corners = scene.corners
+    bounds = np.concatenate([corners.min(axis=1), corners.max(axis=1)], axis=1)
+    bounds = (bounds - (frame.x, frame.y, frame.x, frame.y)) * s
+    box = np.empty((len(scene), 4), np.int64)
+    box[:, :2] = np.floor(bounds[:, :2]) - 1
+    box[:, 2:] = np.ceil(bounds[:, 2:]) + 1
+    np.clip(box[:, 0::2], 0, width, out=box[:, 0::2])
+    np.clip(box[:, 1::2], 0, height, out=box[:, 1::2])
+    shown = (box[:, 2] > box[:, 0]) & (box[:, 3] > box[:, 1])
+    center = (scene.center[shown] - (frame.x, frame.y)) * s
+    rotation = scene.rotation[shown]
+    geom = np.column_stack([center, scene.size[shown] * s / 2, np.cos(rotation),
+                            np.sin(rotation)]).astype(np.float64)  # fmt: skip
+    box = box[shown]
+
+    channels = 4 if settings.alpha else 3
+    image = np.empty((height, width, channels), np.uint8)
+    background = np.array(BACKGROUNDS.get(settings.background, BACKGROUNDS["white"]), np.int64)
+    source = Image.fromarray(np.ascontiguousarray(picture), "RGBA")
+    strip_rows = max(16, PICTURE_STRIP // max(width, 1))
+    strips = max(1, math.ceil(height / strip_rows))
+    full = 255 * SUB * SUB
+    for k in range(strips):
+        top, bottom = k * strip_rows, min(height, (k + 1) * strip_rows)
+        progress("Cutting the picture" + (f" (part {k + 1} of {strips})" if strips > 1 else ""),
+                 k / strips)  # fmt: skip
+        if cancelled():
+            raise ExportCancelled
+        mask = np.zeros((bottom - top, width), np.uint16)
+        active = (box[:, 1] < bottom) & (box[:, 3] > top)
+        _coverage(top, mask, geom[active], box[active])
+        weight = _POPCOUNT[mask].astype(np.int64) * 255  # coverage x alpha, of `full`
+        rgb = np.zeros((bottom - top, width, 3), np.int64)
+        r0, r1 = max(top, first), min(bottom, last)
+        if r1 > r0 and right > left:
+            part = source.resize(
+                (right - left, r1 - r0), Image.Resampling.LANCZOS,
+                box=(left * ax + bx, r0 * ay + by, right * ax + bx, r1 * ay + by),
+            )  # fmt: skip
+            pixels = np.asarray(part, np.int64)
+            rgb[r0 - top : r1 - top, left:right] = pixels[..., :3]
+            alpha = np.zeros((bottom - top, width), np.int64)
+            alpha[r0 - top : r1 - top, left:right] = pixels[..., 3]
+            weight = weight * alpha // 255
+        else:
+            weight[:] = 0
+        if settings.alpha:
+            image[top:bottom, :, :3] = rgb
+            image[top:bottom, :, 3] = (weight + SUB * SUB // 2) // (SUB * SUB)
+        else:
+            mixed = rgb * weight[..., None] + background * (full - weight[..., None])
+            image[top:bottom] = (mixed + full // 2) // full
+    return image, ExportReport((width, height), int(shown.sum()), 0)
+
+
 def save_mosaic(image: np.ndarray, path: str | Path, settings: ExportSettings) -> None:
     error = check_size((image.shape[1], image.shape[0]), settings)
     if error:
@@ -426,6 +510,53 @@ def _composite(top, mask, acc, geom, box, crop_size, offset, pixels, mirrored):
                 acc[row, x, 1] += count * min(max(int(g + 0.5), 0), 255)
                 acc[row, x, 2] += count * min(max(int(b + 0.5), 0), 255)
                 mask[row, x] = covered | m
+
+
+@njit(cache=True, nogil=True, parallel=True)
+def _coverage(top, mask, geom, box):
+    """Mark the samples of one strip's pixels that any region covers (regions' edges
+    included: only their union matters)."""
+    rows, width = mask.shape
+    n = len(box)
+    sub_x = np.empty(SUB * SUB)
+    sub_y = np.empty(SUB * SUB)
+    for k in range(SUB * SUB):
+        sub_x[k] = (k % SUB + 0.5) / SUB - 0.5
+        sub_y[k] = (k // SUB + 0.5) / SUB - 0.5
+    reach = 0.5 * math.sqrt(2.0) + 1e-6
+    for row in prange(rows):
+        y = top + row
+        py = y + 0.5
+        for i in range(n):
+            if y < box[i, 1] or y >= box[i, 3]:
+                continue
+            cx, cy, hw, hh, c, s = (geom[i, 0], geom[i, 1], geom[i, 2], geom[i, 3], geom[i, 4],
+                                    geom[i, 5])  # fmt: skip
+            for x in range(box[i, 0], box[i, 2]):
+                covered = np.int64(mask[row, x])
+                if covered == FULL:
+                    continue
+                dx = x + 0.5 - cx
+                dy = py - cy
+                lx = c * dx + s * dy
+                ly = -s * dx + c * dy
+                ex = abs(lx) - hw
+                ey = abs(ly) - hh
+                if ex >= reach or ey >= reach:
+                    continue
+                if ex <= -reach and ey <= -reach:
+                    mask[row, x] = FULL
+                    continue
+                m = 0
+                for k in range(SUB * SUB):
+                    sx = lx + c * sub_x[k] + s * sub_y[k]
+                    sy = ly - s * sub_x[k] + c * sub_y[k]
+                    if abs(sx) <= hw and abs(sy) <= hh:
+                        m |= 1 << k
+                mask[row, x] = covered | m
+
+
+_POPCOUNT = np.array([bin(m).count("1") for m in range(1 << SUB * SUB)], np.uint8)
 
 
 @njit(cache=True, nogil=True)

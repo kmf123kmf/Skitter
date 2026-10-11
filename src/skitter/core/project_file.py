@@ -20,7 +20,8 @@ reported in `ProjectFile.problems`. Older animation settings are carried
 over (`_old_animation`): the video's start and end holds become the build's
 hold before and the last phase's hold after, the Still show becomes the
 build's hold after, and "deconstruct" (the clear phase's first name) loads
-as clear. Files of format 1 had a base tile 100 mosaic units wide (the
+as clear; the matching settings of files from before matching methods are
+the Mosaic method's. Files of format 1 had a base tile 100 mosaic units wide (the
 canvas grew with the columns); their regions and camera keys are scaled to
 today's canvas, CANVAS_WIDTH across (`_old_units`). Files are written to a
 temporary name and then renamed, so a failed save never damages an
@@ -48,8 +49,8 @@ from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
 from skitter.core.edits import apply_edits, edit_from_dict, edit_to_dict
 from skitter.core.imaging import load_image
+from skitter.core.matching.method import DEFAULT_METHOD, method_types
 from skitter.core.matching.saved import SavedMosaic
-from skitter.core.matching.settings import MatchSettings
 from skitter.core.project import Project
 from skitter.core.slicing import MosaicLayout, RegionSet, SlicingPlan
 
@@ -95,7 +96,8 @@ def document(project: Project, committed: bool) -> dict:
         },
         "layout": project.layout.to_dict(),
         "slicing_plan": project.slicing_plan.to_dict(),
-        "match_settings": project.match_settings.values(),
+        "match_methods": {key: m.values() for key, m in project.match_methods.items()},
+        "match_method": project.match_method_id,
         "export_settings": project.export_settings.values(),
         "choreographies": {key: c.values() for key, c in project.choreographies.items()},
         "choreography": project.choreography_id,  # the build's (the only phase, once)
@@ -202,8 +204,7 @@ def _project(doc: dict, source: np.ndarray, problems: list[str]) -> Project:
             problems.append(f"Mosaic layout ignored ({exc})")
     if "slicing_plan" in doc:
         project.slicing_plan = SlicingPlan.from_dict(doc["slicing_plan"], problems)
-    project.match_settings = MatchSettings.from_values(doc.get("match_settings", {}), problems,
-                                                       "Matching")  # fmt: skip
+    _match_methods(project, doc, problems)
     project.export_settings = ExportSettings.from_values(doc.get("export_settings", {}), problems,
                                                          "Export")  # fmt: skip
     project.animation_look = AnimationLook.from_values(doc.get("animation_look", {}), problems,
@@ -239,6 +240,20 @@ def _project(doc: dict, source: np.ndarray, problems: list[str]) -> Project:
     if isinstance(doc.get("camera_track"), dict):
         project.camera_track = CameraTrack.from_dict(doc["camera_track"], problems)
     return project
+
+
+def _match_methods(project: Project, doc: dict, problems: list[str]) -> None:
+    saved = dict(doc.get("match_methods") or {})
+    if "match_settings" in doc:  # from before matching methods: the Mosaic method's
+        saved.setdefault(DEFAULT_METHOD, doc["match_settings"])
+    for cls in method_types():
+        if isinstance(saved.get(cls.id), dict):
+            project.match_methods[cls.id] = cls.from_values(saved[cls.id], problems, cls.name)
+    choice = doc.get("match_method", DEFAULT_METHOD)
+    if choice in project.match_methods:
+        project.match_method_id = choice
+    else:
+        problems.append(f"Matching: {choice!r} isn't available; the default is used")
 
 
 def _old_animation(project: Project, holds, still) -> None:

@@ -16,6 +16,10 @@ first cut from its thumbnail, then replaced by the real crop once read in
 the background. Views redraw just those texels on `patched`. When the
 pages fill up, the crops in use are repacked (no files are read again) and
 `changed` is emitted as for new pages.
+
+Pieces of the picture (the Jigsaw Puzzle method) need none of that:
+`PictureTextures` is the picture itself on one page, each piece showing its
+own footprint on it (scene.picture_uv), so pieces at home draw the picture.
 """
 
 from dataclasses import dataclass
@@ -35,6 +39,7 @@ from skitter.ui.render.sprites import make_instances
 DETAIL_TEXELS = 96 * 2**20  # full-detail budget: about 400 MB of GPU memory (RGBA) + mipmaps
 DETAIL_PAGE = 4096  # atlas page size, texels
 MAX_BOOST = 4.0  # most extra texels per unit (each way) a tile smaller than the base gets
+PICTURE_SIDE = 16_384  # longest side of the picture's page (pieces of the picture)
 
 
 @dataclass(frozen=True)
@@ -168,16 +173,83 @@ class DetailRequest:
         return build_detail(self.paths, self.rects, self.sizes, self.thumbs, self.thumb_size,
                             progress, cancelled, budget, self.base)  # fmt: skip
 
+    def content(self, scene: MosaicScene, progress, cancelled, budget: int = DETAIL_TEXELS):
+        """(pages, instances, scale, failed): the scene's textures read and packed, its
+        tiles showing them, the texture scale used (1: full) and files unreadable."""
+        detail = self.build(progress, cancelled, budget)
+        layer, uv = detail.atlas.locate(self.image, scene.mirrored)
+        return detail.atlas.pages, scene_instances(scene, layer, uv), detail.scale, detail.failed
 
-def scene_instances(scene: MosaicScene, layer: np.ndarray, uv: np.ndarray) -> np.ndarray:
+
+@dataclass(frozen=True)
+class PictureRequest:
+    """The texture of a scene of picture pieces: the picture (DetailRequest's counterpart)."""
+
+    picture: np.ndarray  # (H, W, 4) uint8 (SliceContext.picture)
+
+    def content(self, scene: MosaicScene, progress, cancelled, budget: int = DETAIL_TEXELS):
+        page, scale = picture_page(self.picture, budget)
+        return page, picture_instances(scene), scale, 0
+
+
+def scene_instances(
+    scene: MosaicScene, layer: np.ndarray, uv: np.ndarray, skew: np.ndarray | None = None
+) -> np.ndarray:
     """Sprite instances showing the finished mosaic, in stacking order."""
     tiles = make_instances(len(scene))
     tiles["pos"] = scene.center
     tiles["size"] = scene.size
     tiles["rotation"] = scene.rotation
     tiles["layer"], tiles["uv"] = layer, uv
+    if skew is not None:
+        tiles["skew"] = skew
     tiles["offset"] = scene.tint_shift
     return tiles
+
+
+def picture_instances(scene: MosaicScene) -> np.ndarray:
+    """Sprite instances of a scene of picture pieces, each showing its own footprint on
+    the picture's page."""
+    uv, skew = scene.picture_uv()
+    return scene_instances(scene, np.zeros(len(scene)), uv, skew)
+
+
+def picture_page(picture: np.ndarray, budget: int = DETAIL_TEXELS, side: int = PICTURE_SIDE):
+    """((1, h, w, 4) page, scale): the picture as one texture page, reduced (scale < 1)
+    when it has more than budget texels or a side longer than side (GPU limits)."""
+    h, w = picture.shape[:2]
+    scale = min(1.0, side / max(h, w), (budget / (w * h)) ** 0.5)
+    if scale < 1.0:
+        size = (max(1, round(w * scale)), max(1, round(h * scale)))
+        picture = np.asarray(Image.fromarray(picture).resize(size, Image.Resampling.LANCZOS))
+    return np.ascontiguousarray(picture)[None], scale
+
+
+class PictureTextures(QObject):
+    """TileTextures' counterpart for a scene of picture pieces: the picture, at once."""
+
+    changed = Signal()  # never: the picture is there from the start
+    patched = Signal(object)
+    status_changed = Signal(str)
+
+    def __init__(self, scene: MosaicScene, picture: np.ndarray, parent=None):
+        super().__init__(parent)
+        self.scene = scene
+        self.pages, scale = picture_page(picture)
+        self.status = "The picture" if scale >= 1 else f"The picture, at {scale:.0%} (memory)"
+        self.loading = False
+
+    def instances(self) -> np.ndarray:
+        return picture_instances(self.scene)
+
+    def cancel(self) -> None:
+        pass
+
+    def wait(self, timeout: float | None = None) -> None:
+        pass
+
+    def set_scene(self, scene: MosaicScene, library=None) -> None:
+        self.scene = scene
 
 
 def crop_key(slot, rect, size) -> tuple:

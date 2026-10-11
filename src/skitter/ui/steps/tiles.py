@@ -382,7 +382,9 @@ class TilesStep(StepPage):
             self.session.update_library()
 
     def is_complete(self) -> bool:
-        return self.session.library_ready
+        """Matching may follow without a library: some methods need none (Matching says
+        when the chosen one does). Not while the library updates."""
+        return self.session.busy != "library"
 
     def set_display(self, mode: str) -> None:
         self.display_mode.setCurrentIndex(self.display_mode.findData(mode))

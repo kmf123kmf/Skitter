@@ -18,6 +18,7 @@ from skitter.core.assembly import (
     ExportSettings,
     TileFiles,
     render_mosaic,
+    render_picture,
     save_mosaic,
 )
 from skitter.core.edits import Edit, apply_edits
@@ -48,7 +49,12 @@ from skitter.core.tiles.library import (
     is_under,
 )
 from skitter.ui.jobs import Job
-from skitter.ui.render.tile_textures import DetailRequest, TileTextures
+from skitter.ui.render.tile_textures import (
+    DetailRequest,
+    PictureRequest,
+    PictureTextures,
+    TileTextures,
+)
 from skitter.ui.render.video_export import VideoJob, run_video_job
 
 logger = logging.getLogger(__name__)
@@ -157,7 +163,7 @@ class Session(QObject):
         self._match_key: tuple | None = None  # inputs project.matches was computed from
         self._match_tiles: tuple | None = None  # the library tiles it uses (see mosaic_is_valid)
         self.scene: MosaicScene | None = None  # project.matches as a scene (core/scene.py)
-        self.textures: TileTextures | None = None  # the scene's tile textures, shared by views
+        self.textures: TileTextures | PictureTextures | None = None  # the scene's, shared by views
         # Manual picks: each entry maps regions to their (choice, manual) before a step.
         self._pick_undo: list[dict[int, tuple[int, bool]]] = []
         self._pick_redo: list[dict[int, tuple[int, bool]]] = []
@@ -297,7 +303,8 @@ class Session(QObject):
                 if opened.restored is not None:
                     result, self.missing_tiles = opened.restored
                     mosaic = opened.loaded.mosaic
-                    state = (mosaic.library_version, self.library.selection)
+                    state = (None if not mosaic.settings.needs_library
+                             else (mosaic.library_version, self.library.selection))  # fmt: skip
                     key = (regions, opened.context, state, mosaic.settings.key())
                     self._set_matches(result, key, opened.scene)
         self.matching_changed.emit()
@@ -549,7 +556,8 @@ class Session(QObject):
         """Open (or create) the tile library cache; default: the per-user location."""
         if self.library is not None:
             self.library.close()
-        if self.project.matches is not None:  # its tiles refer to the old library
+        matches = self.project.matches
+        if matches is not None and not matches.picture:  # its tiles refer to the old library
             self._set_matches(None)
             self.matching_changed.emit()
         self.library = TileLibrary(folder or default_library_folder())
@@ -586,7 +594,7 @@ class Session(QObject):
         aren't there). A mosaic using its photos stays valid. Returns photos moved."""
         valid = self.mosaic_is_valid
         moved = self.library.relink(root, new_root)
-        if valid and self.project.matches is not None:
+        if valid and self.project.matches is not None and not self.project.matches.picture:
             self._match_tiles = self._tile_snapshot(self.project.matches.tile)
             regions, ctx, (_, selection), settings = self._match_key
             self._match_key = (regions, ctx, (self.library.version, selection), settings)
@@ -597,7 +605,7 @@ class Session(QObject):
     def mosaic_uses_folder(self, root) -> int:
         """How many of the mosaic's tiles show photos in this folder."""
         matches = self.project.matches
-        if matches is None or self.library is None:
+        if matches is None or matches.picture or self.library is None:
             return 0
         tiles = matches.tile[matches.tile >= 0]
         key = folder_key(root)
@@ -627,12 +635,13 @@ class Session(QObject):
     # Matching
 
     def _match_inputs(self) -> tuple:
-        library = self.library
+        library, method = self.library, self.project.match_method
         return (
             self.project.regions,
             self._slice_context,
-            library.state if library is not None else None,  # its contents and folders in use
-            self.project.match_settings.key(),
+            # The library's contents and folders in use, if the method uses it
+            library.state if library is not None and method.needs_library else None,
+            method.key(),
         )
 
     @property
@@ -663,7 +672,7 @@ class Session(QObject):
             bool(self.project.regions)
             and self._slice_context is not None
             and not self.slicing_running
-            and self.library_ready
+            and (self.library_ready or not self.project.match_method.needs_library)
         )
 
     def start_matching(self, keep_picks: bool = False) -> Job:
@@ -672,11 +681,11 @@ class Session(QObject):
         keep_picks: keep the current mosaic's manual picks (pinned in place).
         """
         if not self.can_match:
-            raise RuntimeError("matching needs regions and a tile library")
+            raise RuntimeError("matching needs regions (and a tile library for this method)")
         key = self._match_inputs()
         regions, ctx, _, _ = key
-        settings = self.project.match_settings.copy()
-        matcher = self.matcher
+        settings = self.project.match_method.copy()
+        matcher = self.matcher if settings.needs_library else Matcher(None)
         kept = self._pins() if keep_picks else None
         self.dropped_picks = 0 if kept is None else self.manual_picks - len(kept)
 
@@ -779,7 +788,7 @@ class Session(QObject):
         return kept.subset(ok)
 
     def match_settings_edited(self) -> None:
-        """project.match_settings changed (results become out of date)."""
+        """project.match_method_id or its settings changed (results become out of date)."""
         self.matching_changed.emit()
 
     # Export
@@ -797,11 +806,15 @@ class Session(QObject):
         if result is None:
             self._match_tiles = self.scene = self.textures = None
             return
-        self._match_tiles = self._tile_snapshot(result.tile)
         if scene is None:
             scene = MosaicScene.from_result(result, self._slice_context)
         self.scene = scene
-        self.textures = TileTextures(self.scene, self.library, self)
+        if result.picture:  # pieces of the picture: no library tiles
+            self._match_tiles = None
+            self.textures = PictureTextures(scene, self._slice_context.picture, self)
+        else:
+            self._match_tiles = self._tile_snapshot(result.tile)
+            self.textures = TileTextures(self.scene, self.library, self)
 
     def _tile_snapshot(self, tiles) -> tuple:
         """The library and the state of the tiles a mosaic uses."""
@@ -821,8 +834,11 @@ class Session(QObject):
             or self._match_key is None
             or not self._same_regions(self._match_key)
             or not self.source_is_committed
-            or self._match_tiles is None
         ):
+            return False
+        if self.project.matches.picture:
+            return True  # pieces of the picture fit as long as the regions do
+        if self._match_tiles is None:
             return False
         library, slots, paths, width, height = self._match_tiles
         if library is not self.library:
@@ -921,8 +937,7 @@ class Session(QObject):
             path=Path(path), scene=scene, choreographies=choreographies, holds=holds,
             track=track, settings=settings, background=background, look=look, plan=plan,
             # Read here: the library isn't threadsafe.
-            request=DetailRequest.for_scene(scene, TileFiles.read(self.library, scene.slot),
-                                            plan.scale * closest),
+            request=self._detail_request(scene, plan.scale * closest),
         )  # fmt: skip
 
         def work(progress, cancelled):
@@ -932,6 +947,13 @@ class Session(QObject):
             self.video_finished.emit(str(path), report, error)
 
         return self._start_job("video", work, self.video_progress, done)
+
+    def _detail_request(self, scene: MosaicScene, scale: float) -> DetailRequest | PictureRequest:
+        """The scene's textures for a video at scale (read here: the library isn't
+        threadsafe)."""
+        if scene.picture:
+            return PictureRequest(self._slice_context.picture)
+        return DetailRequest.for_scene(scene, TileFiles.read(self.library, scene.slot), scale)
 
     def export_signals(self) -> tuple:
         """Signals after which can_export may have changed."""
@@ -946,11 +968,20 @@ class Session(QObject):
             raise RuntimeError("export needs a matched mosaic")
         path = Path(path)
         scene = self.scene
-        files = TileFiles.read(self.library, scene.slot)  # here: the library isn't threadsafe
         settings = settings.copy()
+        if scene.picture:
+            picture = self._slice_context.picture
+
+            def render(progress, cancelled):
+                return render_picture(scene, picture, settings, progress, cancelled)
+        else:
+            files = TileFiles.read(self.library, scene.slot)  # here: the library isn't threadsafe
+
+            def render(progress, cancelled):
+                return render_mosaic(scene, files, settings, progress, cancelled)
 
         def work(progress, cancelled) -> ExportReport:
-            image, report = render_mosaic(scene, files, settings, progress, cancelled)
+            image, report = render(progress, cancelled)
             progress(f"Saving {path.name}…", None)
             part = path.with_name(path.name + ".part")  # never leave a half-written image
             try:

@@ -11,6 +11,7 @@ in float in_alpha;
 in float in_layer;    // texture array layer index
 in vec4 in_tint;      // rgb tint color, a = tint strength
 in vec4 in_uv;        // texture rect shown: (u0, v0, u1, v1); u1 < u0 mirrors
+in vec2 in_skew;      // (du/dt, dv/ds): the rect turned on the texture (0: upright)
 in vec3 in_offset;    // OKLab shift of every texel (matching's tint)
 in float in_blur;     // > 0: soft shadow; the quad grows by this much (world units)
 
@@ -46,7 +47,7 @@ void main() {
     gl_Position = vec4(ndc.x, -ndc.y, 0.0, 1.0);
 
     vec2 unit_uv = in_corner * (extent / in_size) + 0.5;  // 0..1 across the sprite
-    v_uv = in_uv.xy + unit_uv * (in_uv.zw - in_uv.xy);
+    v_uv = in_uv.xy + unit_uv * (in_uv.zw - in_uv.xy) + unit_uv.yx * in_skew;
     v_local = abs(local) * sign(in_corner);
     v_half = abs(in_size) * 0.5;
     v_world = world;
