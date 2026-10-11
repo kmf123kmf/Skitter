@@ -17,10 +17,16 @@ import math
 
 import numpy as np
 
-from skitter.core.animation.assemble import ORDERS, order_key
 from skitter.core.animation.base import Choreography, Timeline, register_choreography
 from skitter.core.animation.look import AnimationLook, scene_extent
 from skitter.core.animation.moves import LayeredTimeline, MovesTimeline, layers, swap_plan
+from skitter.core.animation.orders import (
+    order_key,
+    order_param,
+    spread_param,
+    sweep_angle_param,
+    sweep_param,
+)
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import ChoiceParam, FloatParam, IntParam, TileSizeParam
 
@@ -87,7 +93,10 @@ class UnscrambleChoreography(Choreography):
         help="Carry: tiles are lifted over the mosaic, casting shadows, and set down. "
              "Slide: they glide across it. (A pile explodes instead: see Stack height.)",
     )  # fmt: skip
-    order = ChoiceParam("random", "Order", choices=ORDERS, help="Which tiles go home first.")
+    order = order_param("random", "go home")
+    sweep = sweep_param()
+    sweep_angle = sweep_angle_param()
+    spread = spread_param(0.05, "order tiles go home in")
     scrambled = FloatParam(
         100.0, "Scrambled", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
         help="Share of the tiles that start out of place (the rest start at home).",
@@ -140,8 +149,8 @@ class UnscrambleChoreography(Choreography):
         help="A pile: how long it takes to come apart at the start, and to settle back "
              "at the end (both within the duration).",
     )  # fmt: skip
-    spread = FloatParam(
-        15.0, "Spread", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
+    pile_spread = FloatParam(
+        15.0, "Pile spread", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
         help="A pile: how far its top layer spreads out from the middle while apart "
              "(lower layers less), opening gaps to see the layers below.",
     )  # fmt: skip
@@ -152,6 +161,13 @@ class UnscrambleChoreography(Choreography):
     )  # fmt: skip
     seed = IntParam(1, "Seed", min=0, max=999_999)
 
+    @classmethod
+    def from_values(cls, values: dict, problems: list[str] | None = None, what: str = ""):
+        if "pile_spread" not in values and "spread" in values:  # saved before Pile spread
+            values = {**values, "pile_spread": values["spread"]}
+            del values["spread"]
+        return super().from_values(values, problems, what)
+
     def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:
         look = look or AnimationLook()
         rng = np.random.default_rng(self.seed)
@@ -160,9 +176,9 @@ class UnscrambleChoreography(Choreography):
         count = int(round(n * self.scrambled / 100.0))
         chosen = np.zeros(n, bool)
         chosen[rng.choice(n, size=count, replace=False)] = True
-        # By the order's preference (lower first), each tile's place loosened a little.
-        key = np.argsort(np.argsort(order_key(scene, self.order, rng), kind="stable"))
-        key = key / max(n - 1, 1) + rng.uniform(-0.05, 0.05, n)
+        # By the order's preference (lower first), each tile's place loosened by Spread.
+        key = np.argsort(np.argsort(order_key(scene, self, rng), kind="stable"))
+        key = key / max(n - 1, 1) + rng.uniform(-1.0, 1.0, n) * self.spread
         home_order = np.flatnonzero(chosen)[np.argsort(key[chosen], kind="stable")]
         layer = layers(scene)
         piled = n > 0 and layer.max() > 0
@@ -177,9 +193,10 @@ class UnscrambleChoreography(Choreography):
         if piled:
             top = min(self.stack_height * scene_extent(scene),
                       LIFT_LIMIT * look.camera_height * scene_extent(scene))  # fmt: skip
-            return LayeredTimeline(scene, places, moves.delayed(explode), travel,
-                                   self.duration, layer, explode, top / (layer.max() + 1),
-                                   self.spread / 100.0, self.depth_shading / 100.0)  # fmt: skip
+            return LayeredTimeline(
+                scene, places, moves.delayed(explode), travel, self.duration, layer, explode,
+                top / (layer.max() + 1), self.pile_spread / 100.0, self.depth_shading / 100.0,
+            )  # fmt: skip
         lift = min(self.lift * scene.tile_size[0],
                    LIFT_LIMIT * look.camera_height * scene_extent(scene))  # fmt: skip
         return MovesTimeline(scene, places, moves, travel, self.duration,

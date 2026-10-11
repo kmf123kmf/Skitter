@@ -4,10 +4,10 @@ import numpy as np
 import pytest
 from test_animation import grid_scene, make_scene, pile_scene
 
+from skitter.core.animation.compass import COMPASS
 from skitter.core.animation.lift import Lift, moving_tiles, slope_tint
 from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.show import (
-    COMPASS,
     RippleChoreography,
     WaveChoreography,
     wave_pulse,

@@ -5,10 +5,19 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from skitter.core.animation.assemble import ORDERS, RANDOM_ORDERS, landing_ranks, order_key
 from skitter.core.animation.base import Choreography, TileFrame, Timeline, register_choreography
 from skitter.core.animation.landing import landing_times
 from skitter.core.animation.look import AnimationLook, scene_extent
+from skitter.core.animation.orders import (
+    RANDOM_ORDERS,
+    describe_order,
+    landing_ranks,
+    order_key,
+    order_param,
+    spread_param,
+    sweep_angle_param,
+    sweep_param,
+)
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import (
     BoolParam,
@@ -33,7 +42,7 @@ POSITIONS = (
     ("center", "Center"),
     ("orbit", "Orbit"),
 )
-DEAL_ORDERS = (("near", "Nearest first"), ("far", "Farthest first"), *ORDERS)
+DEAL_ORDERS = (("near", "Nearest first"), ("far", "Farthest first"))  # before ORDERS
 DECK_HEIGHT = 1.0  # a full deck stands at most this many tile sizes tall
 CARD = 0.01  # a card's thickness, in tile sizes (decks of up to 100 cards)
 FLIP_TIME = 0.3  # face down: seconds a card takes to turn face up as it leaves the deck
@@ -241,12 +250,10 @@ class DealChoreography(Choreography):
         help="How squarely the cards are stacked in a deck (1: perfectly; less: a few "
              "cards stick out, slightly turned).",
     )  # fmt: skip
-    order = ChoiceParam("near", "Order", choices=DEAL_ORDERS, help="Which tiles land first.")
-    spread = FloatParam(
-        0.15, "Spread", min=0.0, max=1.0, step=0.05,
-        when=lambda c: c.order not in RANDOM_ORDERS,
-        help="Randomness in the landing order, as a share of the whole sequence.",
-    )  # fmt: skip
+    order = order_param("near", extra=DEAL_ORDERS)
+    sweep = sweep_param()
+    sweep_angle = sweep_angle_param()
+    spread = spread_param(0.15)
     duration = FloatParam(
         8.0, "Duration", min=0.5, max=3600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first tile leaving its deck to the last coming to rest.",
@@ -292,7 +299,7 @@ class DealChoreography(Choreography):
         elif self.order in ("near", "far"):
             key = self._reach_key(scene, path)
         else:
-            key = order_key(scene, self.order, rng)
+            key = order_key(scene, self, rng)
         rank = landing_ranks(scene, key, self.spread, self.seed, rng)
 
         # In the deck: a little out of square, as neatness allows.
@@ -436,4 +443,4 @@ class DealChoreography(Choreography):
         decks = f"{self.decks} decks" if self.decks > 1 else "1 deck"
         if self.position == "orbit":
             decks += " orbiting"
-        return f"{dict(DEAL_ORDERS)[self.order]}, {decks}, {self.duration:g} s"
+        return f"{describe_order(self, DEAL_ORDERS)}, {decks}, {self.duration:g} s"

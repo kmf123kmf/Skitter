@@ -14,8 +14,9 @@ from skitter.core.animation import (
     get_choreography,
     landing_times,
 )
-from skitter.core.animation.assemble import ORDERS, AssembleChoreography
+from skitter.core.animation.assemble import AssembleChoreography
 from skitter.core.animation.deal import DealChoreography, DealTimeline
+from skitter.core.animation.orders import ORDERS, RANDOM_ORDERS
 from skitter.core.animation.unscramble import UnscrambleChoreography
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.scene import MosaicScene
@@ -117,6 +118,9 @@ CONFIGS = [(cls, {}) for cls in choreography_types()] + [
     (DealChoreography, {"position": "orbit", "decks": 2, "order": "random", "orbit_turns": 0}),
     (UnscrambleChoreography, {"motion": "slide"}),
     (UnscrambleChoreography, {"order": "center", "scrambled": 50.0}),
+    (AssembleChoreography, {"order": "sweep", "sweep": "custom", "sweep_angle": 30.0}),
+    (DealChoreography, {"order": "counter", "decks": 2}),
+    (UnscrambleChoreography, {"order": "sweep", "sweep": "up_left", "spread": 0.0}),
 ]
 CONFIG_IDS = [
     f"{cls.id}{'-' + '-'.join(map(str, kw.values())) if kw else ''}" for cls, kw in CONFIGS
@@ -151,6 +155,51 @@ def test_assemble_orders_and_settings(order):
     start = timeline.frame(0)
     assert np.all(start.alpha == 0)  # nothing visible yet
     assert np.all(np.hypot(*(start.center - (30, 20)).T) > 30)  # all start outside
+
+
+def landing_rank(timeline) -> np.ndarray:
+    rank = np.empty(len(timeline.delay), np.int64)
+    rank[np.argsort(timeline.delay, kind="stable")] = np.arange(len(rank))
+    return rank
+
+
+@pytest.mark.parametrize(("sweep", "angle"), [("down", 0.0), ("right", 0.0), ("up_left", 0.0),
+                                              ("custom", 200.0)])  # fmt: skip
+def test_a_sweep_lands_in_its_direction(sweep, angle):
+    from skitter.core.animation.compass import degrees, heading
+
+    scene = grid_scene()
+    make = AssembleChoreography(order="sweep", sweep=sweep, sweep_angle=angle, spread=0)
+    along = scene.center @ heading(degrees(sweep, angle))
+    assert np.corrcoef(landing_rank(make.timeline(scene)), along)[0, 1] > 0.95
+
+
+@pytest.mark.parametrize("order", ["clockwise", "counter"])
+def test_clockwise_orders_go_round_from_straight_up(order):
+    scene = grid_scene()
+    offset = scene.center - np.asarray(scene.canvas) / 2
+    turn = np.arctan2(offset[:, 0], -offset[:, 1]) % (2 * np.pi)  # clockwise from up
+    if order == "counter":
+        turn = -turn % (2 * np.pi)
+    rank = landing_rank(AssembleChoreography(order=order, spread=0).timeline(scene))
+    assert np.corrcoef(rank, turn)[0, 1] > 0.95
+
+
+def test_every_ordered_build_shares_the_order_settings():
+    """Builds with an Order offer every shared order (after their own) with the same
+    Sweep and Spread settings, so a new order reaches them all (orders.py)."""
+    ordered = [cls for cls in choreography_types() if "order" in cls().values()]
+    assert {cls.id for cls in ordered} >= {"assemble", "deal", "unscramble"}
+    for cls in ordered:
+        params = {p.name: p for p in cls.params()}
+        assert params["order"].choices[-len(ORDERS) :] == list(ORDERS), cls.id
+        assert {"sweep", "sweep_angle", "spread"} <= params.keys(), cls.id
+        assert params["spread"].label == "Spread" and params["spread"].max == 1.0, cls.id
+        c = cls(order="random")
+        assert not params["spread"].is_active(c) and not params["sweep"].is_active(c)
+        c.update(order="sweep", sweep="custom")
+        assert params["sweep"].is_active(c) and params["sweep_angle"].is_active(c)
+    assert AssembleChoreography(order="sweep", sweep="up").summary() == "Sweep up, 8 s"
 
 
 def test_assemble_lands_center_first_and_is_seeded():
@@ -279,8 +328,7 @@ def landing_ranks(timeline) -> np.ndarray:
 def test_every_order_on_a_pile_is_either_random_like_chance_or_directed(order):
     """Random orders land close together in space and time just as often as chance has
     it (the bottom-first rule must not clump them); directed ones follow their order.
-    A new ordering lands in one of the two groups (assemble.RANDOM_ORDERS)."""
-    from skitter.core.animation.assemble import RANDOM_ORDERS
+    A new ordering lands in one of the two groups (orders.RANDOM_ORDERS)."""
 
     if order in RANDOM_ORDERS:
         for seed in (1, 2):

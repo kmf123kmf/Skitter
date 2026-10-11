@@ -219,7 +219,7 @@ def test_layers_put_every_tile_above_the_tiles_under_it():
 def test_unscramble_explodes_a_pile_and_settles_it():
     scene = pile_scene()
     layer = layers(scene)
-    timeline = UnscrambleChoreography(spread=20.0, pause=1.0).timeline(scene)
+    timeline = UnscrambleChoreography(pile_spread=20.0, pause=1.0).timeline(scene)
     assert isinstance(timeline, LayeredTimeline)
     start = timeline.frame(0.0)  # a flat, scrambled pile
     assert start.at_rest().all() and not start.heights().any()
@@ -287,3 +287,26 @@ def test_unscramble_depth_shading_darkens_lower_layers():
     assert (apart.tint[:, :3] == 0).all() and shade.max() <= 0.4
     plain = UnscrambleChoreography(depth_shading=0.0).timeline(scene)
     assert not plain.frame(plain.explode).tint.any()
+
+
+def test_unscramble_settings_saved_before_pile_spread_keep_it():
+    problems = []
+    old = UnscrambleChoreography.from_values({"spread": 40.0, "order": "center"}, problems)
+    assert not problems
+    assert old.pile_spread == 40.0 and old.spread == 0.05 and old.order == "center"
+    new = UnscrambleChoreography(pile_spread=30.0, spread=0.2)
+    assert UnscrambleChoreography.from_values(new.values()).values() == new.values()
+
+
+def test_unscramble_spread_loosens_its_order():
+    scene = tiled_scene(24, 16)
+
+    def fit(spread):
+        m = UnscrambleChoreography(order="reading", spread=spread).timeline(scene).moves
+        home = m.target == m.tile
+        last_home = np.zeros(len(scene))
+        np.maximum.at(last_home, m.tile[home], m.start[home])
+        moved = last_home > 0
+        return np.corrcoef(last_home[moved], scene.reading_order[moved])[0, 1]
+
+    assert fit(0.0) > fit(0.05) > fit(0.5)

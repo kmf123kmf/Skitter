@@ -14,56 +14,23 @@ from skitter.core.animation.base import (
     cover_after_impact,
     register_choreography,
 )
-from skitter.core.animation.landing import landing_order, landing_times, random_landing_order
+from skitter.core.animation.landing import landing_times
 from skitter.core.animation.look import NEAR, AnimationLook, clear_of_axis, scene_extent
+from skitter.core.animation.orders import (
+    RANDOM_ORDERS,
+    describe_order,
+    landing_ranks,
+    order_key,
+    order_param,
+    spread_param,
+    sweep_angle_param,
+    sweep_param,
+)
 from skitter.core.easing import ease_out_back, ease_out_cubic
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import BoolParam, ChoiceParam, FloatParam, IntParam, RangeParam
 
 TOSS_LIMIT = 0.8  # throws peak at most this share of the camera height (5x size)
-
-# Orders without a direction: they land in a uniformly random bottom-first order
-# (random_landing_order), never through landing_order (see landing.py). A new
-# ordering must be listed here if it is random; tests hold both kinds to account.
-RANDOM_ORDERS = frozenset({"random"})
-
-ORDERS = (
-    ("center", "Center outward"),
-    ("edges", "Edges inward"),
-    ("reading", "Reading order"),
-    ("dark", "Dark to light"),
-    ("light", "Light to dark"),
-    ("random", "Random"),
-)
-
-
-def order_key(scene: MosaicScene, order: str, rng: np.random.Generator) -> np.ndarray:
-    """(N,) each tile's preference for one of ORDERS (lower lands first)."""
-    if order == "center":
-        return scene.distance
-    if order == "edges":
-        return -scene.distance
-    if order == "reading":
-        return scene.reading_order.astype(np.float64)
-    if order == "dark":
-        return scene.lightness
-    if order == "light":
-        return -scene.lightness
-    return rng.random(len(scene))
-
-
-def landing_ranks(scene: MosaicScene, key, spread: float, seed: int,
-                  rng: np.random.Generator) -> np.ndarray:  # fmt: skip
-    """(N,) each tile's place in a bottom-first landing sequence: by `key` (lower
-    first), each tile's place loosened by `spread` (a share of the sequence); or,
-    with no key, a uniformly random one (see landing.py)."""
-    if key is None:
-        return random_landing_order(scene, seed)
-    n = len(scene)
-    preferred = np.empty(n)
-    preferred[np.argsort(key, kind="stable")] = np.linspace(0.0, 1.0, n) if n else []
-    preferred += rng.uniform(-1.0, 1.0, n) * spread
-    return landing_order(scene, preferred)
 
 
 @register_choreography
@@ -85,7 +52,10 @@ class AssembleChoreography(Choreography):
              "shrinking onto its spot. Glide: slides in flat and slows to a stop.",
     )  # fmt: skip
 
-    order = ChoiceParam("center", "Order", choices=ORDERS, help="Which tiles land first.")
+    order = order_param("center")
+    sweep = sweep_param()
+    sweep_angle = sweep_angle_param()
+    spread = spread_param(0.15)
     duration = FloatParam(
         8.0, "Duration", min=0.5, max=3600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first tile leaving to the last tile coming to rest."
@@ -93,11 +63,6 @@ class AssembleChoreography(Choreography):
     travel = FloatParam(
         1.5, "Flight time", min=0.05, max=60.0, step=0.1, decimals=2, suffix=" s",
         help="How long each tile is in the air (at most the duration).",
-    )  # fmt: skip
-    spread = FloatParam(
-        0.15, "Spread", min=0.0, max=1.0, step=0.05,
-        when=lambda c: c.order not in RANDOM_ORDERS,
-        help="Randomness in the landing order, as a share of the whole sequence.",
     )  # fmt: skip
     wind_down = FloatParam(
         0.15, "Wind-down", min=0.0, max=0.5, step=0.05, suffix=" × duration",
@@ -288,7 +253,7 @@ class AssembleChoreography(Choreography):
         return final.center + reach[:, None] * way
 
     def _order_key(self, scene: MosaicScene, rng: np.random.Generator) -> np.ndarray:
-        return order_key(scene, self.order, rng)
+        return order_key(scene, self, rng)
 
     def summary(self) -> str:
-        return f"{dict(ORDERS)[self.order]}, {self.duration:g} s"
+        return f"{describe_order(self)}, {self.duration:g} s"

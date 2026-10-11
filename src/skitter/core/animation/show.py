@@ -25,13 +25,13 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from skitter.core.animation import compass
 from skitter.core.animation.base import Choreography, TileFrame, Timeline, register_choreography
 from skitter.core.animation.lift import Lift
 from skitter.core.animation.look import AnimationLook, scene_extent
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import (
     BoolParam,
-    ChoiceParam,
     FloatParam,
     IntParam,
     TileSizeParam,
@@ -39,16 +39,6 @@ from skitter.core.slicing.params import (
 
 DECAY = 0.6  # each bump's height, relative to the one before it
 HEIGHT_LIMIT = 0.25  # surfaces rise at most this share of the camera height
-
-# Wave directions: where the wave travels, in degrees clockwise from the top (as the light).
-COMPASS = {"up": 0.0, "up_right": 45.0, "right": 90.0, "down_right": 135.0, "down": 180.0,
-           "down_left": 225.0, "left": 270.0, "up_left": 315.0}  # fmt: skip
-CUSTOM = "custom"
-DIRECTIONS = (
-    ("up", "Up"), ("up_right", "Up right"), ("right", "Right"), ("down_right", "Down right"),
-    ("down", "Down"), ("down_left", "Down left"), ("left", "Left"), ("up_left", "Up left"),
-    (CUSTOM, "Custom"),
-)  # fmt: skip
 
 
 def wave_pulse(tau: np.ndarray, period: float, count: int) -> tuple[np.ndarray, np.ndarray]:
@@ -90,8 +80,7 @@ def ring_front(points: np.ndarray, origin) -> Front:
 def line_front(points: np.ndarray, angle: float) -> Front:
     """A straight line sweeping across, travelling `angle` degrees clockwise from the
     top; it starts at the first point it meets."""
-    a = math.radians(angle)
-    direction = np.array([math.sin(a), -math.cos(a)])  # y runs down the picture
+    direction = compass.heading(angle)
     along = points @ direction
     start = float(along.min()) if along.size else 0.0
     return Front(along - start, np.broadcast_to(direction, (len(points), 2)).copy())
@@ -233,16 +222,8 @@ class WaveChoreography(Choreography):
         "In a pile, only tiles you can see move, and none passes through another."
     )
 
-    direction = ChoiceParam(
-        "right", "Direction", choices=DIRECTIONS,
-        help="The way the wave travels across the picture.",
-    )  # fmt: skip
-    angle = FloatParam(
-        90.0, "Angle", min=0.0, max=360.0, step=15.0, decimals=0, suffix="°",
-        when=lambda c: c.direction == CUSTOM,
-        help="The way the wave travels: 0° toward the top of the picture, clockwise "
-             "(90°: to the right).",
-    )  # fmt: skip
+    direction = compass.direction_param("right", "wave")
+    angle = compass.angle_param(90.0, "wave", "direction")
     duration = duration_param("wave")
     wavelength = wavelength_param("wave")
     amplitude = amplitude_param("wave")
@@ -257,7 +238,7 @@ class WaveChoreography(Choreography):
     @property
     def degrees(self) -> float:
         """The direction of travel, degrees clockwise from the top."""
-        return self.angle if self.direction == CUSTOM else COMPASS[self.direction]
+        return compass.degrees(self.direction, self.angle)
 
     def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:
         return _surface(self, scene, look, lambda points: line_front(points, self.degrees),
