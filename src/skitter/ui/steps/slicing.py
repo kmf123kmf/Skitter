@@ -1,10 +1,10 @@
 """Step 2: divide the final source image into target regions for tile matching.
 
 The user picks the mosaic layout (tile aspect and columns; pixel sizes are
-chosen only on export) and builds a slicing plan: an ordered list of
-operations (see skitter.core.slicing). The page lists the stages, generates a settings form
-for the selected one from its declared parameters, and draws the resulting
-regions over the image as they change. Regions may overlap: the preview
+chosen only on export) and the slicing plan (core/slicing/plan.py): a
+slicer, with a settings form generated from its declared parameters, and
+optionally its cells split by detail. The page draws the resulting regions
+over the image as they change. Regions may overlap: the preview
 draws them in stacking order, so upper regions hide what they cover.
 """
 
@@ -19,23 +19,12 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
-    QMenu,
     QSlider,
     QSpinBox,
-    QStyle,
-    QToolButton,
     QVBoxLayout,
 )
 
-from skitter.core.slicing import (
-    TILE_ASPECTS,
-    SlicingOperation,
-    SlicingPlan,
-    Stage,
-    operation_types,
-)
+from skitter.core.slicing import TILE_ASPECTS, SlicingOperation, SlicingPlan
 from skitter.core.slicing.structure import FollowsStructure
 from skitter.ui import preferences
 from skitter.ui.steps.base import StepPage, side_panel
@@ -51,6 +40,8 @@ from skitter.ui.widgets.region_overlay import (
 )
 from skitter.ui.widgets.structure_overlay import StructureOverlay
 
+DETAIL_TEXT = ("Split the slicer's cells into quarters wherever the image has detail, "
+               "leaving flat areas large.")  # fmt: skip
 UNCOVERED_DIMMING = 0.6
 MIN_LINE_OPACITY, DEFAULT_LINE_OPACITY = 10, 100  # percent
 MIN_SOURCE_PX_PER_TILE = 2.0  # below this, tile colors come from too few source pixels
@@ -60,11 +51,6 @@ DISPLAY_MODES = (
     (OUTLINES, "Outlines", "Outlines only: every region's full extent is visible."),
     (HIDDEN, "Hidden", "Show the image without regions."),
 )
-
-
-def _stage_text(stage: Stage) -> str:
-    summary = stage.operation.summary()
-    return f"{stage.operation.name} — {summary}" if summary else stage.operation.name
 
 
 class SlicingStep(StepPage):
@@ -94,8 +80,8 @@ class SlicingStep(StepPage):
         layout.addWidget(
             side_panel(
                 self._build_mosaic_group(),
-                self._build_plan_group(),
-                self._build_settings_group(),
+                self._build_slicer_group(),
+                self._build_detail_group(),
                 self._build_result_group(),
                 self._build_display_group(),
             )
@@ -109,7 +95,7 @@ class SlicingStep(StepPage):
         session.slicing_progress.connect(self._on_slicing_progress)
         self.viewer.canvas.cursor_moved.connect(self._on_hover)
         self.viewer.canvas.cursor_left.connect(lambda: self._on_hover(None, None))
-        self._refresh_stages(select=0)
+        self._show_plan()
         self._apply_display()
         self._apply_line_style()
         self._show_layout()
@@ -149,72 +135,39 @@ class SlicingStep(StepPage):
         form.addRow(hint)
         return group
 
-    def _build_plan_group(self) -> QGroupBox:
-        self._stages = QListWidget()
-        self._stages.setMaximumHeight(140)
-        self._stages.currentRowChanged.connect(self._on_stage_selected)
-        self._stages.itemChanged.connect(self._on_stage_toggled)
-
-        self.add_menu = QMenu(self)
-        category = None
-        for cls in operation_types():
-            if cls.category != category:
-                category = cls.category
-                self.add_menu.addSection(category)
-            action = self.add_menu.addAction(cls.name)
-            action.setToolTip(cls.description)
-            action.triggered.connect(lambda _=False, c=cls: self.add_stage(c()))
-        self.add_menu.setToolTipsVisible(True)
-
-        style = self.style()
-        add_button = QToolButton()
-        add_button.setText("Add")
-        add_button.setMenu(self.add_menu)
-        add_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._remove_button = self._tool_button(
-            style.standardIcon(QStyle.StandardPixmap.SP_TrashIcon),
-            "Remove stage",
-            self.remove_stage,
-        )
-        self._up_button = self._tool_button(
-            style.standardIcon(QStyle.StandardPixmap.SP_ArrowUp), "Move up",
-            lambda: self.move_stage(-1),
-        )  # fmt: skip
-        self._down_button = self._tool_button(
-            style.standardIcon(QStyle.StandardPixmap.SP_ArrowDown), "Move down",
-            lambda: self.move_stage(1),
-        )  # fmt: skip
-        buttons = QHBoxLayout()
-        buttons.addWidget(add_button)
-        buttons.addStretch()
-        for button in (self._up_button, self._down_button, self._remove_button):
-            buttons.addWidget(button)
-
-        hint = muted(QLabel("Stages run top to bottom, starting from the whole mosaic."))
-        group = QGroupBox("Slicing Plan")
-        layout = QVBoxLayout(group)
-        layout.addWidget(self._stages)
-        layout.addLayout(buttons)
-        layout.addWidget(hint)
-        return group
-
-    @staticmethod
-    def _tool_button(icon, tooltip, slot) -> QToolButton:
-        button = QToolButton()
-        button.setIcon(icon)
-        button.setToolTip(tooltip)
-        button.clicked.connect(slot)
-        return button
-
-    def _build_settings_group(self) -> QGroupBox:
+    def _build_slicer_group(self) -> QGroupBox:
+        self.slicer_box = QComboBox()
+        for slicer in self.plan.slicers.values():
+            self.slicer_box.addItem(slicer.name, slicer.id)
+            self.slicer_box.setItemData(self.slicer_box.count() - 1, slicer.description,
+                                        Qt.ItemDataRole.ToolTipRole)  # fmt: skip
+        self.slicer_box.currentIndexChanged.connect(self._on_slicer_chosen)
         self._description = muted(QLabel())
+        self._description.setWordWrap(True)
         self.form = ParamForm()
-        self.form.changed.connect(self._on_param_changed)
-        self._settings_group = QGroupBox("Settings")
-        layout = QVBoxLayout(self._settings_group)
+        self.form.changed.connect(lambda _: self._schedule())
+        group = QGroupBox("Slicer")
+        layout = QVBoxLayout(group)
+        top = QFormLayout()
+        top.addRow("Slicer:", self.slicer_box)
+        layout.addLayout(top)
         layout.addWidget(self._description)
         layout.addWidget(self.form)
-        return self._settings_group
+        return group
+
+    def _build_detail_group(self) -> QGroupBox:
+        """Split by detail: on or off (the group's check box), with its settings."""
+        self.detail_group = QGroupBox("Split by Detail")
+        self.detail_group.setCheckable(True)
+        self.detail_group.toggled.connect(self._on_detail_toggled)
+        description = muted(QLabel(DETAIL_TEXT))
+        description.setWordWrap(True)
+        self.detail_form = ParamForm()
+        self.detail_form.changed.connect(lambda _: self._schedule())
+        layout = QVBoxLayout(self.detail_group)
+        layout.addWidget(description)
+        layout.addWidget(self.detail_form)
+        return self.detail_group
 
     def _build_result_group(self) -> QGroupBox:
         self._count = QLabel("—")
@@ -319,26 +272,17 @@ class SlicingStep(StepPage):
         dim = stacked and self.dim_uncovered.isChecked()
         self.viewer.set_dimming(UNCOVERED_DIMMING if dim else 0.0)
 
-    def _structure_stage(self) -> Stage | None:
-        """The stage whose structure to show: the selected one, if it is enabled and
-        follows structure (the overlay helps tune the settings being edited)."""
-        stages = self.plan.stages
-        row = self.current_row()
-        if not 0 <= row < len(stages):
-            return None
-        stage = stages[row]
-        return stage if stage.enabled and isinstance(stage.operation, FollowsStructure) else None
-
     def _refresh_structure(self) -> None:
-        stage = self._structure_stage()
-        self.show_structure.setEnabled(stage is not None)
+        """Show what the slicer follows, if it follows structure (like Contour Rows)."""
+        slicer = self.plan.slicer
+        follows = isinstance(slicer, FollowsStructure)
+        self.show_structure.setEnabled(follows)
         preferences.settings().setValue("slicing/show_structure", self.show_structure.isChecked())
         ctx = self.session.slice_context
-        if stage is None or ctx is None or not self.show_structure.isChecked():
+        if not follows or ctx is None or not self.show_structure.isChecked():
             self.structure.hide()
             return
-        # Over the whole canvas: exact when the stage fills it (as a first stage does).
-        self.structure.show(*stage.operation.structure(ctx.canvas()[0], ctx))
+        self.structure.show(*slicer.structure(ctx.canvas()[0], ctx))  # it slices the canvas
 
     def _apply_line_style(self) -> None:
         color_id = self.line_color.currentData()
@@ -393,69 +337,35 @@ class SlicingStep(StepPage):
 
     # Plan editing
 
-    def current_row(self) -> int:
-        return self._stages.currentRow()
+    def set_slicer(self, slicer_id: str) -> None:
+        """Slice with another slicer (its settings as last left)."""
+        self.slicer_box.setCurrentIndex(self.slicer_box.findData(slicer_id))
 
-    def add_stage(self, operation: SlicingOperation) -> None:
-        """Insert a stage after the selected one (or at the end)."""
-        row = self.current_row()
-        index = row + 1 if row >= 0 else len(self.plan.stages)
-        self.plan.stages.insert(index, Stage(operation))
-        self._refresh_stages(select=index)
-        self._schedule()
+    def _show_plan(self) -> None:
+        """Put the project's plan into the controls."""
+        plan = self.plan
+        for widget in (self.slicer_box, self.detail_group):
+            widget.blockSignals(True)
+        self.slicer_box.setCurrentIndex(max(self.slicer_box.findData(plan.slicer_id), 0))
+        self.detail_group.setChecked(plan.split_by_detail)
+        for widget in (self.slicer_box, self.detail_group):
+            widget.blockSignals(False)
+        self.detail_form.set_target(plan.detail)
+        self._show_slicer()
 
-    def remove_stage(self) -> None:
-        row = self.current_row()
-        if row < 0:
-            return
-        del self.plan.stages[row]
-        self._refresh_stages(select=min(row, len(self.plan.stages) - 1))
-        self._schedule()
-
-    def move_stage(self, delta: int) -> None:
-        row, stages = self.current_row(), self.plan.stages
-        target = row + delta
-        if row < 0 or not 0 <= target < len(stages):
-            return
-        stages[row], stages[target] = stages[target], stages[row]
-        self._refresh_stages(select=target)
-        self._schedule()
-
-    def _refresh_stages(self, select: int) -> None:
-        self._stages.blockSignals(True)
-        self._stages.clear()
-        for stage in self.plan.stages:
-            item = QListWidgetItem(_stage_text(stage))
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked if stage.enabled else Qt.CheckState.Unchecked)
-            item.setToolTip(stage.operation.description)
-            self._stages.addItem(item)
-        self._stages.setCurrentRow(select)
-        self._stages.blockSignals(False)
-        self._on_stage_selected(self.current_row())
-
-    def _on_stage_selected(self, row: int) -> None:
-        stages = self.plan.stages
-        operation = stages[row].operation if 0 <= row < len(stages) else None
-        self._settings_group.setTitle(f"{operation.name} Settings" if operation else "Settings")
-        self._description.setText(operation.description if operation else "No stage selected.")
-        self.form.set_target(operation)
-        self._remove_button.setEnabled(operation is not None)
-        self._up_button.setEnabled(row > 0)
-        self._down_button.setEnabled(0 <= row < len(stages) - 1)
+    def _show_slicer(self) -> None:
+        slicer: SlicingOperation = self.plan.slicer
+        self._description.setText(slicer.description)
+        self.form.set_target(slicer)
         self._refresh_structure()
 
-    def _on_stage_toggled(self, item: QListWidgetItem) -> None:
-        stage = self.plan.stages[self._stages.row(item)]
-        stage.enabled = item.checkState() == Qt.CheckState.Checked
+    def _on_slicer_chosen(self) -> None:
+        self.plan.slicer_id = self.slicer_box.currentData()
+        self._show_slicer()
         self._schedule()
 
-    def _on_param_changed(self, name: str) -> None:
-        row = self.current_row()
-        item = self._stages.item(row)
-        self._stages.blockSignals(True)
-        item.setText(_stage_text(self.plan.stages[row]))
-        self._stages.blockSignals(False)
+    def _on_detail_toggled(self, on: bool) -> None:
+        self.plan.split_by_detail = on
         self._schedule()
 
     def _schedule(self) -> None:
@@ -464,7 +374,7 @@ class SlicingStep(StepPage):
     # Session updates
 
     def _on_project_replaced(self) -> None:
-        self._refresh_stages(select=0)
+        self._show_plan()
         self._show_layout()
 
     def _on_source_committed(self) -> None:

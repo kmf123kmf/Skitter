@@ -80,7 +80,7 @@ class PatternSlicer(Subdivider):
     id = "pattern"
     name = "Brick Pattern"
     description = (
-        "Fill each region with a repeating brick pattern such as herringbone or "
+        "Fill the mosaic with a repeating brick pattern such as herringbone or "
         "basketweave. Bricks lying the other way are base tiles turned 90°."
     )
 
@@ -117,13 +117,3 @@ class PatternSlicer(Subdivider):
         return tile_pattern(
             self.unit(ctx), region.width, region.height, anchor=self.anchor, rotation=turn
         )
-
-    def summary(self) -> str:
-        text = get_pattern(self.pattern).name
-        if self.orientation == VERTICAL:
-            text += ", vertical"
-        if self.angle:
-            text += f", {self.angle:g}°"
-        if self.cell_size != 1:
-            text += f", {self.cell_size:g}× tiles"
-        return text

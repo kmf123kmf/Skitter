@@ -4,16 +4,15 @@ A slicing operation transforms a set of regions:
 
     apply(regions, ctx) -> regions
 
-A plan starts from one region covering the whole image and runs its
-operations in order. So one interface covers operations that split regions
-(grid, quadtree), adjust them (jitter, stacking), filter or merge them, or add
-regions drawn by hand.
+A plan (plan.py) runs a slicer on one region covering the whole image, then
+optionally splits its cells by detail (a quadtree, also an operation). The
+registry holds the slicers the Slicing tab offers.
 
-To add an operation: subclass `Subdivider` (to split each region on its own)
-or `SlicingOperation` (anything else), set `id`, `name`, `category` and
-`description`, declare parameters (see params.py), implement `subdivide` or
-`apply`, and decorate the class with `@register_operation`. Operations must
-be deterministic for given parameters and image (take a seed parameter for
+To add a slicer: subclass `Subdivider` (to split each region on its own)
+or `SlicingOperation` (anything else), set `id`, `name` and `description`,
+declare parameters (see params.py), implement `subdivide` or `apply`, and
+decorate the class with `@register_operation`. Operations must be
+deterministic for given parameters and image (take a seed parameter for
 randomness) and must not modify their inputs.
 
 Plans may run in the background. Operations get a `Progress` to report
@@ -39,9 +38,6 @@ from skitter.core.imaging import fill_hidden, visible_mask
 from skitter.core.slicing.layout import MosaicLayout
 from skitter.core.slicing.params import Configurable
 from skitter.core.slicing.regions import Region, RegionSet
-
-# Menu order for categories; unknown categories sort after these.
-CATEGORIES = ("Subdivide", "Adjust", "Filter", "Other")
 
 MAX_REGIONS = 250_000
 ANTIALIAS = 0.7  # blur before sampling, in sample spacings (see SliceContext.patch)
@@ -277,16 +273,11 @@ class SlicingOperation(Configurable, ABC):
 
     id: ClassVar[str] = ""  # stable identifier used in saved plans
     name: ClassVar[str] = ""  # shown in the UI
-    category: ClassVar[str] = "Other"
     description: ClassVar[str] = ""
 
     def key(self) -> tuple:
         """Identifies this operation's type and settings (for result caching)."""
         return (self.id, super().key())
-
-    def summary(self) -> str:
-        """Short description of the current settings for lists; may be empty."""
-        return ""
 
     def to_dict(self) -> dict:
         return {"type": self.id, "params": self.values()}
@@ -312,8 +303,6 @@ class Subdivider(SlicingOperation):
     subdivide gives them (equal z: array order). The result's z values are
     0..N-1.
     """
-
-    category = "Subdivide"
 
     def apply(
         self, regions: RegionSet, ctx: SliceContext, progress: Progress = NO_PROGRESS
@@ -347,7 +336,7 @@ _registry: dict[str, type[SlicingOperation]] = {}
 
 
 def register_operation(cls: type[SlicingOperation]) -> type[SlicingOperation]:
-    """Class decorator making an operation available to plans and the UI."""
+    """Class decorator making a slicer available to plans and the UI."""
     if not cls.id or not cls.name:
         raise TypeError(f"{cls.__name__} must define id and name")
     existing = _registry.get(cls.id)
@@ -358,13 +347,8 @@ def register_operation(cls: type[SlicingOperation]) -> type[SlicingOperation]:
 
 
 def operation_types() -> list[type[SlicingOperation]]:
-    """Registered operation classes in menu order (by category, then name)."""
-
-    def order(cls):
-        rank = CATEGORIES.index(cls.category) if cls.category in CATEGORIES else len(CATEGORIES)
-        return (rank, cls.category, cls.name)
-
-    return sorted(_registry.values(), key=order)
+    """Registered slicers, Grid first, then by name."""
+    return sorted(_registry.values(), key=lambda cls: (cls.id != "grid", cls.name))
 
 
 def get_operation_type(type_id: str) -> type[SlicingOperation]:
@@ -372,10 +356,3 @@ def get_operation_type(type_id: str) -> type[SlicingOperation]:
         return _registry[type_id]
     except KeyError:
         raise KeyError(f"unknown slicing operation {type_id!r}") from None
-
-
-def operation_from_dict(data: dict, problems: list[str] | None = None) -> SlicingOperation:
-    """The operation to_dict described. With a problems list, settings it doesn't know
-    keep their defaults and are reported there (see Configurable.from_values)."""
-    cls = get_operation_type(data["type"])
-    return cls.from_values(data.get("params", {}), problems, cls.name)

@@ -12,9 +12,8 @@ from skitter.core.slicing import (
     SliceContext,
     SlicingCancelled,
     SlicingPlan,
-    Stage,
 )
-from skitter.core.slicing.operations import GridSlicer, SplitSlicer
+from skitter.core.slicing.operations import GridSlicer, QuadtreeSlicer
 
 # Progress and plans (core)
 
@@ -32,20 +31,20 @@ def test_progress_maps_parts_reports_in_steps_and_cancels():
         half(1.0)
 
 
-def test_plan_reports_each_stage_and_can_be_cancelled():
+def test_plan_reports_each_step_and_can_be_cancelled():
     ctx = SliceContext(np.zeros((40, 60, 3), np.uint8), MosaicLayout(columns=6))
-    plan = SlicingPlan([Stage(GridSlicer()), Stage(SplitSlicer(across=2))])
+    plan = SlicingPlan(GridSlicer(), QuadtreeSlicer(threshold=0.5), split_by_detail=True)
     heard = []
     plan.evaluate(ctx, progress=lambda message, f: heard.append((message, f)))
-    assert heard[0] == ("Grid (stage 1 of 2)", 0.0)
-    assert heard[-1] == ("Split (stage 2 of 2)", 1.0)
+    assert heard[0] == ("Grid", 0.0)
+    assert heard[-1] == ("Split by detail", 1.0)
     assert [f for _, f in heard] == sorted(f for _, f in heard)
 
     calls = []
 
-    def cancelled() -> bool:  # once the second stage is under way
+    def cancelled() -> bool:  # once the detail split is under way
         calls.append(1)
-        return any("stage 2" in message for message, _ in heard2)
+        return any("detail" in message for message, _ in heard2)
 
     heard2 = []
     with pytest.raises(SlicingCancelled):
@@ -54,11 +53,21 @@ def test_plan_reports_each_stage_and_can_be_cancelled():
 
 
 def test_plan_copy_is_independent():
-    plan = SlicingPlan([Stage(GridSlicer())])
+    plan = SlicingPlan()
     copy = plan.copy()
-    copy.stages[0].operation.cell_size = 2.0
-    copy.stages.append(Stage(SplitSlicer()))
-    assert plan.stages[0].operation.cell_size == 1.0 and len(plan.stages) == 1
+    copy.slicer.cell_size = 2.0
+    copy.slicers["pile"].spread = 2.0
+    copy.detail.threshold = 3.0
+    copy.split_by_detail, copy.slicer_id = True, "pile"
+    assert plan.slicer.cell_size == 1.0 and plan.slicers["pile"].spread == 1.25
+    assert plan.detail.threshold == 12.0 and not plan.split_by_detail
+    assert plan.slicer_id == "grid"
+
+
+def use(plan, operation):
+    """Slice with operation (unregistered slicers too)."""
+    plan.slicers[operation.id] = operation
+    plan.slicer_id = operation.id
 
 
 # The session (worker thread)
@@ -106,14 +115,14 @@ def test_commit_slices_in_the_background(session):
 def test_only_the_latest_run_counts(session):
     session.commit_source()
     session.wait_for_slicing()
-    grid = session.project.slicing_plan.stages[0].operation
+    grid = session.project.slicing_plan.slicer
     installed = []
     session.slicing_changed.connect(lambda: installed.append(len(session.project.regions)))
     for size in (2.0, 3.0, 0.5):  # three quick edits: each run replaces the last
         grid.cell_size = size
         session.slicing_edited()
     session.wait_for_slicing()
-    expected = len(SlicingPlan([Stage(GridSlicer(cell_size=0.5))]).regions(session.slice_context))
+    expected = len(SlicingPlan(GridSlicer(cell_size=0.5)).regions(session.slice_context))
     assert installed == [expected]
 
 
@@ -121,7 +130,7 @@ def test_regions_stay_shown_while_a_plan_edit_runs(session, monkeypatch):
     session.commit_source()
     session.wait_for_slicing()
     before = session.project.regions
-    session.project.slicing_plan.stages[0] = Stage(Slow())
+    use(session.project.slicing_plan, Slow())
     session.slicing_edited()
     assert session.slicing_running
     assert session.project.regions is before  # still shown, but out of date:
@@ -133,11 +142,11 @@ def test_regions_stay_shown_while_a_plan_edit_runs(session, monkeypatch):
 def test_editing_the_plan_during_a_run_doesnt_reach_it(session):
     session.commit_source()
     session.wait_for_slicing()
-    session.project.slicing_plan.stages[0] = Stage(Slow())
+    use(session.project.slicing_plan, Slow())
     session.slicing_edited()
-    session.project.slicing_plan.stages[0].operation.cell_size = 3.0  # not re-sliced (yet)
+    session.project.slicing_plan.slicer.cell_size = 3.0  # not re-sliced (yet)
     session.wait_for_slicing()
-    expected = len(SlicingPlan([Stage(GridSlicer())]).regions(session.slice_context))
+    expected = len(SlicingPlan().regions(session.slice_context))
     assert len(session.project.regions) == expected
 
 
@@ -146,11 +155,11 @@ def test_a_replaced_run_stops_early(session, monkeypatch):
     session.wait_for_slicing()
     monkeypatch.setattr(Slow, "delay", 0.2)
     plan = session.project.slicing_plan
-    plan.stages[0] = Stage(Slow())  # 24 regions x 1 s if it ran to the end
+    use(plan, Slow())  # 24 regions x 1 s if it ran to the end
     session.slicing_edited()
     first = session._slicing_job
     time.sleep(0.1)
-    plan.stages[0] = Stage(GridSlicer(cell_size=2.0))
+    use(plan, GridSlicer(cell_size=2.0))
     session.slicing_edited()
     start = time.perf_counter()
     first.wait(5)
@@ -167,7 +176,7 @@ def test_failures_in_the_background_are_reported(session, monkeypatch):
         raise RuntimeError("boom")
 
     monkeypatch.setattr(GridSlicer, "apply", fail)
-    session.project.slicing_plan.stages[0].operation.cell_size = 2.0
+    session.project.slicing_plan.slicer.cell_size = 2.0
     session.slicing_edited()
     session.wait_for_slicing()
     assert session.slicing_error == "Slicing failed: RuntimeError: boom"

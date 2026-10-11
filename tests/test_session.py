@@ -111,7 +111,7 @@ def test_layout_before_commit_is_kept_and_used(session):
 
 def test_unexpected_slicing_failure_is_reported(session, monkeypatch):
     session.commit_source()
-    operation = session.project.slicing_plan.stages[0].operation
+    operation = session.project.slicing_plan.slicer
 
     def fail(self, regions, ctx, progress):
         raise RuntimeError("boom")

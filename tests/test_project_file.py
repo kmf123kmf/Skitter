@@ -27,7 +27,7 @@ from skitter.core.project_file import (
     load_project,
     save_project,
 )
-from skitter.core.slicing import MosaicLayout, SliceContext, SlicingPlan, Stage
+from skitter.core.slicing import MosaicLayout, SliceContext, SlicingPlan
 from skitter.core.slicing.operations import GridSlicer, QuadtreeSlicer
 
 # The file format
@@ -47,8 +47,8 @@ def sample_project(alpha=True) -> Project:
     project.source_image = apply_edits(image, project.source_edits)
     project.source_final = project.source_image
     project.layout = MosaicLayout(tile_aspect=1.5, columns=7)
-    stages = [Stage(GridSlicer(angle=30.0)), Stage(QuadtreeSlicer(splits=1), enabled=False)]
-    project.slicing_plan = SlicingPlan(stages)
+    project.slicing_plan = SlicingPlan(GridSlicer(angle=30.0), QuadtreeSlicer(splits=1))
+    project.slicing_plan.slicers["pile"].update(spread=0.8)  # kept, though not chosen
     ctx = SliceContext(project.source_final, project.layout)
     project.regions = project.slicing_plan.regions(ctx)
     project.match_method.update(max_uses=7, tint="custom", tint_strength=0.4)
@@ -85,7 +85,9 @@ def test_a_project_survives_a_round_trip(tmp_path):
     assert again.phase_holds["build"].values() == {"hold_before": 0.5, "hold_after": 3.0}
     assert again.phase_holds["clear"].hold_after == 1.5
     assert again.camera_track == project.camera_track
-    assert not again.slicing_plan.stages[1].enabled
+    plan = again.slicing_plan
+    assert plan.slicer.angle == 30.0 and not plan.split_by_detail and plan.detail.splits == 1
+    assert plan.slicers["pile"].spread == 0.8
     assert not (tmp_path / "test.skitter.part").exists()
 
 
@@ -213,7 +215,7 @@ def test_loading_skips_what_this_version_does_not_know(tmp_path):
     def change(doc):
         doc["match_methods"]["mosaic"]["retired_setting"] = 1
         doc["match_methods"]["mosaic"]["max_uses"] = -5  # out of range
-        doc["slicing_plan"]["stages"].insert(0, {"type": "hexagons", "params": {}})
+        doc["slicing_plan"]["slicers"]["hexagons"] = {}
         doc["choreographies"]["deal"]["decks"] = "many"
         doc["layout"]["columns"] = 0
 
@@ -223,7 +225,9 @@ def test_loading_skips_what_this_version_does_not_know(tmp_path):
     assert "retired_setting" in problems and "max_uses" in problems and "hexagons" in problems
     assert "decks" in problems and "layout" in problems.lower()
     assert project.match_method.max_uses == 3 and project.match_method.tint_strength == 0.4
-    assert [s.operation.id for s in project.slicing_plan.stages] == ["grid", "quadtree"]
+    assert (
+        project.slicing_plan.slicer_id == "grid" and "hexagons" not in project.slicing_plan.slicers
+    )
     assert project.layout == MosaicLayout()
 
 
@@ -248,6 +252,43 @@ def test_an_unknown_matching_method_falls_back_to_the_default(tmp_path):
     loaded = load_project(path)
     assert loaded.project.match_method_id == "mosaic"
     assert any("telepathy" in p for p in loaded.problems)
+
+
+@pytest.mark.parametrize(
+    "stages, slicer, detail, note",
+    [
+        # Grid, then Quadtree: the common plan, now a slicer split by detail.
+        ([("grid", True, {"angle": 30.0}), ("quadtree", True, {"splits": 1})], "grid", True, None),
+        # Removed operations are left out, and said so.
+        (
+            [("grid", True, {}), ("jitter", True, {}), ("stacking", True, {})],
+            "grid",
+            False,
+            "jitter",
+        ),
+        # One slicer per plan: the first one enabled.
+        (
+            [("grid", False, {}), ("pile", True, {}), ("contour", True, {})],
+            "pile",
+            False,
+            "Contour Rows",
+        ),
+        # A Quadtree on its own split the whole mosaic: now a Grid's cells.
+        ([("quadtree", True, {})], "grid", True, "Quadtree"),
+        ([("grid", True, {}), ("quadtree", False, {"splits": 3})], "grid", False, None),
+    ],
+)
+def test_plans_listing_stages_take_the_new_shape(stages, slicer, detail, note):
+    problems = []
+    data = {"stages": [{"type": kind, "enabled": on, "params": params}
+                       for kind, on, params in stages]}  # fmt: skip
+    plan = SlicingPlan.from_dict(data, problems)
+    assert plan.slicer_id == slicer and plan.split_by_detail == detail
+    assert (note is None and not problems) or any(note in p for p in problems)
+    if stages[0] == ("grid", True, {"angle": 30.0}):
+        assert plan.slicer.angle == 30.0 and plan.detail.splits == 1
+    if stages[-1] == ("quadtree", False, {"splits": 3}):
+        assert plan.detail.splits == 3  # its settings, kept for when it is turned on
 
 
 def test_files_that_are_not_projects_are_refused(tmp_path):

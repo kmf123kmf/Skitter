@@ -25,7 +25,7 @@ class PileSlicer(Subdivider):
     id = "pile"
     name = "Photo Pile"
     description = (
-        "Cover each region with a pile of overlapping, randomly rotated photos "
+        "Cover the mosaic with a pile of overlapping, randomly rotated photos "
         "in the base tile's shape, stacked in random order. At spread 1.0 every "
         "point is covered."
     )
@@ -81,7 +81,3 @@ class PileSlicer(Subdivider):
         size = np.where(turned[:, None], (photo_h, photo_w), (photo_w, photo_h))
         turn = rng.uniform(-1, 1, n) * math.radians(self.rotation)
         return RegionSet.from_arrays(cells.center + jitter, size, turn, z=rng.permutation(n))
-
-    def summary(self) -> str:
-        size = "tile-size" if self.photo_size == 1 else f"{self.photo_size:g}× tile"
-        return f"{size} photos, ±{self.rotation:g}°"

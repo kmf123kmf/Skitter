@@ -1,4 +1,7 @@
-"""Quadtree: adaptive subdivision driven by image detail."""
+"""Split by detail (a quadtree): split cells into quarters where the image has detail.
+
+Not a slicer of its own: a plan runs it after its slicer (see plan.py).
+"""
 
 import math
 
@@ -7,7 +10,6 @@ from skitter.core.slicing.base import (
     Progress,
     SliceContext,
     Subdivider,
-    register_operation,
 )
 from skitter.core.slicing.params import ChoiceParam, FloatParam
 from skitter.core.slicing.regions import Region, RegionSet
@@ -15,13 +17,12 @@ from skitter.core.slicing.regions import Region, RegionSet
 SIZES = {1: "½", 2: "¼", 3: "⅛", 4: "1/16", 5: "1/32", 6: "1/64"}  # by number of splits
 
 
-@register_operation
 class QuadtreeSlicer(Subdivider):
     id = "quadtree"
-    name = "Quadtree"
+    name = "Split by detail"
     description = (
-        "Split regions into quarters wherever the image has detail, leaving flat "
-        "areas large. Use after a Grid so the largest cells have the tile shape."
+        "Split the slicer's cells into quarters wherever the image has detail, leaving "
+        "flat areas large."
     )
 
     threshold = FloatParam(
@@ -33,8 +34,8 @@ class QuadtreeSlicer(Subdivider):
     splits = ChoiceParam(
         2, "Smallest cell",
         choices=[(n, f"{SIZES[n]} of the cell ({n} split{'s' if n > 1 else ''})") for n in SIZES],
-        help="How small the detail can split each cell it starts from; ¼ after a base-tile "
-             "Grid gives quarter-tile cells at most.",
+        help="How small detail can split each of the slicer's cells; ¼ of a base-tile Grid "
+             "cell gives quarter-tile cells at most.",
     )  # fmt: skip
 
     def subdivide(
@@ -59,6 +60,3 @@ class QuadtreeSlicer(Subdivider):
         split(0.0, 0.0, region.width, region.height, 0)
         x, y, w, h = zip(*leaves, strict=True)
         return RegionSet.from_rects(x, y, w, h)
-
-    def summary(self) -> str:
-        return f"detail {self.threshold:g}, down to {SIZES[self.splits]}"

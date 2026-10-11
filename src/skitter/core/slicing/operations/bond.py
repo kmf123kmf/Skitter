@@ -102,16 +102,3 @@ class BondSlicer(Subdivider):
             vs.append(np.full(len(u), origin_v + (index + 0.5) * brick_v))
         u, v = np.concatenate(us), np.concatenate(vs)
         return frame.place(np.stack([v, u] if vertical else [u, v], axis=-1), (cell_w, cell_h))
-
-    def summary(self) -> str:
-        if self.bond == "custom":
-            text = f"{self.step:g} shift"
-        else:
-            text = dict(BondSlicer.bond.choices)[self.bond].split(" (")[0].lower() + " bond"
-        if self.orientation == VERTICAL:
-            text += ", vertical"
-        if self.angle:
-            text += f", {self.angle:g}°"
-        if self.cell_size != 1:
-            text += f", {self.cell_size:g}× tiles"
-        return text

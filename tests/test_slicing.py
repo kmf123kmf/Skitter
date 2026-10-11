@@ -16,11 +16,9 @@ from skitter.core.slicing import (
     SlicingError,
     SlicingOperation,
     SlicingPlan,
-    Stage,
     Subdivider,
     coverage,
     get_operation_type,
-    operation_from_dict,
     operation_types,
     register_operation,
     summarize,
@@ -29,13 +27,23 @@ from skitter.core.slicing.base import _registry
 from skitter.core.slicing.operations import (
     BondSlicer,
     GridSlicer,
-    JitterAdjust,
     PatternSlicer,
+    PileSlicer,
     QuadtreeSlicer,
-    SplitSlicer,
-    StackingAdjust,
 )
 from skitter.core.slicing.regions import upright
+
+
+class Pieces(Subdivider):
+    """Equal pieces, across by down (a subdivider for tests; not registered)."""
+
+    id = "test-pieces"
+    name = "Pieces"
+    across = IntParam(2, "Across", min=1, max=10_000)
+    down = IntParam(2, "Down", min=1, max=10_000)
+
+    def subdivide(self, region, ctx, progress=None):
+        return RegionSet.grid(region.width, region.height, self.across, self.down)
 
 
 def blank(width=100, height=60):
@@ -145,11 +153,12 @@ def test_conditional_params():
     assert _Demo.extra.is_active(op)
 
 
-def test_registry_lists_builtins_in_category_order():
+def test_registry_lists_the_slicers_grid_first():
     ids = [cls.id for cls in operation_types()]
-    assert ids.index("grid") < ids.index("jitter")
-    assert {"grid", "quadtree", "jitter", "stacking"} <= set(ids)
+    assert ids[0] == "grid" and set(ids) == {"grid", "bond", "pattern", "contour", "pile"}
     assert get_operation_type("grid") is GridSlicer
+    with pytest.raises(KeyError):
+        get_operation_type("quadtree")  # it splits a slicer's cells: not a slicer
 
 
 def test_register_rejects_duplicate_ids():
@@ -170,9 +179,9 @@ def test_register_custom_operation_roundtrips():
             return RegionSet.grid(region.width, region.height, 2, 1)
 
     try:
-        op = operation_from_dict({"type": "test-halve", "params": {}})
-        plan = SlicingPlan([Stage(op), Stage(Halve())])
-        assert len(plan.regions(blank())) == 4
+        plan = SlicingPlan.from_dict({"slicer": "test-halve"})
+        assert isinstance(plan.slicer, Halve) and len(plan.regions(blank())) == 2
+        assert plan.to_dict()["slicer"] == "test-halve"
     finally:
         del _registry["test-halve"]
 
@@ -186,43 +195,38 @@ def test_default_plan_is_grid_of_base_tiles():
     np.testing.assert_allclose(regions.size[0], [10, 10])
 
 
-def test_empty_plan_yields_whole_image():
-    regions = SlicingPlan().regions(blank(100, 60))
-    assert len(regions) == 1 and regions[0].width == 100
+def test_split_by_detail_runs_only_when_on():
+    image = (np.indices((64, 64)).sum(0) % 2 * 255).astype(np.uint8)[..., None].repeat(3, -1)
+    ctx = SliceContext(image, MosaicLayout(columns=4), tile_width=16)  # busy everywhere
+    plan = SlicingPlan(GridSlicer(), QuadtreeSlicer(threshold=1, splits=1))
+    assert len(plan.regions(ctx)) == 16
+    plan.split_by_detail = True
+    assert len(plan.regions(ctx)) == 64
 
 
-def test_disabled_stage_passes_through():
-    plan = SlicingPlan(
-        [
-            Stage(SplitSlicer(across=4)),
-            Stage(SplitSlicer(across=2), enabled=False),
-        ]
-    )
-    assert len(plan.regions(blank(100, 100))) == 16
-
-
-def test_evaluate_reuses_unchanged_prefix():
+def test_evaluate_reuses_the_slicer_when_only_the_detail_split_changes():
     calls = []
 
-    class Counting(SplitSlicer):
-        id = "test-counting"
-
+    class Counting(Pieces):
         def apply(self, regions, ctx, progress=None):
             calls.append(self.across)
             return super().apply(regions, ctx)
 
-    plan = SlicingPlan([Stage(Counting(across=2)), Stage(Counting(across=3))])
-    ctx = blank(60, 60)
+    image = (np.indices((60, 60)).sum(0) % 2 * 255).astype(np.uint8)[..., None].repeat(3, -1)
+    ctx = SliceContext(image)
+    plan = SlicingPlan(Counting(across=2), QuadtreeSlicer(threshold=1, splits=1), True)
     cache = plan.evaluate(ctx)
-    plan.stages[1].operation.across = 4
+    plan.detail.splits = 2
     cache = plan.evaluate(ctx, cache)
-    assert calls == [2, 3, 4]  # the first stage was not re-run
+    assert calls == [2]  # the slicer was not run again
     assert len(cache[-1].regions) == 4 * 16
+    plan.slicer.across = 3
+    plan.evaluate(ctx, cache)
+    assert calls == [2, 3]
 
 
 def test_too_many_regions_raises():
-    grid = SplitSlicer(across=1000, keep_shape=False, down=1000)
-    plan = SlicingPlan([Stage(grid)])
+    plan = SlicingPlan(Pieces(across=1000, down=1000))
     with pytest.raises(SlicingError, match=f"{MAX_REGIONS:,}"):
         plan.evaluate(blank())
 
@@ -230,36 +234,24 @@ def test_too_many_regions_raises():
 def test_too_many_regions_across_parents_fails_before_finishing():
     calls = []
 
-    class Counting(SplitSlicer):
+    class Counting(Pieces):
         def subdivide(self, region, ctx, progress=None):
             calls.append(region)
             return super().subdivide(region, ctx)
 
-    plan = SlicingPlan(
-        [
-            Stage(SplitSlicer(across=4, keep_shape=False, down=1)),
-            Stage(Counting(across=400, keep_shape=False, down=400)),
-        ]
-    )
+    parents = Pieces(across=4, down=1).apply(blank().canvas(), blank())
     with pytest.raises(SlicingError, match=f"{MAX_REGIONS:,}"):
-        plan.evaluate(blank())
+        Counting(across=400, down=400).apply(parents, blank())
     assert len(calls) == 2  # stopped once the running total passed the limit
 
 
 def test_plan_serialization_roundtrip():
-    plan = SlicingPlan(
-        [
-            Stage(GridSlicer(cell_size=2)),
-            Stage(JitterAdjust(seed=7), enabled=False),
-            Stage(StackingAdjust(order="reverse")),
-        ]
-    )
+    plan = SlicingPlan(PileSlicer(spread=0.8), QuadtreeSlicer(threshold=5.0), True)
+    plan.slicers["grid"].cell_size = 2  # every slicer's settings are kept
     data = plan.to_dict()
-    assert data["stages"][1] == {
-        "enabled": False,
-        "type": "jitter",
-        "params": JitterAdjust(seed=7).values(),
-    }
+    assert data["slicer"] == "pile" and data["split_by_detail"] is True
+    assert data["slicers"]["grid"] == GridSlicer(cell_size=2).values()
+    assert data["detail"] == QuadtreeSlicer(threshold=5.0).values()
     assert SlicingPlan.from_dict(data).to_dict() == data
 
 
@@ -270,23 +262,9 @@ def test_grid_has_only_tile_settings():
     assert [p.name for p in GridSlicer.params()] == ["cell_size", "angle", "anchor"]
 
 
-def test_split_keeps_the_tile_shape():
-    op = SplitSlicer(across=10)
-    assert op.down_for(100, 50, tile_aspect=1.0) == 5  # 10 x 10 pieces
-    assert op.down_for(100, 50, tile_aspect=2.0) == 10  # 10 x 5 pieces, 2:1 like the tile
-    assert op.down_for(100, 1, tile_aspect=1.0) == 1  # never fewer than one
-    op.keep_shape = False
-    op.down = 3
-    assert op.down_for(100, 50, tile_aspect=1.0) == 3
-    ctx = tiled(120, 60, tile=30, aspect=1.5)  # 30 x 20 tiles
-    pieces = SplitSlicer(across=4).apply(ctx.canvas(), ctx)
-    np.testing.assert_allclose(pieces.size[0], [30, 20])  # exactly the tile shape
-    assert len(pieces) == 4 * 3
-
-
-def test_split_inside_rotated_region_stays_inside():
+def test_subdividing_a_rotated_region_stays_inside():
     parent = RegionSet.from_arrays([[50, 50]], (40, 20), math.pi / 6)
-    grid = SplitSlicer(across=4, keep_shape=False, down=2)
+    grid = Pieces(across=4, down=2)
     cells = grid.apply(parent, blank())
     assert len(cells) == 8
     for corner in cells.corners().reshape(-1, 2):
@@ -319,15 +297,6 @@ def test_patch_samples_in_region_frame():
     rotated = Region(5, 5, 4, 2, rotation=math.pi / 2)
     patch, _ = ctx.patch(rotated)
     assert patch.shape == (2, 4)
-
-
-def test_jitter_is_deterministic_and_zero_is_identity():
-    cells = RegionSet.grid(100, 100, 5, 5)
-    a = JitterAdjust(seed=3).apply(cells, blank())
-    b = JitterAdjust(seed=3).apply(cells, blank())
-    np.testing.assert_array_equal(a.data, b.data)
-    still = JitterAdjust(offset=0, rotation=0, scale=0).apply(cells, blank())
-    np.testing.assert_array_equal(still.data, cells.data)
 
 
 # Stacking (z-order)
@@ -368,12 +337,6 @@ def test_subdivider_keeps_parent_stack_positions():
     assert parts.z.tolist() == [3, 2, 1, 0]
 
 
-def test_jitter_preserves_stacking():
-    regions = RegionSet.from_arrays([[0, 0], [5, 5]], (2, 2), z=[1, 0])
-    assert JitterAdjust().apply(regions, blank()).z.tolist() == [1, 0]
-    assert "gap" not in [cls.id for cls in operation_types()]
-
-
 def test_pile_covers_every_point_with_random_stacking():
     from skitter.core.slicing.operations import PileSlicer
 
@@ -405,21 +368,6 @@ def test_pile_handles_regions_off_the_top_left():
     ctx = tiled(500, 500, tile=50)
     regions = RegionSet.from_arrays([[-30.0, -40.0], [100.0, 100.0]], (100, 100))
     assert len(PileSlicer().apply(regions, ctx)) > 2
-
-
-def test_stacking_order_operation():
-    from skitter.core.slicing.operations import StackingAdjust
-
-    regions = RegionSet.from_arrays([[0, 0]] * 3, [[3, 3], [1, 1], [2, 2]])
-    small_on_top = StackingAdjust(order="small_on_top").apply(regions, blank())
-    assert small_on_top.stacking_order().tolist() == [0, 2, 1]  # largest at the bottom
-    large_on_top = StackingAdjust(order="large_on_top").apply(regions, blank())
-    assert large_on_top.stacking_order().tolist() == [1, 2, 0]
-    reverse = StackingAdjust(order="reverse").apply(regions, blank())
-    assert reverse.stacking_order().tolist() == [2, 1, 0]
-    shuffled = StackingAdjust(order="random", seed=3).apply(regions, blank())
-    assert sorted(shuffled.z.tolist()) == [0, 1, 2]
-    assert not StackingAdjust.seed.is_active(StackingAdjust(order="reverse"))
 
 
 # Mosaic layout, mosaic-unit slicing, analysis
@@ -457,7 +405,7 @@ def test_the_canvas_keeps_its_size_whatever_the_layout():
 
 def test_slicing_does_not_depend_on_the_unit_size():
     image = np.random.default_rng(0).integers(0, 256, (90, 120, 3), dtype=np.uint8)
-    plan = SlicingPlan([Stage(QuadtreeSlicer(splits=2)), Stage(JitterAdjust())])
+    plan = SlicingPlan(GridSlicer(angle=20.0), QuadtreeSlicer(splits=2), True)
     layout = MosaicLayout(tile_aspect=1.5, columns=6)
     small = plan.regions(SliceContext(image, layout, tile_width=10))
     large = plan.regions(SliceContext(image, layout, tile_width=250))

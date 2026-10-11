@@ -13,7 +13,6 @@ from skitter.core.slicing import (
     RegionSet,
     SliceContext,
     SlicingPlan,
-    Stage,
     coverage,
     mask_regions,
     summarize,
@@ -127,7 +126,7 @@ def test_grid_keeps_tiles_touching_the_picture_whole():
 
 def test_rotated_tiles_are_kept_exactly_when_they_touch_a_visible_pixel():
     ctx = SliceContext(oval(), MosaicLayout(columns=12, tile_aspect=1.0), tile_width=10)
-    plan = SlicingPlan([Stage(PileSlicer(rotation=30.0, seed=3))])
+    plan = SlicingPlan(PileSlicer(rotation=30.0, seed=3))
     every = plan.evaluate(ctx)[-1].regions
     keep = touching(every, ctx)
     assert 0 < keep.sum() < len(every)
@@ -175,7 +174,7 @@ def test_coverage_and_density_count_the_visible_part_only():
 
 def test_grid_slicer_unchanged_by_an_opaque_alpha_channel():
     layout = MosaicLayout(columns=8, tile_aspect=1.0)
-    plan = SlicingPlan([Stage(GridSlicer())])
+    plan = SlicingPlan(GridSlicer())
     a = plan.regions(SliceContext(rgba()[..., :3], layout, tile_width=10))
     b = plan.regions(SliceContext(rgba(), layout, tile_width=10))
     np.testing.assert_array_equal(a.data, b.data)
@@ -220,7 +219,7 @@ def pixel_exact(regions: RegionSet, ctx: SliceContext) -> np.ndarray:
 def test_a_donut_leaves_its_hole_empty(plan):
     ctx = masked(ring())
     stage = GridSlicer() if plan == "grid" else PileSlicer(rotation=30.0, seed=2)
-    every = SlicingPlan([Stage(stage)]).evaluate(ctx)[-1].regions
+    every = SlicingPlan(stage).evaluate(ctx)[-1].regions
     keep = touching(every, ctx)
     kept = every[np.flatnonzero(keep)]
     assert not kept.contains(ctx.width / 2, ctx.height / 2).any()  # the hole
@@ -267,9 +266,7 @@ def test_thin_lines_under_large_rotated_tiles_are_not_missed():
         alpha = np.zeros((300, 300), np.uint8)
         alpha[:, column] = 255
         ctx = masked(alpha, columns=3)  # 100 px tiles
-        every = (
-            SlicingPlan([Stage(PileSlicer(rotation=40.0, seed=column))]).evaluate(ctx)[-1].regions
-        )
+        every = SlicingPlan(PileSlicer(rotation=40.0, seed=column)).evaluate(ctx)[-1].regions
         keep = touching(every, ctx)
         assert keep.any()
         np.testing.assert_array_equal(keep, covers_visible(every, ctx, 600))

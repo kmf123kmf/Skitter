@@ -120,7 +120,3 @@ class ContourSlicer(Subdivider):
         # outline allows (a square: within a quarter turn either way).
         period = math.pi / 2 if math.isclose(tile_w, tile_h) else math.pi
         return RegionSet.from_arrays(centers / scale, size, upright(angles + turn, period), z)
-
-    def summary(self) -> str:
-        size = "" if self.tile_size == 1 else f"{self.tile_size:g}× tiles, "
-        return f"{size}edges ≥ {self.strength:.0%}"

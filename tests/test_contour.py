@@ -9,7 +9,6 @@ from skitter.core.slicing import (
     MosaicLayout,
     SliceContext,
     SlicingPlan,
-    Stage,
     operation_types,
     summarize,
 )
@@ -173,7 +172,7 @@ def test_tiles_keep_the_base_shape_long_side_along_the_row(aspect):
 
 def test_slicing_is_deterministic_and_covers_the_picture():
     ctx = context(rgb(disk(240, 80.0)), columns=24)
-    plan = SlicingPlan([Stage(ContourSlicer())])
+    plan = SlicingPlan(ContourSlicer())
     a, b = plan.regions(ctx), plan.regions(ctx)
     np.testing.assert_array_equal(a.data, b.data)
     assert summarize(a, ctx).coverage > 0.98  # slivers of grout aside
@@ -199,9 +198,8 @@ def test_rows_follow_the_mask_edge():
 
 def test_works_inside_rotated_regions():
     ctx = context(rgb(disk(240, 80.0)), columns=6)
-    plan = SlicingPlan([Stage(PileSlicer(photo_size=3.0, rotation=30.0, seed=4)),
-                        Stage(ContourSlicer(tile_size=0.5))])  # fmt: skip
-    regions = plan.regions(ctx)
+    photos = PileSlicer(photo_size=3.0, rotation=30.0, seed=4).apply(ctx.canvas(), ctx)
+    regions = ContourSlicer(tile_size=0.5).apply(photos, ctx)
     assert len(regions)
     np.testing.assert_allclose(regions.size, 0.5 * np.asarray(ctx.tile_size)[None, :].repeat(
         len(regions), axis=0))  # fmt: skip

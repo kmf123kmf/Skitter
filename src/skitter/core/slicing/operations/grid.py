@@ -23,7 +23,7 @@ class GridSlicer(Subdivider):
     id = "grid"
     name = "Grid"
     description = (
-        "Cover each region with a grid of base tiles (the Mosaic tile shape, scaled by "
+        "Cover the mosaic with a grid of base tiles (the Mosaic tile shape, scaled by "
         "Cell size). Partial cells at the edges become whole, overhanging cells."
     )
 
@@ -46,7 +46,3 @@ class GridSlicer(Subdivider):
         xx, yy = np.meshgrid(x0 + (np.arange(columns) + 0.5) * cell_w,
                              y0 + (np.arange(rows) + 0.5) * cell_h)  # fmt: skip
         return frame.place(np.stack([xx.ravel(), yy.ravel()], axis=-1), (cell_w, cell_h))
-
-    def summary(self) -> str:
-        text = "base tiles" if self.cell_size == 1 else f"{self.cell_size:g}× tiles"
-        return f"{text}, {self.angle:g}°" if self.angle else text

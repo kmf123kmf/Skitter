@@ -2,7 +2,6 @@
 
 import numpy as np
 import pytest
-from PySide6.QtCore import Qt
 
 from skitter.core.edits import Crop
 from skitter.core.imaging import save_image
@@ -239,7 +238,7 @@ def test_slicing_shows_default_grid_of_base_tiles(slicing):
     assert slicing._coverage.text() == "100.0%"
     assert slicing._rows.text() == "30"
     assert slicing.overlay.regions is regions
-    assert slicing._stages.item(0).text() == "Grid — base tiles"
+    assert slicing.slicer_box.currentText() == "Grid" and not slicing.detail_group.isChecked()
     assert "c42b1c" in slicing._source_px.styleSheet()  # 1 source px per tile: warn
     assert slicing.is_complete()
 
@@ -269,48 +268,45 @@ def test_param_form_edits_recompute_regions(slicing, qapp):
     slicing.form.editor("cell_size").widget.setValue(2.0)
     flush(qapp)
     assert len(slicing.session.project.regions) == 20 * 15
-    assert slicing._stages.item(0).text() == "Grid — 2× tiles"
 
-    # Split divides each region on its own, keeping the tile shape by default.
-    split = next(a for a in slicing.add_menu.actions() if a.text() == "Split")
-    split.trigger()
+
+def test_slicer_choice_and_split_by_detail(slicing, qapp):
+    from skitter.core.slicing.operations import GridSlicer, PileSlicer
+
+    box = slicing.slicer_box
+    assert [box.itemText(i) for i in range(box.count())] == [
+        "Grid", "Brick Bond", "Brick Pattern", "Contour Rows", "Photo Pile"]  # fmt: skip
+    slicing.form.editor("cell_size").widget.setValue(2.0)
+    slicing.set_slicer("pile")
     flush(qapp)
-    assert len(slicing.session.project.regions) == 20 * 15 * 2 * 2
-    assert slicing._stages.item(1).text() == "Split — 2 across, tile shape"
-    down = slicing.form.editor("down").widget
-    assert not down.isEnabled()  # chosen from the tile shape
-    slicing.form.editor("keep_shape").widget.setChecked(False)
-    assert down.isEnabled()
-    down.setValue(1)
+    assert (
+        isinstance(slicing.plan.slicer, PileSlicer) and slicing.form._target is slicing.plan.slicer
+    )
+    assert "pile" in slicing._description.text()
+    assert len(slicing.session.project.regions) > 1200  # denser than the grid of base tiles
+    slicing.set_slicer("grid")  # back again: its settings as left
     flush(qapp)
-    assert len(slicing.session.project.regions) == 20 * 15 * 2
-    assert slicing._stages.item(1).text() == "Split — 2 × 1"
+    assert isinstance(slicing.plan.slicer, GridSlicer) and slicing.plan.slicer.cell_size == 2.0
+    assert len(slicing.session.project.regions) == 20 * 15
 
-
-def test_add_reorder_disable_remove_stages(slicing, qapp):
-    from skitter.core.slicing.operations import GridSlicer, JitterAdjust
-
-    assert "Gap" not in [a.text() for a in slicing.add_menu.actions()]
-    jitter_action = next(a for a in slicing.add_menu.actions() if a.text() == "Jitter")
-    jitter_action.trigger()
+    # Split by detail: off by default, its settings shown only while on. Cells 1.5 tiles
+    # across straddle the photo's one edge (half white, half black).
+    slicing.form.editor("cell_size").widget.setValue(1.5)
     flush(qapp)
-    assert [type(s.operation) for s in slicing.plan.stages] == [GridSlicer, JitterAdjust]
-    assert slicing.current_row() == 1
-    assert slicing._settings_group.title() == "Jitter Settings"
-    assert float(slicing._coverage.text().rstrip("%")) < 100
-    assert "c42b1c" in slicing._coverage.styleSheet()
-
-    slicing.move_stage(-1)
-    assert [type(s.operation) for s in slicing.plan.stages] == [JitterAdjust, GridSlicer]
-
-    slicing._stages.item(1).setCheckState(Qt.CheckState.Unchecked)  # disable the grid
+    plain = len(slicing.session.project.regions)
+    detail = slicing.detail_group
+    assert not detail.isChecked() and not slicing.detail_form.isEnabled()
+    detail.setChecked(True)
     flush(qapp)
-    assert len(slicing.session.project.regions) == 1
-
-    slicing._stages.setCurrentRow(1)
-    slicing.remove_stage()
+    assert slicing.plan.split_by_detail and slicing.detail_form.isEnabled()
+    assert slicing.detail_form._target is slicing.plan.detail
+    assert len(slicing.session.project.regions) > plain  # split along the edge
+    slicing.detail_form.editor("threshold").widget.setValue(128.0)  # nothing is that busy
     flush(qapp)
-    assert len(slicing.plan.stages) == 1 and len(slicing.session.project.regions) == 1
+    assert len(slicing.session.project.regions) == plain
+    detail.setChecked(False)
+    flush(qapp)
+    assert not slicing.plan.split_by_detail and len(slicing.session.project.regions) == plain
 
 
 def test_slicing_error_is_reported(slicing, qapp):
@@ -346,12 +342,9 @@ def test_overlay_draws_in_stacking_order():
 
 
 def test_pile_hover_reports_topmost_region(slicing, qapp):
-    from skitter.core.slicing import Stage
-    from skitter.core.slicing.operations import PileSlicer
-
-    slicing.plan.stages[:] = [Stage(PileSlicer(rotation=20))]
-    slicing._refresh_stages(select=0)
-    slicing.session.slicing_edited()
+    slicing.plan.slicers["pile"].rotation = 20.0
+    slicing.set_slicer("pile")
+    flush(qapp)
     regions = slicing.session.project.regions
     assert len(regions) > 1200  # denser than the grid of base tiles
 
@@ -477,30 +470,16 @@ def test_show_structure_draws_what_contour_rows_follows(window, source):
     slicing = window.step(SlicingStep)
     slicing.show_structure.setChecked(True)
     assert not slicing.show_structure.isEnabled() and not slicing.structure.shown  # a grid
-    slicing.add_stage(ContourSlicer())  # added after the grid, and selected
+    slicing.set_slicer("contour")
     window.session.slicing_edited()
+    assert isinstance(slicing.plan.slicer, ContourSlicer)
     assert slicing.show_structure.isEnabled() and slicing.structure.shown
     slicing.show_structure.setChecked(False)
     assert not slicing.structure.shown
     slicing.show_structure.setChecked(True)
     assert slicing.structure.shown
 
-    # Only for the selected stage: selecting the grid hides it, though Contour Rows
-    # is still in the plan.
-    slicing._stages.setCurrentRow(0)
-    assert not slicing.structure.shown and not slicing.show_structure.isEnabled()
-    slicing._stages.setCurrentRow(1)
-    assert slicing.structure.shown
-
-    # A disabled stage isn't doing anything: nothing to show.
-    slicing._stages.item(1).setCheckState(Qt.CheckState.Unchecked)
-    window.session.slicing_edited()
-    assert not slicing.structure.shown and not slicing.show_structure.isEnabled()
-    slicing._stages.item(1).setCheckState(Qt.CheckState.Checked)
-    window.session.slicing_edited()
-    assert slicing.structure.shown
-
-    slicing.remove_stage()
+    slicing.set_slicer("grid")  # nothing to follow
     window.session.slicing_edited()
     assert not slicing.structure.shown and not slicing.show_structure.isEnabled()
     assert slicing.show_structure.isChecked()  # remembered for next time
