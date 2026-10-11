@@ -109,6 +109,10 @@ class Choreography(Configurable, ABC):
     name: ClassVar[str] = ""
     description: ClassVar[str] = ""
     phase: ClassVar[str] = "build"
+    # Photos come to lie in other tiles' spots and take on their place in a pile: the
+    # stacking order follows the spots, not the photos (tests check such choreographies
+    # on their own terms).
+    photos_take_spots: ClassVar[bool] = False
 
     @abstractmethod
     def timeline(self, scene: MosaicScene, look: "AnimationLook | None" = None) -> Timeline:

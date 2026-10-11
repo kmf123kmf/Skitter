@@ -19,10 +19,12 @@ import numpy as np
 from numba import njit
 
 from skitter.core.matching.matcher import MatchResult
+from skitter.core.matching.raster import visible_share
 from skitter.core.slicing import SliceContext
 
 # Cached properties that depend only on where tiles lie (kept by with_result).
-GEOMETRY = ("corners", "bounds", "position", "distance", "angle", "reading_order", "overlaps")
+GEOMETRY = ("corners", "bounds", "position", "distance", "angle", "reading_order", "overlaps",
+            "visible_share")  # fmt: skip
 
 
 @dataclass(frozen=True, eq=False)
@@ -181,6 +183,11 @@ class MosaicScene:
             reach = _reach(half_a, axes_a, axis) + _reach(half_b, axes_b, axis)
             separated |= np.abs(np.sum(d * axis, axis=1)) >= reach - tol
         return np.stack([a[~separated], b[~separated]], axis=1)
+
+    @cached_property
+    def visible_share(self) -> np.ndarray:
+        """(N,) share of each tile the finished mosaic shows: 1 uncovered, 0 hidden."""
+        return visible_share(self.center, self.size, self.rotation)
 
 
 def _axes(rotation: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

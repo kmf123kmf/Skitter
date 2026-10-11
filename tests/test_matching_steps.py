@@ -923,8 +923,12 @@ def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):
     assert animate.keys.selected == 0
     assert overflowing_panels(window, qapp) == []
     animate.show_phase("show")  # another phase's tab, with its choreography's settings
-    animate.choreography_box.setCurrentIndex(animate.choreography_box.findData("still"))
+    animate.choreography_box.setCurrentIndex(animate.choreography_box.findData("ripple"))
     assert overflowing_panels(window, qapp) == []
+    animate.show_phase("build")  # builds with long settings
+    for build in ("sort", "unscramble"):
+        animate.choreography_box.setCurrentIndex(animate.choreography_box.findData(build))
+        assert overflowing_panels(window, qapp) == [], build
 
 
 def test_wheel_never_changes_an_unfocused_setting(sliced, photos, qapp):
@@ -1420,7 +1424,7 @@ def test_animate_tab_chooses_a_choreography_and_holds_per_phase(fade, sliced, ph
     # Show and Clear: None, or one of theirs (here the tests' own); a phase left out has
     # no holds to set, a chosen one adds its time, and the strip shows it.
     animate.show_phase("show")
-    assert [box.itemData(i) for i in range(box.count())] == [None, "test_blink"]
+    assert [box.itemData(i) for i in range(box.count())] == [None, "test_blink", "ripple", "wave"]
     assert box.currentData() is None and "No show phase" in animate.description.text()
     assert holds._target is None
     box.setCurrentIndex(box.findData("test_blink"))

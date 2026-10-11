@@ -248,7 +248,7 @@ class DealChoreography(Choreography):
         help="Randomness in the landing order, as a share of the whole sequence.",
     )  # fmt: skip
     duration = FloatParam(
-        8.0, "Duration", min=0.5, max=600.0, step=0.5, decimals=1, suffix=" s",
+        8.0, "Duration", min=0.5, max=3600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first tile leaving its deck to the last coming to rest.",
     )  # fmt: skip
     slide = FloatParam(

@@ -48,12 +48,12 @@ class PhaseHolds(Configurable):
     """How long a phase holds still before and after its motion."""
 
     hold_before = FloatParam(
-        0.0, "Hold before", min=0.0, max=60.0, step=0.5, decimals=1, suffix=" s",
+        0.0, "Hold before", min=0.0, max=600.0, step=0.5, decimals=1, suffix=" s",
         help="Show the phase's first frame this long before anything moves (for Build: "
              "the empty table).",
     )  # fmt: skip
     hold_after = FloatParam(
-        0.0, "Hold after", min=0.0, max=60.0, step=0.5, decimals=1, suffix=" s",
+        0.0, "Hold after", min=0.0, max=600.0, step=0.5, decimals=1, suffix=" s",
         help="Show the phase's last frame this long after its motion ends (for Build: the "
              "finished mosaic).",
     )  # fmt: skip

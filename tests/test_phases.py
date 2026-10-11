@@ -73,7 +73,7 @@ def test_every_choreography_keeps_its_phase_boundaries(fade):
     scene = grid_scene()
     final = TileFrame.final(scene)
     kinds = {phase: [cls.id for cls in choreography_types(phase)] for phase in PHASES}
-    assert kinds["build"] == ["assemble", "deal"]
+    assert kinds["build"] == ["assemble", "deal", "sort", "unscramble"]
     for cls in choreography_types():
         timeline = cls().timeline(scene)
         if cls.phase in ("show", "clear"):

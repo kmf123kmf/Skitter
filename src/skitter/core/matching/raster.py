@@ -3,7 +3,8 @@
 Overlapping regions hide each other (see slicing/regions.py), so matching
 must know which parts of a region stay visible, and the quality estimate
 must paint regions in stacking order. Both use a raster of region indices,
-painted bottom to top.
+painted bottom to top. Animations use the same painting to tell how much of
+each tile the finished mosaic shows (`visible_share`).
 """
 
 import math
@@ -18,7 +19,8 @@ MAX_RASTER_PIXELS = 16_000_000
 
 
 @njit(cache=True, nogil=True)
-def _paint(ids, order, centers, sizes, rotations, x0, y0, px):
+def _paint(ids, order, centers, sizes, rotations, x0, y0, px, painted):
+    """Paint regions in order; painted[r] counts the pixels region r covers on its own."""
     height, width = ids.shape
     for r in order:
         cx, cy = centers[r, 0], centers[r, 1]
@@ -37,6 +39,7 @@ def _paint(ids, order, centers, sizes, rotations, x0, y0, px):
                 # Into the region's frame (rotate by -rotation).
                 if abs(c * dx + s * dy) <= hw and abs(-s * dx + c * dy) <= hh:
                     ids[j, i] = r
+                    painted[r] += 1
 
 
 @dataclass(frozen=True)
@@ -108,7 +111,7 @@ class RasterGrid:
         if len(regions) and ids.size:
             _paint(
                 ids, regions.stacking_order().astype(np.int64), regions.center, regions.size,
-                regions.rotation, x0, y0, self.px,
+                regions.rotation, x0, y0, self.px, np.zeros(len(regions), np.int64),
             )  # fmt: skip
         return Raster(ids, (x0, y0), self.px)
 
@@ -125,3 +128,28 @@ def rasterize(
     smallest region side, coarser if needed to stay within max_pixels.
     """
     return RasterGrid.of(regions, bounds, px, max_pixels).paint(regions)
+
+
+def visible_share(center, size, rotation, max_pixels: int = 4_000_000) -> np.ndarray:
+    """(N,) share of each rectangle left visible when all are painted bottom to top
+    (array order): 1 uncovered, 0 hidden. Rectangles too small to cover a pixel
+    count as visible."""
+    center = np.ascontiguousarray(center, np.float64)
+    size = np.ascontiguousarray(size, np.float64)
+    rotation = np.ascontiguousarray(rotation, np.float64)
+    n = len(center)
+    if not n:
+        return np.zeros(0)
+    c, s = np.abs(np.cos(rotation)), np.abs(np.sin(rotation))
+    ex = c * size[:, 0] / 2 + s * size[:, 1] / 2
+    ey = s * size[:, 0] / 2 + c * size[:, 1] / 2
+    x0, y0 = float((center[:, 0] - ex).min()), float((center[:, 1] - ey).min())
+    x1, y1 = float((center[:, 0] + ex).max()), float((center[:, 1] + ey).max())
+    area = max(x1 - x0, 1e-9) * max(y1 - y0, 1e-9)
+    px = max(float(size.min()) / 8, math.sqrt(area / max_pixels), 1e-9)
+    ids = np.full((max(1, math.ceil((y1 - y0) / px)), max(1, math.ceil((x1 - x0) / px))), -1,
+                  np.int32)  # fmt: skip
+    painted = np.zeros(n, np.int64)
+    _paint(ids, np.arange(n, dtype=np.int64), center, size, rotation, x0, y0, px, painted)
+    shown = np.bincount(ids[ids >= 0], minlength=n)
+    return np.where(painted > 0, shown / np.maximum(painted, 1), 1.0)

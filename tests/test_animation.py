@@ -16,12 +16,13 @@ from skitter.core.animation import (
 )
 from skitter.core.animation.assemble import ORDERS, AssembleChoreography
 from skitter.core.animation.deal import DealChoreography, DealTimeline
+from skitter.core.animation.unscramble import UnscrambleChoreography
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing import MosaicLayout, RegionSet, SliceContext
 
 
-def make_scene(regions, tile, shift=None, error=None) -> MosaicScene:
+def make_scene(regions, tile, shift=None, error=None, ctx=None) -> MosaicScene:
     n = len(regions)
     mean = np.tile(np.float32([0.6, 0.0, 0.0]), (n, 1))
     mean[:, 0] = np.linspace(0.2, 0.9, n)
@@ -37,7 +38,8 @@ def make_scene(regions, tile, shift=None, error=None) -> MosaicScene:
         tint_target=mean if shift is None else mean + np.asarray(shift, np.float32),
         tint=1.0, quality=quality, regret=[],
     )  # fmt: skip
-    ctx = SliceContext(np.zeros((40, 60, 3), np.uint8), MosaicLayout(columns=6), tile_width=10)
+    if ctx is None:
+        ctx = SliceContext(np.zeros((40, 60, 3), np.uint8), MosaicLayout(columns=6), tile_width=10)
     return MosaicScene.from_result(result, ctx)
 
 
@@ -113,6 +115,8 @@ CONFIGS = [(cls, {}) for cls in choreography_types()] + [
     (DealChoreography, {"position": "orbit", "decks": 3, "orbit_turns": 2.5, "order": "far"}),
     (DealChoreography, {"position": "orbit", "radius": 0.2, "orbit_direction": "counter"}),
     (DealChoreography, {"position": "orbit", "decks": 2, "order": "random", "orbit_turns": 0}),
+    (UnscrambleChoreography, {"motion": "slide"}),
+    (UnscrambleChoreography, {"order": "center", "scrambled": 50.0}),
 ]
 CONFIG_IDS = [
     f"{cls.id}{'-' + '-'.join(map(str, kw.values())) if kw else ''}" for cls, kw in CONFIGS
@@ -423,12 +427,33 @@ def test_landing_times_last_gap_is_at_most_half_the_wind_down():
     assert gaps[-1] == pytest.approx(0.2)
 
 
+def overlapping(c0, s0, r0, c1, s1, r1) -> np.ndarray:
+    """Whether pairs of rectangles overlap (separating axis test; touching edges don't)."""
+
+    def axes(r):
+        return np.stack([np.cos(r), np.sin(r)], 1), np.stack([-np.sin(r), np.cos(r)], 1)
+
+    def along(a, b):
+        return np.abs(np.sum(a * b, 1))
+
+    a0, a1, d = axes(r0), axes(r1), c1 - c0
+    apart = np.zeros(len(d), bool)
+    for ax in (*a0, *a1):
+        reach = (s0[:, 0] * along(ax, a0[0]) + s0[:, 1] * along(ax, a0[1])
+                 + s1[:, 0] * along(ax, a1[0]) + s1[:, 1] * along(ax, a1[1])) / 2  # fmt: skip
+        apart |= along(d, ax) >= reach - 1e-9
+    return ~apart
+
+
 @pytest.mark.parametrize(("cls", "settings"), CONFIGS, ids=CONFIG_IDS)
 def test_every_choreography_keeps_overlapping_tiles_in_stacking_order(cls, settings):
-    # If a lower tile ever drew above a tile that covers it, it would have to pop
-    # underneath later (at the latest on the last frame). The one exception is a
-    # lower tile higher in the air (nearer the camera): it rightly covers the other,
-    # and their order changes only as their heights cross, continuously.
+    # If a lower tile ever drew above a tile that covers it, where they overlap, it
+    # would have to pop underneath later (at the latest on the last frame). The one
+    # exception is a lower tile higher in the air (nearer the camera): it rightly covers
+    # the other, and their order changes only as their heights cross, continuously.
+    # Tiles apart (one in flight, or lying in another tile's spot) may draw either way.
+    if cls.photos_take_spots:
+        pytest.skip("photos stack as the spots they lie in (see the choreography's tests)")
     scene = pile_scene()
     lower, upper = scene.overlaps.T
     assert len(lower)
@@ -438,6 +463,14 @@ def test_every_choreography_keeps_overlapping_tiles_in_stacking_order(cls, setti
         rank = np.empty(len(scene), np.int64)
         rank[frame.draw_order()] = np.arange(len(scene))
         visible = (frame.alpha[lower] > 0) & (frame.alpha[upper] > 0)
+        visible &= overlapping(
+            frame.center[lower],
+            frame.size[lower],
+            frame.rotation[lower],
+            frame.center[upper],
+            frame.size[upper],
+            frame.rotation[upper],
+        )
         height = frame.heights()
         nearer = height[lower] > height[upper]
         wrong = visible & (rank[upper] < rank[lower]) & ~nearer

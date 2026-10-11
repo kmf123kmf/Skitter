@@ -87,7 +87,7 @@ class AssembleChoreography(Choreography):
 
     order = ChoiceParam("center", "Order", choices=ORDERS, help="Which tiles land first.")
     duration = FloatParam(
-        8.0, "Duration", min=0.5, max=600.0, step=0.5, decimals=1, suffix=" s",
+        8.0, "Duration", min=0.5, max=3600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first tile leaving to the last tile coming to rest."
     )  # fmt: skip
     travel = FloatParam(

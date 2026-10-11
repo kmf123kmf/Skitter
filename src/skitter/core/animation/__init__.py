@@ -4,7 +4,7 @@ Nothing here imports Qt: a timeline only computes tile states, which the
 UI draws as sprites (or a renderer could draw frame by frame).
 """
 
-from skitter.core.animation import assemble, deal, show  # registers the built-ins
+from skitter.core.animation import assemble, deal, show, sort, unscramble  # registers built-ins
 from skitter.core.animation.base import (
     Choreography,
     FlightTimeline,
@@ -48,6 +48,8 @@ __all__ = [
     "TileFrame",
     "assemble",
     "deal",
+    "sort",
+    "unscramble",
     "choreography_types",
     "get_choreography",
     "landing_order",
