@@ -969,11 +969,12 @@ def every_configurable_type() -> list[type]:
     from skitter.core.animation.look import AnimationLook
     from skitter.core.animation.video import VideoSettings
     from skitter.core.assembly import ExportSettings
+    from skitter.core.blend import BlendSettings
     from skitter.core.matching.method import method_types
     from skitter.core.slicing.base import operation_types
 
     return [*choreography_types(), *operation_types(), *method_types(), AnimationLook,
-            PhaseHolds, VideoSettings, ExportSettings]  # fmt: skip
+            PhaseHolds, VideoSettings, ExportSettings, BlendSettings]  # fmt: skip
 
 
 @pytest.mark.parametrize("cls", every_configurable_type(), ids=lambda c: c.__name__)

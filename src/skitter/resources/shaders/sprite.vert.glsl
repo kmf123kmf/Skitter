@@ -14,6 +14,9 @@ in vec4 in_uv;        // texture rect shown: (u0, v0, u1, v1); u1 < u0 mirrors
 in vec2 in_skew;      // (du/dt, dv/ds): the rect turned on the texture (0: upright)
 in vec3 in_offset;    // OKLab shift of every texel (matching's tint)
 in float in_blur;     // > 0: soft shadow; the quad grows by this much (world units)
+in float in_blend;    // share of the picture mixed in
+in vec4 in_picture_uv;   // the picture rect the sprite covers, as in_uv
+in vec2 in_picture_skew; // turning it, as in_skew
 
 uniform vec2 u_center;     // camera center, world units
 uniform float u_rotation;  // camera turn, radians clockwise (the world looks turned back)
@@ -29,6 +32,8 @@ flat out float v_layer;
 out vec4 v_tint;
 out vec3 v_offset;
 out float v_blur;
+out vec2 v_picture_uv;
+out float v_blend;
 
 void main() {
     vec2 extent = in_size + 2.0 * in_blur * sign(in_size);
@@ -48,6 +53,9 @@ void main() {
 
     vec2 unit_uv = in_corner * (extent / in_size) + 0.5;  // 0..1 across the sprite
     v_uv = in_uv.xy + unit_uv * (in_uv.zw - in_uv.xy) + unit_uv.yx * in_skew;
+    v_picture_uv = in_picture_uv.xy + unit_uv * (in_picture_uv.zw - in_picture_uv.xy)
+                 + unit_uv.yx * in_picture_skew;
+    v_blend = in_blend;
     v_local = abs(local) * sign(in_corner);
     v_half = abs(in_size) * 0.5;
     v_world = world;

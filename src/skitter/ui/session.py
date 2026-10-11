@@ -126,6 +126,8 @@ class Session(QObject):
     # Manual picks changed tiles of these regions (np.ndarray); project.matches, scene and
     # textures were updated in place of a full replacement (matching_changed isn't emitted).
     mosaic_edited = Signal(object)
+    # project.blend changed: scene and textures were updated in place (same tiles shown).
+    blend_changed = Signal()
     export_progress = Signal(str, float)
     export_finished = Signal(
         str, object, object
@@ -245,7 +247,8 @@ class Session(QObject):
             except ValueError as exc:
                 opened.problems.append(f"The matched mosaic was left out ({exc}); match again")
             else:
-                opened.scene = MosaicScene.from_result(opened.restored[0], opened.context)
+                opened.scene = MosaicScene.from_result(opened.restored[0], opened.context,
+                                                       project.blend)  # fmt: skip
         return opened
 
     def open_project(self, path: str | Path, opened: "_Opened | None" = None) -> None:
@@ -772,7 +775,7 @@ class Session(QObject):
         changed = np.fromiter(changes, np.int64)
         self.project.matches = edited
         self._match_tiles = self._tile_snapshot(edited.tile)
-        self.scene = self.scene.with_result(edited, self._slice_context)
+        self.scene = self.scene.with_result(edited, self._slice_context, self.project.blend)
         self.textures.set_scene(self.scene, self.library)
         self.mosaic_edited.emit(changed)
 
@@ -786,6 +789,13 @@ class Session(QObject):
         ok = kept.tile < len(status)
         ok[ok] = status[kept.tile[ok]] == OK
         return kept.subset(ok)
+
+    def blend_edited(self) -> None:
+        """project.blend changed: the mosaic shows it at once (no new match needed)."""
+        if self.scene is not None:
+            self.scene = self.scene.with_blend(self.project.blend)
+            self.textures.set_scene(self.scene, self.library)
+        self.blend_changed.emit()
 
     def match_settings_edited(self) -> None:
         """project.match_method_id or its settings changed (results become out of date)."""
@@ -807,14 +817,15 @@ class Session(QObject):
             self._match_tiles = self.scene = self.textures = None
             return
         if scene is None:
-            scene = MosaicScene.from_result(result, self._slice_context)
+            scene = MosaicScene.from_result(result, self._slice_context, self.project.blend)
         self.scene = scene
         if result.picture:  # pieces of the picture: no library tiles
             self._match_tiles = None
             self.textures = PictureTextures(scene, self._slice_context.picture, self)
         else:
             self._match_tiles = self._tile_snapshot(result.tile)
-            self.textures = TileTextures(self.scene, self.library, self)
+            self.textures = TileTextures(self.scene, self.library, self,
+                                         self._slice_context.picture)  # fmt: skip
 
     def _tile_snapshot(self, tiles) -> tuple:
         """The library and the state of the tiles a mosaic uses."""
@@ -938,6 +949,7 @@ class Session(QObject):
             track=track, settings=settings, background=background, look=look, plan=plan,
             # Read here: the library isn't threadsafe.
             request=self._detail_request(scene, plan.scale * closest),
+            picture=self.textures.picture,
         )  # fmt: skip
 
         def work(progress, cancelled):
@@ -976,9 +988,10 @@ class Session(QObject):
                 return render_picture(scene, picture, settings, progress, cancelled)
         else:
             files = TileFiles.read(self.library, scene.slot)  # here: the library isn't threadsafe
+            picture = self._slice_context.picture if scene.blended else None
 
             def render(progress, cancelled):
-                return render_mosaic(scene, files, settings, progress, cancelled)
+                return render_mosaic(scene, files, settings, progress, cancelled, picture=picture)
 
         def work(progress, cancelled) -> ExportReport:
             image, report = render(progress, cancelled)

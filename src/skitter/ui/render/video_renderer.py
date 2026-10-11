@@ -101,7 +101,9 @@ class VideoRenderer:
         background: tuple[float, float, float] | None,
         supersampling: int,
         camera: TableCamera | None = None,
+        picture: np.ndarray | None = None,
     ):
+        """picture: what blended tiles mix in (TileTextures.picture), None: no blending."""
         try:
             self.ctx = moderngl.create_standalone_context(require=330)
         except Exception as exc:
@@ -119,7 +121,7 @@ class VideoRenderer:
             self.sprites = SpriteRenderer(ctx)
             self.sprites.linear_output = True
             # Tiles at rest, the shadows of tiles in the air, then the tiles in the air.
-            self.layer = SpriteLayer(pages, base[:0].copy())
+            self.layer = SpriteLayer(pages, base[:0].copy(), picture=picture)
             self.shadow_layer = SpriteLayer(None, make_instances(0))
             self.air_layer = SpriteLayer(None, base[:0].copy(), texture_from=self.layer)
             self.table_camera = camera  # looks down at the table: perspective, shadows

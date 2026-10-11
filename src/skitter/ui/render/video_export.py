@@ -11,6 +11,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
+
 from skitter.core.animation import Choreography, PhaseHolds, plan_phases
 from skitter.core.animation.encode import VideoWriter
 from skitter.core.animation.keyframes import CameraTrack
@@ -38,6 +40,7 @@ class VideoJob:
     look: AnimationLook  # a copy: camera height, light and shadows
     plan: VideoPlan
     request: DetailRequest | PictureRequest  # tile crops at the plan's scale, or the picture
+    picture: np.ndarray | None = None  # what blended tiles mix in (TileTextures.picture)
 
 
 @dataclass(frozen=True)
@@ -68,7 +71,7 @@ def run_video_job(job: VideoJob, progress, cancelled) -> VideoReport:
     renderer = VideoRenderer(
         plan, pages, instances,
         ColorParam.rgb(job.background) if job.background != ColorParam.TRANSPARENT else None,
-        settings.supersampling, TableCamera.for_scene(job.scene, job.look),
+        settings.supersampling, TableCamera.for_scene(job.scene, job.look), job.picture,
     )  # fmt: skip
     passes = 2 if fmt.id == "gif" else 1
     clock = {"start": time.perf_counter(), "done": 0}

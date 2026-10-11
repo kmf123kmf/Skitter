@@ -6,7 +6,9 @@ resized to the region's output size with Lanczos), mirrored if chosen, and
 tinted by matching's own model: each pixel's OKLab color shifted by the
 region's tint (tinted average minus the crop's average). The tinted crop is
 then placed, rotated and at sub-pixel position, with Catmull-Rom (bicubic)
-sampling.
+sampling. A blended tile (core/blend.py) then mixes in the picture, in
+OKLab, by its share: tiles lie at home in the image, so that is the picture
+at each output pixel (resampled once per strip, as in render_picture).
 
 Edges are antialiased with SUB x SUB coverage samples per pixel. Regions
 are drawn front to back and each pixel records which samples are already
@@ -194,6 +196,39 @@ class ExportReport:
     failed: int  # tile files that could not be read (their thumbnails were used)
 
 
+class _PictureRows:
+    """The picture resampled (Lanczos) to the output pixels of a frame, row by row."""
+
+    def __init__(self, scene: MosaicScene, picture: np.ndarray, frame: Frame):
+        width, height = frame.size
+        cw, ch = scene.canvas
+        src_h, src_w = picture.shape[:2]
+        # Output pixel edges x, y -> picture pixel edges ax x + bx, ay y + by.
+        self.ax, self.bx = src_w * frame.width / (cw * width), frame.x * src_w / cw
+        self.ay, self.by = src_h * frame.height / (ch * height), frame.y * src_h / ch
+        ax, bx, ay, by = self.ax, self.bx, self.ay, self.by
+        self.left = int(np.clip(math.ceil(-bx / ax - 1e-9), 0, width))
+        self.right = int(np.clip(math.floor((src_w - bx) / ax + 1e-9), self.left, width))
+        self.first = int(np.clip(math.ceil(-by / ay - 1e-9), 0, height))
+        self.last = int(np.clip(math.floor((src_h - by) / ay + 1e-9), self.first, height))
+        self.width = width
+        self.source = Image.fromarray(np.ascontiguousarray(picture), "RGBA")
+
+    def rows(self, top: int, bottom: int) -> np.ndarray:
+        """(bottom - top, width, 4) uint8 RGBA; alpha 0 past the picture."""
+        out = np.zeros((bottom - top, self.width, 4), np.uint8)
+        r0, r1 = max(top, self.first), min(bottom, self.last)
+        left, right = self.left, self.right
+        if r1 > r0 and right > left:
+            ax, bx, ay, by = self.ax, self.bx, self.ay, self.by
+            part = self.source.resize(
+                (right - left, r1 - r0), Image.Resampling.LANCZOS,
+                box=(left * ax + bx, r0 * ay + by, right * ax + bx, r1 * ay + by),
+            )  # fmt: skip
+            out[r0 - top : r1 - top, left:right] = np.asarray(part)
+        return out
+
+
 def render_mosaic(
     scene: MosaicScene,
     files: TileFiles,
@@ -201,8 +236,12 @@ def render_mosaic(
     progress: Progress = lambda message, fraction: None,
     cancelled: Callable[[], bool] = lambda: False,
     workers: int | None = None,
+    picture: np.ndarray | None = None,
 ) -> tuple[np.ndarray, ExportReport]:
-    """The mosaic as an (H, W, 3) uint8 RGB image ((H, W, 4) RGBA if settings.alpha)."""
+    """The mosaic as an (H, W, 3) uint8 RGB image ((H, W, 4) RGBA if settings.alpha).
+
+    picture: (H, W, 4) uint8 RGBA (SliceContext.picture), which blended tiles mix in
+    (scene.blend); without it no tile blends."""
     frame = export_frame(scene, settings)
     width, height = frame.size
     s = frame.scale
@@ -233,6 +272,13 @@ def render_mosaic(
     tinted = np.any(np.abs(shift) > 1e-6, axis=1)
     file_index = files.index(scene.slot[order])
     rects = scene.rect[order].astype(np.float64)
+    blend = scene.blends[order].astype(np.float64)
+    rows_of = None
+    if picture is not None and np.any(blend > 0):
+        rows_of = _PictureRows(scene, picture, frame)
+    else:
+        blend[:] = 0.0
+    no_picture = np.zeros((1, 1, 4), np.uint8)
 
     # Strips of rows, each needing at most about CROP_BUDGET texels of crops.
     texels = crop_size[:, 0] * crop_size[:, 1]
@@ -294,9 +340,12 @@ def render_mosaic(
         rows = bottom - top
         mask = np.zeros((rows, width), np.uint16)
         acc = np.zeros((rows, width, 3), np.uint16)
+        shown_picture = no_picture
+        if rows_of is not None and np.any(blend[active] > 0):
+            shown_picture = rows_of.rows(top, bottom)
         _composite(
             top, mask, acc, geom[active], box[active], crop_size[active], offset, pixels,
-            mirrored[active],
+            mirrored[active], blend[active], shown_picture, LINEAR_LUT,
         )  # fmt: skip
         _finish(mask, acc, background, image[top:bottom])
 
@@ -320,15 +369,7 @@ def render_picture(
     frame = export_frame(scene, settings)
     width, height = frame.size
     s = frame.scale
-    cw, ch = scene.canvas
-    src_h, src_w = picture.shape[:2]
-    # Output pixel edges x, y -> picture pixel edges ax x + bx, ay y + by.
-    ax, bx = src_w * frame.width / (cw * width), frame.x * src_w / cw
-    ay, by = src_h * frame.height / (ch * height), frame.y * src_h / ch
-    left = int(np.clip(math.ceil(-bx / ax - 1e-9), 0, width))
-    right = int(np.clip(math.floor((src_w - bx) / ax + 1e-9), left, width))
-    first = int(np.clip(math.ceil(-by / ay - 1e-9), 0, height))
-    last = int(np.clip(math.floor((src_h - by) / ay + 1e-9), first, height))
+    rows_of = _PictureRows(scene, picture, frame)
 
     corners = scene.corners
     bounds = np.concatenate([corners.min(axis=1), corners.max(axis=1)], axis=1)
@@ -348,7 +389,6 @@ def render_picture(
     channels = 4 if settings.alpha else 3
     image = np.empty((height, width, channels), np.uint8)
     background = np.array(BACKGROUNDS.get(settings.background, BACKGROUNDS["white"]), np.int64)
-    source = Image.fromarray(np.ascontiguousarray(picture), "RGBA")
     strip_rows = max(16, PICTURE_STRIP // max(width, 1))
     strips = max(1, math.ceil(height / strip_rows))
     full = 255 * SUB * SUB
@@ -361,21 +401,10 @@ def render_picture(
         mask = np.zeros((bottom - top, width), np.uint16)
         active = (box[:, 1] < bottom) & (box[:, 3] > top)
         _coverage(top, mask, geom[active], box[active])
-        weight = _POPCOUNT[mask].astype(np.int64) * 255  # coverage x alpha, of `full`
-        rgb = np.zeros((bottom - top, width, 3), np.int64)
-        r0, r1 = max(top, first), min(bottom, last)
-        if r1 > r0 and right > left:
-            part = source.resize(
-                (right - left, r1 - r0), Image.Resampling.LANCZOS,
-                box=(left * ax + bx, r0 * ay + by, right * ax + bx, r1 * ay + by),
-            )  # fmt: skip
-            pixels = np.asarray(part, np.int64)
-            rgb[r0 - top : r1 - top, left:right] = pixels[..., :3]
-            alpha = np.zeros((bottom - top, width), np.int64)
-            alpha[r0 - top : r1 - top, left:right] = pixels[..., 3]
-            weight = weight * alpha // 255
-        else:
-            weight[:] = 0
+        pixels = rows_of.rows(top, bottom).astype(np.int64)
+        rgb = pixels[..., :3]
+        # coverage x alpha, of `full`
+        weight = _POPCOUNT[mask].astype(np.int64) * 255 * pixels[..., 3] // 255
         if settings.alpha:
             image[top:bottom, :, :3] = rgb
             image[top:bottom, :, 3] = (weight + SUB * SUB // 2) // (SUB * SUB)
@@ -421,12 +450,33 @@ def _catmull_rom(t):
     )
 
 
+@njit(cache=True, nogil=True, inline="always")
+def _mix_oklab(r, g, b, pr, pg, pb, share, lut):
+    """(r, g, b) moved toward (pr, pg, pb) by share, in OKLab (uint8 sRGB levels)."""
+    l1, a1, b1 = rgb8_to_oklab_nb(r, g, b, lut)
+    l2, a2, b2 = rgb8_to_oklab_nb(pr, pg, pb, lut)
+    lab_l = l1 + share * (l2 - l1)
+    lab_a = a1 + share * (a2 - a1)
+    lab_b = b1 + share * (b2 - b1)
+    l_ = lab_l + 0.3963377774 * lab_a + 0.2158037573 * lab_b
+    m_ = lab_l - 0.1055613458 * lab_a - 0.0638541728 * lab_b
+    s_ = lab_l - 0.0894841775 * lab_a - 1.2914855480 * lab_b
+    l_, m_, s_ = l_ * l_ * l_, m_ * m_ * m_, s_ * s_ * s_
+    return (
+        _encode(4.0767416621 * l_ - 3.3077115913 * m_ + 0.2309699292 * s_),
+        _encode(-1.2684380046 * l_ + 2.6097574011 * m_ - 0.3413193965 * s_),
+        _encode(-0.0041960863 * l_ - 0.7034186147 * m_ + 1.7076147010 * s_),
+    )
+
+
 @njit(cache=True, nogil=True, parallel=True)
-def _composite(top, mask, acc, geom, box, crop_size, offset, pixels, mirrored):
+def _composite(top, mask, acc, geom, box, crop_size, offset, pixels, mirrored, blend, picture,
+               lut):  # fmt: skip
     """Draw regions (front to back) into one strip's coverage mask and color sums.
 
     acc holds each pixel's color summed over its covered samples (sample
-    count x color), so the final color is acc / SUB².
+    count x color), so the final color is acc / SUB². Regions with a blend mix
+    in picture (the strip's rows of it, RGBA) by that share, times its alpha.
     """
     rows, width = mask.shape
     n = len(box)
@@ -507,9 +557,18 @@ def _composite(top, mask, acc, geom, box, crop_size, offset, pixels, mirrored):
                     r += wy[j] * row_r
                     g += wy[j] * row_g
                     b += wy[j] * row_b
-                acc[row, x, 0] += count * min(max(int(r + 0.5), 0), 255)
-                acc[row, x, 1] += count * min(max(int(g + 0.5), 0), 255)
-                acc[row, x, 2] += count * min(max(int(b + 0.5), 0), 255)
+                ri = min(max(int(r + 0.5), 0), 255)
+                gi = min(max(int(g + 0.5), 0), 255)
+                bi = min(max(int(b + 0.5), 0), 255)
+                if blend[i] > 0.0:
+                    share = blend[i] * picture[row, x, 3] / 255.0
+                    if share > 0.0:
+                        ri, gi, bi = _mix_oklab(ri, gi, bi, picture[row, x, 0],
+                                                picture[row, x, 1], picture[row, x, 2], share,
+                                                lut)  # fmt: skip
+                acc[row, x, 0] += count * ri
+                acc[row, x, 1] += count * gi
+                acc[row, x, 2] += count * bi
                 mask[row, x] = covered | m
 
 

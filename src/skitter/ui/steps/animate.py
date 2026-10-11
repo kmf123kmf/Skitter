@@ -112,6 +112,7 @@ class AnimateStep(StepPage):
         session.project_replaced.connect(self._on_project_replaced)
         session.matching_changed.connect(self._load_scene)
         session.mosaic_edited.connect(self._on_mosaic_edited)
+        session.blend_changed.connect(lambda: self._on_mosaic_edited(None))
         session.animation_changed.connect(self._on_animation_changed)
         session.camera_changed.connect(self._on_camera_changed)
         for signal in session.export_signals():
@@ -262,7 +263,8 @@ class AnimateStep(StepPage):
         self.player.set_timeline(timeline, time=timeline.duration)  # open on the finished mosaic
         self._plan_camera()
         self.player.set_camera(TableCamera.for_scene(scene, self.project.animation_look))
-        self.player.set_content(self.textures.pages, self.textures.instances())
+        self.player.set_content(self.textures.pages, self.textures.instances(),
+                                self.textures.picture)  # fmt: skip
         self._sync_transport()
         self.keys.refresh()
         self._show_export_frame()
@@ -272,7 +274,8 @@ class AnimateStep(StepPage):
     def _on_textures(self, *_) -> None:
         if not self.isVisible() and self._stale:
             return  # reloaded on entering
-        self.player.set_content(self.textures.pages, self.textures.instances())
+        self.player.set_content(self.textures.pages, self.textures.instances(),
+                                self.textures.picture)  # fmt: skip
 
     def _on_project_replaced(self) -> None:
         self.look_form.set_target(self.project.animation_look)

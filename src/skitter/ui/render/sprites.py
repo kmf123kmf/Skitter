@@ -25,12 +25,15 @@ INSTANCE_DTYPE = np.dtype(
         ("skew", "f4", 2),  # (du/dt, dv/ds) turning that rect (scene.picture_uv); 0: upright
         ("offset", "f4", 3),  # OKLab shift of every texel (matching's tint), before `tint`
         ("blur", "f4"),  # > 0: a soft shadow, edges blurred this far (world units), no texture
+        ("blend", "f4"),  # share of the layer's picture mixed in (OKLab), after `offset`
+        ("picture_uv", "f4", 4),  # the picture rect the sprite covers (scene.picture_uv)
+        ("picture_skew", "f4", 2),  # turning that rect, as skew does uv
     ]
 )
-_INSTANCE_FORMAT = "2f 2f 1f 1f 1f 4f 4f 2f 3f 1f /i"
+_INSTANCE_FORMAT = "2f 2f 1f 1f 1f 4f 4f 2f 3f 1f 1f 4f 2f /i"
 _INSTANCE_ATTRIBUTES = (
     "in_pos", "in_size", "in_rotation", "in_alpha", "in_layer", "in_tint", "in_uv", "in_skew",
-    "in_offset", "in_blur",
+    "in_offset", "in_blur", "in_blend", "in_picture_uv", "in_picture_skew",
 )  # fmt: skip
 
 
@@ -43,7 +46,7 @@ def make_instances(count: int) -> np.ndarray:
 
 
 def to_rgba(textures: np.ndarray) -> np.ndarray:
-    """Convert (N, H, W, 3|4) uint8 textures to contiguous RGBA."""
+    """Convert (..., 3|4) uint8 textures to contiguous RGBA."""
     if textures.shape[-1] == 3:
         alpha = np.full((*textures.shape[:-1], 1), 255, dtype=np.uint8)
         textures = np.concatenate([textures, alpha], axis=-1)
@@ -67,7 +70,11 @@ class SpriteLayer:
 
     texture_from: use another layer's GPU texture instead of uploading this
     layer's own (for example, an overlay sampling the image layer). That
-    layer must be drawn earlier in the same canvas.
+    layer must be drawn earlier in the same canvas. Its picture is used too.
+
+    picture: (H, W, 4) uint8 image that sprites with a `blend` mix in, at their
+    `picture_uv` (the source picture, for blended tiles); None: no blending.
+    It may be replaced at any time.
     """
 
     def __init__(
@@ -82,6 +89,7 @@ class SpriteLayer:
         project_texture: bool = False,
         texture_size: tuple[float, float] = (1.0, 1.0),
         texture_from: "SpriteLayer | None" = None,
+        picture: np.ndarray | None = None,
     ):
         if textures is None:
             textures = np.full((1, 1, 1, 4), 255, dtype=np.uint8)
@@ -97,6 +105,7 @@ class SpriteLayer:
         self.project_texture = project_texture
         self.texture_size = texture_size
         self.texture_from = texture_from
+        self.picture = picture
         self.visible = True
         self.dirty = True
         self.patches: list[tuple[int, int, int, int, int]] = []  # texels to upload again
@@ -135,6 +144,8 @@ class _GpuLayer:
         self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
         self.texture.anisotropy = 8.0
         self.nearest_mag = False
+        self.picture: moderngl.Texture | None = None
+        self.picture_source: np.ndarray | None = None  # the array `picture` holds
 
         self.ctx, self.program, self.quad = ctx, program, quad
         self.capacity = 0
@@ -163,6 +174,22 @@ class _GpuLayer:
             self.texture.write(data.tobytes(), viewport=(x, y, page, w, h, 1))
         self.texture.build_mipmaps()
 
+    def sync_picture(self, picture: np.ndarray | None) -> moderngl.Texture | None:
+        """The layer's picture on the GPU (uploaded again when replaced)."""
+        if picture is not self.picture_source:
+            if self.picture is not None:
+                self.picture.release()
+                self.picture = None
+            self.picture_source = picture
+            if picture is not None:
+                h, w = picture.shape[:2]
+                self.picture = self.ctx.texture((w, h), 4, to_rgba(picture).tobytes())
+                self.picture.repeat_x = self.picture.repeat_y = False
+                self.picture.build_mipmaps()
+                self.picture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+                self.picture.anisotropy = 8.0
+        return self.picture
+
     def set_nearest_mag(self, nearest: bool) -> None:
         if nearest != self.nearest_mag:
             mag = moderngl.NEAREST if nearest else moderngl.LINEAR
@@ -183,6 +210,7 @@ class _GpuLayer:
     def release(self) -> None:
         self._release_buffers()
         self.texture.release()
+        self.sync_picture(None)
 
 
 class SpriteRenderer:
@@ -198,6 +226,8 @@ class SpriteRenderer:
             fragment_shader=_load_shader("sprite.frag.glsl"),
         )
         self.program["u_textures"] = 0
+        self.program["u_picture"] = 1
+        self._no_picture = ctx.texture((1, 1), 4, bytes(4))  # bound when a layer has none
         corners = np.array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5], dtype="f4")
         self.quad = ctx.buffer(corners.tobytes())
         self._layers: dict[SpriteLayer, _GpuLayer] = {}
@@ -222,12 +252,14 @@ class SpriteRenderer:
         if layer.dirty:
             gpu.write_instances(layer.instances)
             layer.dirty = False
-        texture_gpu = gpu
+        texture_gpu, picture = gpu, layer.picture
         if layer.texture_from is not None:
             texture_gpu = self._layers.get(layer.texture_from)
             if texture_gpu is None:  # source not uploaded (not drawn on this canvas)
                 return
+            picture = layer.texture_from.picture
         texture_gpu.set_nearest_mag(nearest_mag)
+        (texture_gpu.sync_picture(picture) or self._no_picture).use(1)
 
         program = self.program
         program["u_outline_px"] = float(layer.outline_px)

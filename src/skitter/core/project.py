@@ -11,6 +11,7 @@ from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.phases import PhaseHolds, default_holds, plan_phases
 from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
+from skitter.core.blend import BlendSettings
 from skitter.core.edits import Edit
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.matching.method import DEFAULT_METHOD, MatchMethod, method_types
@@ -37,6 +38,7 @@ class Project:
     )
     match_method_id: str = DEFAULT_METHOD
     matches: MatchResult | None = None  # a tile for each region (None after re-slicing)
+    blend: BlendSettings = field(default_factory=BlendSettings)  # the picture in the tiles
 
     export_settings: ExportSettings = field(default_factory=ExportSettings)
 

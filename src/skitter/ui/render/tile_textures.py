@@ -17,6 +17,9 @@ the background. Views redraw just those texels on `patched`. When the
 pages fill up, the crops in use are repacked (no files are read again) and
 `changed` is emitted as for new pages.
 
+Blended tiles (core/blend.py) also mix in the picture: `picture` is its page
+(reduced to BLEND_TEXELS), there only while some tile blends.
+
 Pieces of the picture (the Jigsaw Puzzle method) need none of that:
 `PictureTextures` is the picture itself on one page, each piece showing its
 own footprint on it (scene.picture_uv), so pieces at home draw the picture.
@@ -40,6 +43,7 @@ DETAIL_TEXELS = 96 * 2**20  # full-detail budget: about 400 MB of GPU memory (RG
 DETAIL_PAGE = 4096  # atlas page size, texels
 MAX_BOOST = 4.0  # most extra texels per unit (each way) a tile smaller than the base gets
 PICTURE_SIDE = 16_384  # longest side of the picture's page (pieces of the picture)
+BLEND_TEXELS = 16 * 2**20  # the picture blended tiles mix in: about 64 MB (RGBA) + mipmaps
 
 
 @dataclass(frozen=True)
@@ -204,6 +208,9 @@ def scene_instances(
     if skew is not None:
         tiles["skew"] = skew
     tiles["offset"] = scene.tint_shift
+    if scene.blended:
+        tiles["blend"] = scene.blend
+        tiles["picture_uv"], tiles["picture_skew"] = scene.picture_uv()
     return tiles
 
 
@@ -212,6 +219,13 @@ def picture_instances(scene: MosaicScene) -> np.ndarray:
     the picture's page."""
     uv, skew = scene.picture_uv()
     return scene_instances(scene, np.zeros(len(scene)), uv, skew)
+
+
+def blend_page(scene: MosaicScene, picture: np.ndarray | None) -> np.ndarray | None:
+    """(h, w, 4) the picture a scene's blended tiles mix in (None: none blends)."""
+    if picture is None or not scene.blended:
+        return None
+    return picture_page(picture, BLEND_TEXELS)[0][0]
 
 
 def picture_page(picture: np.ndarray, budget: int = DETAIL_TEXELS, side: int = PICTURE_SIDE):
@@ -238,6 +252,7 @@ class PictureTextures(QObject):
         self.pages, scale = picture_page(picture)
         self.status = "The picture" if scale >= 1 else f"The picture, at {scale:.0%} (memory)"
         self.loading = False
+        self.picture = None  # pieces of the picture never blend
 
     def instances(self) -> np.ndarray:
         return picture_instances(self.scene)
@@ -270,9 +285,15 @@ class TileTextures(QObject):
     patched = Signal(object)  # [(page, x, y, w, h)] texels of pages rewritten in place
     status_changed = Signal(str)
 
-    def __init__(self, scene: MosaicScene, library: TileLibrary, parent=None):
+    def __init__(
+        self, scene: MosaicScene, library: TileLibrary, parent=None,
+        picture: np.ndarray | None = None,
+    ):  # fmt: skip
+        """picture: (H, W, 4) the source picture, for blended tiles (see `picture`)."""
         super().__init__(parent)
         self.scene = scene
+        self._picture = picture
+        self._blend_page: np.ndarray | None = None
         self.detail: TileDetail | None = None
         self.status = "Thumbnails"
         self._job: Job | None = None
@@ -290,6 +311,15 @@ class TileTextures(QObject):
     @property
     def loading(self) -> bool:
         return self._job is not None
+
+    @property
+    def picture(self) -> np.ndarray | None:
+        """(h, w, 4) the picture blended tiles mix in; None while no tile blends."""
+        if not self.scene.blended:
+            return None
+        if self._blend_page is None:
+            self._blend_page = blend_page(self.scene, self._picture)
+        return self._blend_page
 
     def instances(self) -> np.ndarray:
         """Sprite instances showing the finished mosaic, in stacking order."""

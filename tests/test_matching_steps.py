@@ -918,8 +918,10 @@ def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):
     window.setFont(windows_font)
     window.resize(1400, 900)
     window.show()
-    matched(window, photos, qapp)
+    step = matched(window, photos, qapp)
     assert overflowing_panels(window, qapp) == []
+    step.blend_form.editor("amount").widget.setValue(40)  # Where, Target and a summary show
+    assert not step._blend_summary.isHidden() and overflowing_panels(window, qapp) == []
     animate = window.step(AnimateStep)  # with a key selected, its fields show too
     window.tabs.setCurrentWidget(animate)
     animate.keys.add_key()

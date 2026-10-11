@@ -47,6 +47,7 @@ from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.phases import OPTIONAL, PhaseHolds
 from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
+from skitter.core.blend import BlendSettings
 from skitter.core.edits import apply_edits, edit_from_dict, edit_to_dict
 from skitter.core.imaging import load_image
 from skitter.core.matching.method import DEFAULT_METHOD, method_types
@@ -98,6 +99,7 @@ def document(project: Project, committed: bool) -> dict:
         "slicing_plan": project.slicing_plan.to_dict(),
         "match_methods": {key: m.values() for key, m in project.match_methods.items()},
         "match_method": project.match_method_id,
+        "blend": project.blend.values(),
         "export_settings": project.export_settings.values(),
         "choreographies": {key: c.values() for key, c in project.choreographies.items()},
         "choreography": project.choreography_id,  # the build's (the only phase, once)
@@ -205,6 +207,7 @@ def _project(doc: dict, source: np.ndarray, problems: list[str]) -> Project:
     if "slicing_plan" in doc:
         project.slicing_plan = SlicingPlan.from_dict(doc["slicing_plan"], problems)
     _match_methods(project, doc, problems)
+    project.blend = BlendSettings.from_values(doc.get("blend", {}), problems, "Blend")
     project.export_settings = ExportSettings.from_values(doc.get("export_settings", {}), problems,
                                                          "Export")  # fmt: skip
     project.animation_look = AnimationLook.from_values(doc.get("animation_look", {}), problems,

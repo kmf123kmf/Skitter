@@ -25,7 +25,8 @@ def frame_layers(
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Sprite instances for a frame: (tiles at rest, shadows, tiles in the air).
 
-    base holds each tile's texture choice and tint (scene order); the frame,
+    base holds each tile's texture choice, tint and blend (scene order): they
+    travel with the tile. The frame,
     seen through the camera, supplies geometry, alpha, tint and draw order.
     """
     seen = camera.project(frame) if camera is not None else project_flat(frame)
@@ -79,8 +80,12 @@ class TimelinePlayer(QObject):
     def playing(self) -> bool:
         return self._run is not None
 
-    def set_content(self, pages: np.ndarray | None, base: np.ndarray | None) -> None:
-        """Textures and per-tile instance data (see TileTextures.instances); None clears.
+    def set_content(
+        self, pages: np.ndarray | None, base: np.ndarray | None,
+        picture: np.ndarray | None = None,
+    ) -> None:  # fmt: skip
+        """Textures, per-tile instance data (see TileTextures.instances) and the
+        picture blended tiles mix in (TileTextures.picture); None clears.
 
         The tile layers draw first on the canvas, below any overlays added later.
         """
@@ -93,7 +98,7 @@ class TimelinePlayer(QObject):
         self._base = base
         if base is not None:
             empty = base[:0].copy()
-            self.layer = self.canvas.add_layer(SpriteLayer(pages, empty), index)
+            self.layer = self.canvas.add_layer(SpriteLayer(pages, empty, picture=picture), index)
             self.shadow_layer = self.canvas.add_layer(SpriteLayer(None, make_instances(0)),
                                                       index + 1)  # fmt: skip
             self.air_layer = self.canvas.add_layer(

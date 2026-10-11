@@ -6,7 +6,8 @@ thumbnails first, full-size crops once read (ui/render/tile_textures.py).
 While matching runs, the view follows the run instead: target colors, then
 the tiles chosen so far as they improve (ui/render/match_preview.py).
 A heat map shows where the mosaic differs most from the image as seen from
-a distance.
+a distance. Blending (core/blend.py) mixes the picture into the tiles; it
+applies to the finished mosaic at once, without matching again.
 
 Edit mode picks tiles by hand (core/matching/edit.py): click a tile, then
 choose from its remembered candidates in the side panel. Hovering a
@@ -86,6 +87,7 @@ class MatchingStep(StepPage):
                 self._build_result_group(),
                 self.edit.picker,
                 self._build_display_group(),
+                self._build_blend_group(),
                 self.settings_group,
                 self._build_export_group(),
             )  # fmt: skip
@@ -101,6 +103,7 @@ class MatchingStep(StepPage):
         session.matching_detail.connect(self._on_detail)
         session.matching_preview.connect(self._on_run_preview)
         session.mosaic_edited.connect(self._on_mosaic_edited)
+        session.blend_changed.connect(self._on_blend_changed)
         for signal in session.export_signals():
             signal.connect(self._refresh_export)
         canvas = self.viewer.canvas
@@ -152,6 +155,8 @@ class MatchingStep(StepPage):
     def _on_project_replaced(self) -> None:
         self.edit.set_editing(False)
         self._show_methods()
+        self.blend_form.set_target(self.session.project.blend)
+        self._show_blend_summary()
 
     def _build_settings_group(self) -> QGroupBox:
         """The chosen method's settings (the method itself is chosen in the Matching group)."""
@@ -237,6 +242,48 @@ class MatchingStep(StepPage):
         form.addRow("Show:", self.display_mode)
         form.addRow("Tile detail:", self._detail)
         return group
+
+    def _build_blend_group(self) -> QGroupBox:
+        self.blend_form = ParamForm()
+        self.blend_form.set_target(self.session.project.blend)
+        self.blend_form.changed.connect(lambda _: self.session.blend_edited())
+        self._blend_summary = muted(QLabel())
+        self._blend_summary.setWordWrap(True)
+        group = QGroupBox("Blend")
+        layout = QVBoxLayout(group)
+        layout.addWidget(self.blend_form)
+        layout.addWidget(self._blend_summary)
+        return group
+
+    def _show_blend_summary(self) -> None:
+        """How many tiles blend, and how much (none, without a mosaic)."""
+        scene, label = self.session.scene, self._blend_summary
+        text = ""
+        if scene is not None and scene.picture:
+            text = "Pieces of the picture don't blend."
+        elif scene is not None and len(scene) and self.session.project.blend.active:
+            blend = scene.blends
+            count = int(np.count_nonzero(blend > 0))
+            if count:
+                text = (f"{count:,} of {len(scene):,} tiles blend, "
+                        f"{float(blend[blend > 0].mean()):.0%} on average.")  # fmt: skip
+            else:
+                text = "Every tile is within the target: none blends."
+        label.setText(text)
+        label.setVisible(bool(text))
+
+    def _on_blend_changed(self) -> None:
+        """The blend changed: the same tiles, mixing in the picture otherwise."""
+        scene = self.session.scene
+        if scene is not None and self._shown is not None and self._textures is not None:
+            self._shown = scene
+            if self._tile_layer is not None:
+                self._tile_layer.picture = self._textures.picture
+                self._tile_layer.instances = self._textures.instances()
+                self._tile_layer.mark_dirty()
+            self.edit.mosaic_edited()
+            self.viewer.canvas.update()
+        self._show_blend_summary()
 
     def _build_export_group(self) -> QGroupBox:
         self.export_button = QPushButton("Export Image…")
@@ -431,6 +478,7 @@ class MatchingStep(StepPage):
             self._textures.status_changed.disconnect(self._detail.setText)
         self._shown, self._textures = scene, self.session.textures
         self._show_stats(None if scene is None else scene.result)
+        self._show_blend_summary()
         self._detail.setText("—")
         if scene is None:
             self.viewer.set_content_bounds(None)  # not the last mosaic's (it may be larger)
@@ -448,7 +496,8 @@ class MatchingStep(StepPage):
             return
         tiles = self._textures.instances()
         self._tile_layer = canvas.add_layer(
-            SpriteLayer(self._textures.pages, tiles), self.overlays.first
+            SpriteLayer(self._textures.pages, tiles, picture=self._textures.picture),
+            self.overlays.first,
         )
 
         heat = make_instances(len(scene))
@@ -469,7 +518,8 @@ class MatchingStep(StepPage):
         canvas = self.viewer.canvas
         index = canvas.layers.index(self._tile_layer)
         canvas.remove_layer(self._tile_layer)
-        layer = SpriteLayer(self._textures.pages, self._textures.instances())
+        layer = SpriteLayer(self._textures.pages, self._textures.instances(),
+                            picture=self._textures.picture)  # fmt: skip
         self._tile_layer = canvas.add_layer(layer, index)
         if self.overlays.cover.texture_from is not None:
             self.overlays.cover.texture_from = layer

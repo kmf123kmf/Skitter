@@ -6,18 +6,20 @@ drawing them in array order gives the finished mosaic. Everything that
 shows the mosaic reads it: the Matching preview, the exported image, and
 animations, whose last frame must be exactly this state.
 
-Besides the final geometry, texture choice and tint, the scene carries
+Besides the final geometry, texture choice, tint and blend (how much of the
+picture each tile mixes in, core/blend.py), the scene carries
 attributes that animations can order or group tiles by (position, reading
 order, colors, match error, repeated photos). All lengths are in mosaic
 units (see slicing/layout.py).
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
 from functools import cached_property
 
 import numpy as np
 from numba import njit
 
+from skitter.core.blend import BlendSettings, tile_blend
 from skitter.core.matching.matcher import MatchResult
 from skitter.core.matching.raster import visible_share
 from skitter.core.slicing import SliceContext
@@ -44,9 +46,13 @@ class MosaicScene:
     canvas: tuple[float, float]  # (width, height) of the image frame
     tile_size: tuple[float, float]  # base tile (width, height)
     picture: bool = False  # tiles are pieces of the picture (see picture_uv), not photos
+    blend: np.ndarray | None = None  # (N,) share of the picture each tile mixes in; None: 0
 
     @classmethod
-    def from_result(cls, result: MatchResult, ctx: SliceContext) -> "MosaicScene":
+    def from_result(
+        cls, result: MatchResult, ctx: SliceContext, blend: BlendSettings | None = None
+    ) -> "MosaicScene":
+        """The scene of a result; blend: how its tiles mix in the picture (None: not)."""
         regions = result.regions
         order = regions.stacking_order()
         order = np.asarray(order[result.tile[order] >= 0], dtype=np.int64)
@@ -72,17 +78,40 @@ class MosaicScene:
             canvas=(float(ctx.width), float(ctx.height)),
             tile_size=tuple(float(v) for v in ctx.tile_size),
             picture=bool(result.picture),
+            blend=None if result.picture else tile_blend(error, blend),
         )
 
     def __len__(self) -> int:
         return len(self.region)
 
-    def with_result(self, result: MatchResult, ctx: SliceContext) -> "MosaicScene":
+    @property
+    def blends(self) -> np.ndarray:
+        """(N,) share of the picture each tile mixes in (0: its photo alone)."""
+        return np.zeros(len(self), np.float32) if self.blend is None else self.blend
+
+    @property
+    def blended(self) -> bool:
+        """Whether any tile mixes in the picture."""
+        return self.blend is not None and bool(np.any(self.blend > 0))
+
+    def with_blend(self, blend: BlendSettings | None) -> "MosaicScene":
+        """The same scene blended otherwise (everything cached carries over)."""
+        amounts = None if self.picture else tile_blend(self.error, blend)
+        scene = replace(self, blend=amounts)
+        names = {f.name for f in fields(self)}
+        for name, value in self.__dict__.items():
+            if name not in names:
+                scene.__dict__[name] = value
+        return scene
+
+    def with_result(
+        self, result: MatchResult, ctx: SliceContext, blend: BlendSettings | None = None
+    ) -> "MosaicScene":
         """The scene of an edited result (other tiles picked, same regions placed).
 
         Geometry, and what is cached from it, carries over.
         """
-        scene = MosaicScene.from_result(result, ctx)
+        scene = MosaicScene.from_result(result, ctx, blend)
         if np.array_equal(scene.region, self.region):
             for name in GEOMETRY:
                 if name in self.__dict__:
