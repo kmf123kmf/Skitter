@@ -80,9 +80,8 @@ def order_key(scene: MosaicScene, settings, rng: np.random.Generator) -> np.ndar
     if order == "reading":
         return scene.reading_order.astype(np.float64)
     if order in ("clockwise", "counter"):
-        offset = scene.center - np.asarray(scene.canvas) / 2
-        turn = np.arctan2(offset[:, 0], -offset[:, 1])  # clockwise from straight up
-        return (turn if order == "clockwise" else -turn) % math.tau
+        turn = compass.clock_angle(scene.center - np.asarray(scene.canvas) / 2)
+        return turn if order == "clockwise" else -turn % math.tau
     if order == "dark":
         return scene.lightness
     if order == "light":

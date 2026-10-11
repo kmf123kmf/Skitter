@@ -18,12 +18,12 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QScrollBar,
-    QToolButton,
     QWidget,
 )
 
 from skitter.core.easing import Easing, ease_in_out_cubic, ease_out_cubic, lerp
 from skitter.ui import icons
+from skitter.ui.actions import make_action, tool_button
 from skitter.ui.canvas import MosaicCanvas
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 
@@ -135,12 +135,7 @@ class ImageViewer(QWidget):
 
     def _build_actions(self) -> None:
         def action(icon, text, slot, *shortcuts):
-            act = QAction(icon, text, self)
-            act.setShortcuts([QKeySequence(s) for s in shortcuts])
-            keys = act.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
-            act.setToolTip(f"{text} ({keys})")
-            act.triggered.connect(slot)
-            return act
+            return make_action(self, text, slot, *shortcuts, icon=icon)
 
         self.zoom_in_action = action(
             icons.zoom_in(), "Zoom In", lambda: self.step_zoom(1),
@@ -192,12 +187,7 @@ class ImageViewer(QWidget):
             self.fit_action,
             self.actual_size_action,
         ):
-            if isinstance(item, QAction):
-                button = QToolButton()
-                button.setDefaultAction(item)
-                button.setAutoRaise(True)
-                item = button
-            right.addWidget(item)
+            right.addWidget(tool_button(item) if isinstance(item, QAction) else item)
         return bar
 
     # Zoom

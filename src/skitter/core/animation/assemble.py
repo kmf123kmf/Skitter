@@ -14,7 +14,7 @@ from skitter.core.animation.base import (
     cover_after_impact,
     register_choreography,
 )
-from skitter.core.animation.landing import landing_times
+from skitter.core.animation.landing import landing_times, last_gap_param, wind_down_param
 from skitter.core.animation.look import NEAR, AnimationLook, clear_of_axis, scene_extent
 from skitter.core.animation.orders import (
     RANDOM_ORDERS,
@@ -28,11 +28,11 @@ from skitter.core.animation.orders import (
 )
 from skitter.core.easing import ease_out_back, ease_out_cubic
 from skitter.core.scene import MosaicScene
+from skitter.core.slicing.common import seed_param
 from skitter.core.slicing.params import (
     BoolParam,
     ChoiceParam,
     FloatParam,
-    IntParam,
     RangeParam,
     Section,
 )
@@ -132,20 +132,11 @@ class AssembleChoreography(Choreography):
         1.5, "Flight time", min=0.05, max=60.0, step=0.1, decimals=2, suffix=" s",
         help="How long each tile is in the air (at most the duration).",
     )  # fmt: skip
-    wind_down = FloatParam(
-        0.15, "Wind-down", min=0.0, max=0.5, step=0.05, suffix=" × duration",
-        help="Landings slow down over this last share of the duration, so the last "
-             "few tiles land one by one instead of all in the same moment (0: an even "
-             "pace to the end).",
-    )  # fmt: skip
-    last_gap = FloatParam(
-        0.25, "Last gap", min=0.0, max=5.0, step=0.05, suffix=" s",
-        under="wind_down", when=lambda c: c.wind_down > 0,
-        help="Time between the last two landings (at most half the wind-down).",
-    )  # fmt: skip
+    wind_down = wind_down_param()
+    last_gap = last_gap_param()
 
     _end = Section()
-    seed = IntParam(1, "Seed", min=0, max=999_999)
+    seed = seed_param()
 
     def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:
         n = len(scene)

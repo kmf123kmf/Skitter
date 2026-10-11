@@ -18,6 +18,7 @@ from PySide6.QtGui import QAction, QImage, QKeySequence
 
 from skitter.core.assembly import TileFiles
 from skitter.core.matching import edit as picks
+from skitter.ui.actions import make_action
 from skitter.ui.render.sprites import make_instances
 from skitter.ui.steps.tile_picker import (
     CropReader,
@@ -105,9 +106,7 @@ class EditMode(QObject):
         session = self.session
 
         def action(text, slot, *keys) -> QAction:
-            act = QAction(text, self.step)
-            act.setShortcuts([QKeySequence(k) for k in keys])
-            act.triggered.connect(slot)
+            act = make_action(self.step, text, slot, *keys)
             self.step.addAction(act)  # active while the tab shows
             return act
 

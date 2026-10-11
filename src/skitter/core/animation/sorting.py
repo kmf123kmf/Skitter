@@ -22,6 +22,7 @@ from collections.abc import Callable, Iterator
 import numpy as np
 from numba import njit
 
+from skitter.core.animation.compass import clock_angle
 from skitter.core.scene import MosaicScene
 
 # Paths: the order the sorted mosaic reads in.
@@ -46,7 +47,7 @@ def path_order(scene: MosaicScene, path: str) -> np.ndarray:
     if path == "spiral":  # ring by ring outward from the middle, each ring clockwise from the top
         w, h = scene.canvas
         dx, dy = x - w / 2, y - h / 2
-        turn = np.arctan2(dx, -dy) % math.tau / math.tau
+        turn = clock_angle(np.stack([dx, dy], axis=-1)) / math.tau
         return np.argsort(np.floor(np.hypot(dx, dy) / tw) + turn, kind="stable")
     return np.argsort(scene.reading_order, kind="stable")  # reading order
 

@@ -59,7 +59,7 @@ from skitter.ui.render.heat import heat_colors
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.steps.base import StepPage, side_panel, view_and_panel
 from skitter.ui.steps.tile_picker import fixed_width
-from skitter.ui.style import muted, progress_bar, show_progress
+from skitter.ui.style import MUTED_STYLE, format_bytes, muted, progress_bar, show_progress
 from skitter.ui.widgets.height_grip import HeightGrip
 
 SAMPLE_TILES = 2500
@@ -116,14 +116,6 @@ def _display_name(path: str) -> str:
     return os.path.basename(real.rstrip(os.sep)) or real
 
 
-def _format_bytes(n: float) -> str:
-    for unit in ("bytes", "KB", "MB", "GB"):
-        if n < 1024 or unit == "GB":
-            return f"{n:,.0f} {unit}" if unit == "bytes" else f"{n:,.1f} {unit}"
-        n /= 1024
-    raise AssertionError("unreachable")
-
-
 def _square_crops(width, height) -> np.ndarray:
     """(N, 4) the centered square window of each photo, as fractions."""
     width = np.asarray(width, np.float64)
@@ -153,7 +145,7 @@ class TilesStep(StepPage):
         self._coverage: Coverage | None = None
         self._empty = QLabel("Add folders of photos to use as tiles,\nthen press Update.")
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._empty.setStyleSheet("color: palette(placeholder-text); font-size: 14pt;")
+        self._empty.setStyleSheet(f"{MUTED_STYLE} font-size: 14pt;")
         self._view = QStackedWidget()
         self._view.addWidget(self._empty)
         self._view.addWidget(self.canvas)
@@ -424,7 +416,7 @@ class TilesStep(StepPage):
                                 else f"{used:,} in use of {counts['ok']:,}")  # fmt: skip
             self._failed.setText(f"{counts['failed']:,}")
             self._missing.setText(f"{counts['missing']:,}")
-            self._disk.setText(_format_bytes(library.disk_bytes()))
+            self._disk.setText(format_bytes(library.disk_bytes()))
             self._location.setText(str(library.folder))
         self._refresh_stats()
 

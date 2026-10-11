@@ -38,7 +38,8 @@ from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.sorting import path_order, sort_states
 from skitter.core.easing import ease_in_out_cubic
 from skitter.core.scene import MosaicScene
-from skitter.core.slicing.params import BoolParam, ChoiceParam, ColorParam, FloatParam, IntParam
+from skitter.core.slicing.common import seed_param
+from skitter.core.slicing.params import BoolParam, ChoiceParam, ColorParam, FloatParam
 
 ALGORITHMS = (
     ("bitonic", "Bitonic network"), ("odd_even", "Odd-even (parallel bubble)"),
@@ -195,7 +196,7 @@ class SortChoreography(Choreography):
         "#ffb020", "Highlight color", under="highlight", when=lambda c: c.highlight,
         help="The color moving photos flash.",
     )  # fmt: skip
-    seed = IntParam(1, "Seed", min=0, max=999_999)
+    seed = seed_param()
 
     def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:
         n = len(scene)

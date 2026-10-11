@@ -1,4 +1,4 @@
-"""Small shared looks: muted and warning text, progress bars."""
+"""Small shared looks: muted and warning text, progress bars, sizes in bytes."""
 
 from PySide6.QtWidgets import QLabel, QProgressBar
 
@@ -11,6 +11,15 @@ def muted(label: QLabel) -> QLabel:
     label.setWordWrap(True)
     label.setStyleSheet(MUTED_STYLE)
     return label
+
+
+def format_bytes(n: float) -> str:
+    """A size in bytes for people: "512 bytes", "1.5 KB", "2.3 MB", "1.1 GB"."""
+    for unit in ("bytes", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:,.0f} {unit}" if unit == "bytes" else f"{n:,.1f} {unit}"
+        n /= 1024
+    raise AssertionError("unreachable")
 
 
 def progress_bar() -> QProgressBar:

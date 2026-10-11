@@ -18,7 +18,6 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSpinBox,
     QStackedWidget,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -27,7 +26,9 @@ from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.edits import Crop, Edit, FlipHorizontal, FlipVertical, Rotate90
 from skitter.core.imaging import IMAGE_EXTENSIONS, load_image, visible_mask
 from skitter.ui import icons
+from skitter.ui.actions import make_action, set_tooltip, tool_button
 from skitter.ui.steps.base import StepPage, side_panel
+from skitter.ui.style import MUTED_STYLE, format_bytes, muted
 from skitter.ui.widgets.crop_overlay import CropOverlay
 from skitter.ui.widgets.image_viewer import ImageViewer
 
@@ -44,14 +45,6 @@ ASPECT_CHOICES = (
     ("16:9", 16 / 9),
     ("9:16", 9 / 16),
 )
-
-
-def _format_bytes(n: int) -> str:
-    for unit in ("bytes", "KB", "MB", "GB"):
-        if n < 1024 or unit == "GB":
-            return f"{n:,} {unit}" if unit == "bytes" else f"{n:.1f} {unit}"
-        n /= 1024
-    raise AssertionError("unreachable")
 
 
 def _format_size(image) -> str:
@@ -94,46 +87,29 @@ class SourceStep(StepPage):
 
     # Construction
 
-    def _action(self, icon, text, slot, *shortcuts) -> QAction:
-        action = QAction(icon, text, self)
-        action.triggered.connect(slot)
-        if shortcuts:
-            action.setShortcuts([QKeySequence(s) for s in shortcuts])
-        self._set_tooltip(action, text)
-        return action
-
-    @staticmethod
-    def _set_tooltip(action: QAction, text: str) -> None:
-        keys = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
-        action.setToolTip(f"{text} ({keys})" if keys else text)
-
     def _build_actions(self) -> None:
         session = self.session
-        self.undo_action = self._action(
-            icons.undo(), "Undo", session.undo, QKeySequence.StandardKey.Undo
+
+        def edit(edit_type, *args):
+            return lambda: self._edit(edit_type(*args))
+
+        self.undo_action = make_action(
+            self, "Undo", session.undo, QKeySequence.StandardKey.Undo, icon=icons.undo()
         )
-        self.redo_action = self._action(
-            icons.redo(), "Redo", session.redo, QKeySequence.StandardKey.Redo, "Ctrl+Shift+Z"
-        )
-        self.rotate_left_action = self._action(
-            icons.rotate_left(), "Rotate Left", lambda: self._edit(Rotate90(-1)), "Ctrl+Shift+R"
-        )
-        self.rotate_right_action = self._action(
-            icons.rotate_right(), "Rotate Right", lambda: self._edit(Rotate90(1)), "Ctrl+R"
-        )
-        self.flip_h_action = self._action(
-            icons.flip_horizontal(), "Flip Horizontal", lambda: self._edit(FlipHorizontal())
-        )
-        self.flip_v_action = self._action(
-            icons.flip_vertical(), "Flip Vertical", lambda: self._edit(FlipVertical())
-        )
-        self.crop_action = QAction(icons.crop(), "Crop", self)
-        self.crop_action.setCheckable(True)
-        self.crop_action.setShortcut(QKeySequence("C"))
-        self._set_tooltip(self.crop_action, "Crop")
-        self.crop_action.toggled.connect(self._set_cropping)
-        self.revert_action = self._action(icons.revert(), "Revert", session.revert_edits)
-        self.revert_action.setToolTip("Revert to the original image")
+        self.redo_action = make_action(self, "Redo", session.redo, QKeySequence.StandardKey.Redo,
+                                       "Ctrl+Shift+Z", icon=icons.redo())  # fmt: skip
+        self.rotate_left_action = make_action(self, "Rotate Left", edit(Rotate90, -1),
+                                              "Ctrl+Shift+R", icon=icons.rotate_left())  # fmt: skip
+        self.rotate_right_action = make_action(self, "Rotate Right", edit(Rotate90, 1), "Ctrl+R",
+                                               icon=icons.rotate_right())  # fmt: skip
+        self.flip_h_action = make_action(self, "Flip Horizontal", edit(FlipHorizontal),
+                                         icon=icons.flip_horizontal())  # fmt: skip
+        self.flip_v_action = make_action(self, "Flip Vertical", edit(FlipVertical),
+                                         icon=icons.flip_vertical())  # fmt: skip
+        self.crop_action = make_action(self, "Crop", self._set_cropping, "C", icon=icons.crop(),
+                                       checkable=True)  # fmt: skip
+        self.revert_action = make_action(self, "Revert", session.revert_edits, icon=icons.revert(),
+                                         tooltip="Revert to the original image")  # fmt: skip
 
         # Crop mode keys live on the page so they work wherever focus is.
         self.apply_crop_action = QAction("Apply Crop", self)
@@ -146,9 +122,8 @@ class SourceStep(StepPage):
 
     def _build_empty_state(self) -> QWidget:
         drop = QLabel("Drop an image here")
-        drop.setStyleSheet("color: palette(placeholder-text); font-size: 16pt;")
-        either = QLabel("or")
-        either.setStyleSheet("color: palette(placeholder-text);")
+        drop.setStyleSheet(f"{MUTED_STYLE} font-size: 16pt;")
+        either = muted(QLabel("or"))
         self.choose_button = QPushButton(icons.picture(), "Choose Image…")
         self.choose_button.setIconSize(QSize(20, 20))
         self.choose_button.clicked.connect(self.open_dialog)
@@ -189,11 +164,7 @@ class SourceStep(StepPage):
                 tools.addWidget(line)
                 tools.addSpacing(4)
             for action in group:
-                button = QToolButton()
-                button.setDefaultAction(action)
-                button.setAutoRaise(True)
-                button.setIconSize(QSize(20, 20))
-                tools.addWidget(button)
+                tools.addWidget(tool_button(action, 20))
 
     def _build_panel(self) -> QWidget:
         return side_panel(
@@ -261,9 +232,7 @@ class SourceStep(StepPage):
         buttons.addWidget(apply_button)
         buttons.addWidget(cancel_button)
 
-        hint = QLabel("Drag the box or its handles, or drag outside it to draw a new box.")
-        hint.setWordWrap(True)
-        hint.setStyleSheet("color: palette(placeholder-text);")
+        hint = muted(QLabel("Drag the box or its handles, or drag outside it to draw a new box."))
 
         self._crop_group = QGroupBox("Crop")
         layout = QVBoxLayout(self._crop_group)
@@ -484,7 +453,7 @@ class SourceStep(StepPage):
         h, w = project.source_image.shape[:2]
         self._megapixels.setText(f"{w * h / 1e6:.1f}")
         try:
-            self._file_size.setText(_format_bytes(path.stat().st_size))
+            self._file_size.setText(format_bytes(path.stat().st_size))
         except OSError:  # moved or deleted since (a project keeps its own copy)
             self._file_size.setText("—")
         visible = visible_mask(project.source_image)
@@ -523,9 +492,9 @@ class SourceStep(StepPage):
         self.cancel_crop_action.setEnabled(cropping)
 
         edits = session.project.source_edits
-        self._set_tooltip(self.undo_action, f"Undo {edits[-1].describe()}" if edits else "Undo")
+        set_tooltip(self.undo_action, f"Undo {edits[-1].describe()}" if edits else "Undo")
         redo = session.next_redo
-        self._set_tooltip(self.redo_action, f"Redo {redo.describe()}" if redo else "Redo")
+        set_tooltip(self.redo_action, f"Redo {redo.describe()}" if redo else "Redo")
 
     # Drag and drop
 

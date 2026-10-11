@@ -51,3 +51,9 @@ def heading(angle: float) -> np.ndarray:
     """(2,) unit vector travelling `angle` degrees clockwise from the top (y runs down)."""
     a = math.radians(angle)
     return np.array([math.sin(a), -math.cos(a)])
+
+
+def clock_angle(offset: np.ndarray) -> np.ndarray:
+    """The direction of each offset (..., 2), in radians clockwise from the top, 0 to 2π
+    (y runs down): where a clock hand pointing that way would be."""
+    return np.arctan2(offset[..., 0], -offset[..., 1]) % math.tau

@@ -25,8 +25,8 @@ drag or a held-down field is one step).
 import math
 from dataclasses import replace
 
-from PySide6.QtCore import QEvent, QObject, QSize, Qt
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QApplication,
@@ -37,7 +37,6 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPushButton,
-    QToolButton,
     QVBoxLayout,
 )
 from shiboken6 import isValid as shiboken_alive
@@ -47,6 +46,7 @@ from skitter.core.animation.keyframes import MOTIONS, CameraKey, CameraTrack, Ke
 from skitter.core.animation.video import content_rect
 from skitter.core.slicing.params import BoolParam, ChoiceParam, Configurable, FloatParam
 from skitter.ui import icons
+from skitter.ui.actions import make_action, tool_button
 from skitter.ui.style import muted
 from skitter.ui.widgets.param_form import ParamForm
 
@@ -104,8 +104,7 @@ class CameraKeys(QObject):
         self.next_action = self._action("Next key", lambda: self.jump(1), "]")
         self.deselect_action = self._action("Deselect key", self.deselect, "Escape")
         self.undo_action = self._action("Undo key edit", self.undo, "Ctrl+Z")
-        self.redo_action = self._action("Redo key edit", self.redo, "Ctrl+Y")
-        self.redo_action.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        self.redo_action = self._action("Redo key edit", self.redo, "Ctrl+Y", "Ctrl+Shift+Z")
         self.undo_action.setIcon(icons.undo())
         self.redo_action.setIcon(icons.redo())
         self.editing_live = False  # a viewfinder move is editing the selected key
@@ -121,20 +120,12 @@ class CameraKeys(QObject):
                              (self.next_action, icons.next_key()),
                              (self.delete_action, icons.delete_key())):  # fmt: skip
             action.setIcon(icon)
-            button = QToolButton()
-            button.setDefaultAction(action)
-            button.setAutoRaise(True)
-            button.setIconSize(QSize(20, 20))
-            step.transport.left_tools.addWidget(button)
+            step.transport.left_tools.addWidget(tool_button(action, 20))
 
-    def _action(self, text: str, slot, key: str) -> QAction:
-        action = QAction(text, self.step)
-        action.setShortcut(QKeySequence(key))
-        action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-        native = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
-        action.setToolTip(f"{text} ({native})")
-        action.triggered.connect(slot)
-        return action
+    def _action(self, text: str, slot, *keys: str) -> QAction:
+        """Its keys work anywhere on the page (install_shortcuts)."""
+        return make_action(self.step, text, slot, *keys,
+                           context=Qt.ShortcutContext.WidgetWithChildrenShortcut)  # fmt: skip
 
     def install_shortcuts(self, widget) -> None:
         """Make the keys work anywhere in widget (the whole page). A text field with the
@@ -180,10 +171,7 @@ class CameraKeys(QObject):
         top = QHBoxLayout()
         top.addWidget(self.count, stretch=1)
         for action in (self.undo_action, self.redo_action):
-            button = QToolButton()
-            button.setDefaultAction(action)
-            button.setAutoRaise(True)
-            top.addWidget(button)
+            top.addWidget(tool_button(action))
         top.addWidget(self.clear_button)
         self.hint = muted(QLabel())
         self.hint.setWordWrap(True)

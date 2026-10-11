@@ -21,6 +21,7 @@ from skitter.core.slicing.params import ColorParam
 from skitter.ui.jobs import JobCancelled
 from skitter.ui.render.tile_textures import DetailRequest, PictureRequest
 from skitter.ui.render.video_renderer import VideoRenderer
+from skitter.ui.style import format_bytes
 
 os.environ.setdefault("SVT_LOG", "1")  # AV1 encoder: errors only, not its banner
 
@@ -49,10 +50,6 @@ class VideoReport:
     elapsed: float  # time the export took
     detail_scale: float  # tile texture resolution used (1.0: full)
     failed: int  # tile files that could not be read (thumbnails used)
-
-
-def _size(n: int) -> str:
-    return f"{n / 2**20:,.1f} MB" if n >= 2**20 else f"{n / 2**10:,.0f} KB"
 
 
 def run_video_job(job: VideoJob, progress, cancelled) -> VideoReport:
@@ -90,7 +87,7 @@ def run_video_job(job: VideoJob, progress, cancelled) -> VideoReport:
             written = writer.bytes_written()
             text = f"{label} {k + 1:,} of {plan.frames:,} · {rate:.0f} fps · {left:.0f} s left"
             if written:
-                text += f" · {_size(written)}"
+                text += f" · {format_bytes(written)}"
             progress(text, 0.08 + 0.92 * done / total)
 
     try:

@@ -15,7 +15,8 @@ order, for two kinds of ordering:
   nearby within 0.15 s 92% of the time, against 50% by chance).
 
 Choreographies then choose when the k-th tile lands: `landing_times` paces
-them evenly, slowing down at the end so the last few land one by one. A new
+them evenly, slowing down at the end so the last few land one by one (its
+settings: `wind_down_param`, `last_gap_param`). A new
 ordering must say which kind it is; tests check random orderings against
 chance (tests/test_animation.py).
 """
@@ -26,6 +27,7 @@ import numpy as np
 from numba import njit
 
 from skitter.core.scene import MosaicScene
+from skitter.core.slicing.params import FloatParam
 
 RANDOM_SWEEPS = 100  # Gibbs sweeps for random_landing_order (settled after about 20)
 
@@ -69,6 +71,26 @@ def _conditioned_keys(keys, below_start, below, above_start, above, sweeps, seed
             for k in range(above_start[i], above_start[i + 1]):
                 hi = min(hi, keys[above[k]])
             keys[i] = lo + np.random.random() * (hi - lo)
+
+
+def wind_down_param(
+    default: float = 0.15,
+    help: str = "Landings slow down over this last share of the duration, so the last few "
+    "tiles land one by one instead of all in the same moment (0: an even pace to the end).",
+) -> FloatParam:
+    """The wind-down (a share of the duration) for landing_times, or a build's own
+    slowing down at the end (a Param belongs to one class: each call makes one)."""
+    return FloatParam(default, "Wind-down", min=0.0, max=0.5, step=0.05,
+                      suffix=" × duration", help=help)  # fmt: skip
+
+
+def last_gap_param() -> FloatParam:
+    """landing_times' last gap, below a `wind_down` setting."""
+    return FloatParam(
+        0.25, "Last gap", min=0.0, max=5.0, step=0.05, suffix=" s",
+        under="wind_down", when=lambda c: c.wind_down > 0,
+        help="Time between the last two landings (at most half the wind-down).",
+    )  # fmt: skip
 
 
 def landing_times(n: int, window: float, wind_down: float = 0.0,

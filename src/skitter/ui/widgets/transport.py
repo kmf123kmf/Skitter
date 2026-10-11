@@ -13,7 +13,7 @@ frames) and Shift+Left / Right one second.
 """
 
 from PySide6.QtCore import QSize, Qt
-from PySide6.QtGui import QAction, QFontDatabase, QKeySequence
+from PySide6.QtGui import QAction, QFontDatabase
 from PySide6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
@@ -24,12 +24,13 @@ from PySide6.QtWidgets import (
 )
 
 from skitter.ui import icons
+from skitter.ui.actions import make_action, set_tooltip, tool_button
 from skitter.ui.render.player import TimelinePlayer
 from skitter.ui.style import muted
 from skitter.ui.widgets.timeline_strip import TimelineStrip
 
 SPEEDS = (0.25, 0.5, 1.0, 2.0)
-ICON = QSize(20, 20)
+ICON = 20  # px
 
 
 class TransportBar(QWidget):
@@ -57,10 +58,9 @@ class TransportBar(QWidget):
                                         "Shift+Left")  # fmt: skip
         self.second_forward = self._action(None, "Forward a second", lambda: self.jump(1.0),
                                            "Shift+Right")  # fmt: skip
-        self.loop_action = QAction(icons.loop(), "Loop", self)
-        self.loop_action.setToolTip("Loop: play on from the start after the end.")
-        self.loop_action.setCheckable(True)
-        self.loop_action.toggled.connect(self._on_loop)
+        self.loop_action = make_action(self, "Loop", self._on_loop, icon=icons.loop(),
+                                       tooltip="Loop: play on from the start after the end.",
+                                       checkable=True)  # fmt: skip
 
         self.play_button = self._button(self.play_action)
         self.play_button.setIconSize(QSize(26, 26))
@@ -117,24 +117,14 @@ class TransportBar(QWidget):
 
     # Construction
 
-    def _action(self, icon, text: str, slot, key: str | None = None) -> QAction:
-        action = QAction(text, self)
-        if icon is not None:
-            action.setIcon(icon)
-        if key:
-            action.setShortcut(QKeySequence(key))
-            action.setShortcutContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
-            native = action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
-            action.setToolTip(f"{text} ({native})")
-        action.triggered.connect(slot)
-        return action
+    def _action(self, icon, text: str, slot, key: str) -> QAction:
+        """Its key works anywhere on the page the bar is on (install_shortcuts)."""
+        return make_action(self, text, slot, key, icon=icon,
+                           context=Qt.ShortcutContext.WidgetWithChildrenShortcut)  # fmt: skip
 
-    def _button(self, action: QAction) -> QToolButton:
-        button = QToolButton()
-        button.setDefaultAction(action)
-        button.setAutoRaise(True)
-        button.setIconSize(ICON)
-        return button
+    @staticmethod
+    def _button(action: QAction) -> QToolButton:
+        return tool_button(action, ICON)
 
     def install_shortcuts(self, widget: QWidget) -> None:
         """Make the keys work anywhere in widget (the page the bar is on)."""
@@ -219,5 +209,4 @@ class TransportBar(QWidget):
     def _show_playing(self, playing: bool) -> None:
         self.play_action.setIcon(icons.pause() if playing else icons.play())
         self.play_action.setText("Pause" if playing else "Play")
-        key = self.play_action.shortcut().toString(QKeySequence.SequenceFormat.NativeText)
-        self.play_action.setToolTip(f"{self.play_action.text()} ({key})")
+        set_tooltip(self.play_action, self.play_action.text())

@@ -5,8 +5,9 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from skitter.core.animation import compass
 from skitter.core.animation.base import Choreography, TileFrame, Timeline, register_choreography
-from skitter.core.animation.landing import landing_times
+from skitter.core.animation.landing import landing_times, last_gap_param, wind_down_param
 from skitter.core.animation.look import AnimationLook, scene_extent
 from skitter.core.animation.orders import (
     RANDOM_ORDERS,
@@ -19,6 +20,7 @@ from skitter.core.animation.orders import (
     sweep_param,
 )
 from skitter.core.scene import MosaicScene
+from skitter.core.slicing.common import seed_param
 from skitter.core.slicing.params import (
     BoolParam,
     ChoiceParam,
@@ -269,17 +271,8 @@ class DealChoreography(Choreography):
         help="How long the farthest tile slides (at most the duration); nearer ones "
              "take less, as if all were pushed off just as hard.",
     )  # fmt: skip
-    wind_down = FloatParam(
-        0.15, "Wind-down", min=0.0, max=0.5, step=0.05, suffix=" × duration",
-        help="Landings slow down over this last share of the duration, so the last "
-             "few tiles land one by one instead of all in the same moment (0: an even "
-             "pace to the end).",
-    )  # fmt: skip
-    last_gap = FloatParam(
-        0.25, "Last gap", min=0.0, max=5.0, step=0.05, suffix=" s",
-        under="wind_down", when=lambda c: c.wind_down > 0,
-        help="Time between the last two landings (at most half the wind-down).",
-    )  # fmt: skip
+    wind_down = wind_down_param()
+    last_gap = last_gap_param()
 
     _cards = Section("Cards")
     spin = RangeParam(
@@ -295,7 +288,7 @@ class DealChoreography(Choreography):
     )  # fmt: skip
 
     _end = Section()
-    seed = IntParam(1, "Seed", min=0, max=999_999)
+    seed = seed_param()
 
     def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:
         n = len(scene)
@@ -368,7 +361,7 @@ class DealChoreography(Choreography):
             return gaps if self.order == "near" else -gaps
         n, k = len(scene), len(path.spots)
         out = center - path.middle
-        angle = np.arctan2(out[:, 0], -out[:, 1])  # clockwise from up
+        angle = compass.clock_angle(out)
         ahead = (np.sign(path.rate) * (angle - path.start[0])) % (math.tau / k)
         phase = ahead / (math.tau / k)  # 0..1: share of the way to it for the next deck
         passes = self.orbit_turns * k  # decks going by any one place, over the animation

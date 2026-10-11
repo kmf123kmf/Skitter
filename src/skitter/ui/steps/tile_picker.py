@@ -34,6 +34,7 @@ from skitter.ui import icons
 from skitter.ui.jobs import Job, JobCancelled
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import thumb_crop
+from skitter.ui.style import muted
 from skitter.ui.widgets.candidate_grid import CandidateGrid
 
 PICKER_PX = 192  # longest side of candidate crops read for the picker (and the preview)
@@ -307,9 +308,7 @@ class TilePicker(QGroupBox):
         top.addWidget(self.redo_button)
         top.addWidget(self.revert_all_button)
 
-        self.hint = QLabel()
-        self.hint.setWordWrap(True)
-        self.hint.setStyleSheet("color: palette(placeholder-text);")
+        self.hint = muted(QLabel())
 
         self.target = QLabel()
         self.target.setFixedSize(TARGET_PX + 4, TARGET_PX + 4)

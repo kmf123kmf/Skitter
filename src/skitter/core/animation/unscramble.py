@@ -18,6 +18,7 @@ import math
 import numpy as np
 
 from skitter.core.animation.base import Choreography, Timeline, register_choreography
+from skitter.core.animation.landing import wind_down_param
 from skitter.core.animation.look import AnimationLook, scene_extent
 from skitter.core.animation.moves import LayeredTimeline, MovesTimeline, layers, swap_plan
 from skitter.core.animation.orders import (
@@ -28,10 +29,10 @@ from skitter.core.animation.orders import (
     sweep_param,
 )
 from skitter.core.scene import MosaicScene
+from skitter.core.slicing.common import seed_param
 from skitter.core.slicing.params import (
     ChoiceParam,
     FloatParam,
-    IntParam,
     Section,
     TileSizeParam,
 )
@@ -147,11 +148,11 @@ class UnscrambleChoreography(Choreography):
              "mosaic lies still at least this long. (As many batches as fit in the "
              "duration.)",
     )  # fmt: skip
-    wind_down = FloatParam(
-        0.0, "Wind-down", min=0.0, max=0.5, step=0.05, suffix=" × duration",
-        help="Batches shrink over this last share of the duration, so the last few "
-             "swaps happen one by one (0: batches alike to the end).",
-    )  # fmt: skip
+    wind_down = wind_down_param(
+        0.0,
+        "Batches shrink over this last share of the duration, so the last few "
+        "swaps happen one by one (0: batches alike to the end).",
+    )
 
     _pile = Section("Pile", "Only when tiles lie on each other.")
     stack_height = FloatParam(
@@ -176,7 +177,7 @@ class UnscrambleChoreography(Choreography):
     )  # fmt: skip
 
     _end = Section()
-    seed = IntParam(1, "Seed", min=0, max=999_999)
+    seed = seed_param()
 
     @classmethod
     def from_values(cls, values: dict, problems: list[str] | None = None, what: str = ""):
