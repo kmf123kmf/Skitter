@@ -192,7 +192,7 @@ class SortChoreography(Choreography):
         help="Moving photos flash a color, as sorting visualizers mark what they touch.",
     )  # fmt: skip
     highlight_color = ColorParam(
-        "#ffb020", "Highlight color", when=lambda c: c.highlight,
+        "#ffb020", "Highlight color", under="highlight", when=lambda c: c.highlight,
         help="The color moving photos flash.",
     )  # fmt: skip
     seed = IntParam(1, "Seed", min=0, max=999_999)

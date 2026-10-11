@@ -69,17 +69,18 @@ class ExportSettings(Configurable):
              "image's width or height; the others follow.",
     )  # fmt: skip
     tile_px = IntParam(
-        100, "Tile width", min=1, max=20_000, suffix=" px", when=lambda s: s.size_by == "tile",
+        100, "Tile width", min=1, max=20_000, suffix=" px",
+        under="size_by", when=lambda s: s.size_by == "tile",
         help="Width of a base tile in the image. Tiles are read from their original "
              "files, so large tiles keep real detail as long as the photos have it.",
     )  # fmt: skip
     width_px = IntParam(
         4000, "Image width", min=1, max=1_000_000, suffix=" px",
-        when=lambda s: s.size_by == "width",
+        under="size_by", when=lambda s: s.size_by == "width",
     )  # fmt: skip
     height_px = IntParam(
         3000, "Image height", min=1, max=1_000_000, suffix=" px",
-        when=lambda s: s.size_by == "height",
+        under="size_by", when=lambda s: s.size_by == "height",
     )  # fmt: skip
     framing = ChoiceParam(
         "frame", "Framing",

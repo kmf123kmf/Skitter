@@ -925,6 +925,77 @@ def test_range_editor_keeps_its_ends_in_order(qapp):
     assert (low.value(), high.value()) == (1.0, 1.5) and len(edits) == count
 
 
+def test_param_form_hides_what_does_not_apply_indents_and_folds_sections(qapp):
+    from PySide6.QtWidgets import QToolButton
+
+    from skitter.core.slicing import BoolParam, ChoiceParam, Configurable, IntParam, Section
+    from skitter.ui.widgets.param_form import INDENT, ParamForm
+
+    class Thing(Configurable):
+        top = IntParam(1, "Top")
+        _shape = Section("Shape", "Only for shapes.")
+        kind = ChoiceParam("a", "Kind", choices=[("a", "A"), ("b", "B")])
+        size = IntParam(2, "Size", under="kind", when=lambda t: t.kind == "b")
+        fine = BoolParam(False, "Fine", under="size")
+        _end = Section()
+        seed = IntParam(1, "Seed")
+
+    assert [(s and s.title, [p.name for p in ps]) for s, ps in Thing.sections()] == [
+        (None, ["top"]), ("Shape", ["kind", "size", "fine"]), ("", ["seed"])
+    ]  # fmt: skip
+    form = ParamForm()
+    form.set_target(Thing())
+    assert form.names() == ["top", "kind", "size", "fine", "seed"]
+    # Size (and Fine, which belongs with it) apply only with Kind B.
+    assert form.is_shown("kind") and not form.is_shown("size") and not form.is_shown("fine")
+    form.editor("kind").widget.setCurrentIndex(1)
+    assert form.is_shown("size") and form.is_shown("fine")
+    labels = {row.param.name: row.label for row in form._rows}
+    margins = {n: labels[n].contentsMargins().left() for n in ("kind", "size", "fine")}
+    assert margins == {"kind": 0, "size": INDENT, "fine": 2 * INDENT}
+    # One heading (the untitled section has none); folding it hides its rows, and stays.
+    (heading,) = form.headings()
+    assert isinstance(heading, QToolButton) and form.is_open("Shape")
+    heading.click()
+    assert not any(form.is_shown(n) for n in ("kind", "size", "fine"))
+    assert form.is_shown("top") and form.is_shown("seed")
+    again = ParamForm()
+    again.set_target(Thing())
+    assert not again.is_open("Shape") and not again.is_shown("kind")
+
+
+def every_configurable_type() -> list[type]:
+    from skitter.core.animation import PhaseHolds
+    from skitter.core.animation.look import AnimationLook
+    from skitter.core.animation.video import VideoSettings
+    from skitter.core.assembly import ExportSettings
+    from skitter.core.matching.method import method_types
+    from skitter.core.slicing.base import operation_types
+
+    return [*choreography_types(), *operation_types(), *method_types(), AnimationLook,
+            PhaseHolds, VideoSettings, ExportSettings]  # fmt: skip
+
+
+@pytest.mark.parametrize("cls", every_configurable_type(), ids=lambda c: c.__name__)
+def test_settings_sit_right_below_the_one_they_belong_with(cls):
+    """A setting `under` another follows it in its section, after only its fellows (so
+    the form can indent it below that one), and is shown only sometimes (`when`) or
+    belongs with one that is."""
+    params = {p.name: p for p in cls.params()}
+    for _, group in cls.sections():
+        names = [p.name for p in group]
+        for i, param in enumerate(group):
+            if param.under is None:
+                continue
+            assert param.under in names[:i], (param.name, "not after", param.under)
+            between = group[names.index(param.under) + 1 : i]
+            for other in between:  # all belonging (in the end) with the same one
+                up = other
+                while up.under is not None and up.name != param.under:
+                    up = params[up.under]
+                assert up.name == param.under, (param.name, other.name)
+
+
 # Flips
 
 

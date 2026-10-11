@@ -88,12 +88,12 @@ class PatternSlicer(Subdivider):
         "herringbone", "Pattern", choices=lambda: [(p.id, p.name) for p in patterns()]
     )
     weave_auto = BoolParam(
-        True, "Match tile shape", when=_uses("weave_auto"),
+        True, "Match tile shape", under="pattern", when=_uses("weave_auto"),
         help="Choose the bricks per block that keeps bricks closest to the tile shape.",
     )  # fmt: skip
     weave = IntParam(
         2, "Bricks per block", min=1, max=20,
-        when=lambda op: _uses("weave")(op) and not op.weave_auto,
+        under="pattern", when=lambda op: _uses("weave")(op) and not op.weave_auto,
         help="Bricks side by side in each square block. Bricks keep the tile's length "
              "and get thinner or thicker to fill the block.",
     )  # fmt: skip

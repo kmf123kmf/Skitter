@@ -51,11 +51,12 @@ class BondSlicer(Subdivider):
         help="How far each course shifts from the one before.",
     )  # fmt: skip
     step = FloatParam(
-        0.5, "Shift", min=0.0, max=1.0, step=0.05, when=lambda op: op.bond == "custom",
+        0.5, "Shift", min=0.0, max=1.0, step=0.05,
+        under="bond", when=lambda op: op.bond == "custom",
         help="Shift from one course to the next, as a fraction of a brick's length. "
              "0 lines bricks up in a plain grid.",
     )  # fmt: skip
-    seed = seed_param(when=lambda op: op.bond == "random")
+    seed = seed_param(when=lambda op: op.bond == "random", under="bond")
     cell_size = TileSizeParam(
         1.0, "Brick size",
         help="Brick size in base tiles. Partial bricks at the edges become whole, "

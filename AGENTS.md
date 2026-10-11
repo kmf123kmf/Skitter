@@ -11,7 +11,7 @@
 
 ## Conventions
 - `skitter.core` must not import Qt. Long core operations take `progress`/`cancelled` callbacks; the UI runs them via `Session` + `ui/jobs.Job`.
-- Settings are declared with `Param`s on a `Configurable` (`core/slicing/params.py`); `ParamForm` builds their UI.
+- Settings are declared with `Param`s on a `Configurable` (`core/slicing/params.py`); `ParamForm` builds their UI. A setting that applies only sometimes has `when` (the form hides it otherwise); one that depends on another sets `under="that_one"` and is declared right after it (shown indented; `test_settings_sit_right_below_the_one_they_belong_with` checks every registered class). Long lists are split by declaring `Section("Title")` markers (foldable headings; an untitled `Section()` ends them, e.g. before Seed).
 - Slicing runs in the background: operations take `apply(regions, ctx, progress)` / `subdivide(region, ctx, progress)` and should call `progress(fraction)` at natural points in slow work (it also cancels). Tests slice inline by default (`tests/conftest.py`); use the `background_slicing` fixture to test the worker thread.
 - A slicing plan (`core/slicing/plan.py`) is one slicer (a registered operation) and, optionally, its cells split by detail (the quadtree, not a slicer of its own); the plan keeps every slicer's settings. Older files' stage lists are converted in `SlicingPlan.from_dict`.
 - New slicers: lattice patterns go through `slicing/frame.PinnedFrame` (anchor + rotation for free); shared settings (anchor, rotation, orientation, seed) come from `slicing/common.py`; size tiles with `ctx.tile_dims(scale)`.

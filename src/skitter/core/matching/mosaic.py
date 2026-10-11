@@ -28,7 +28,7 @@ class MosaicMethod(MatchMethod):
     )  # fmt: skip
     tint_strength = FloatParam(
         0.35, "Tint strength", min=0.0, max=MAX_TINT, step=0.05,
-        when=lambda s: s.tint == "custom",
+        under="tint", when=lambda s: s.tint == "custom",
         help="0 leaves tiles untouched; higher values let structure matter more than color.",
     )  # fmt: skip
     max_uses = IntParam(

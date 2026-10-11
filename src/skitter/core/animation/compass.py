@@ -20,16 +20,17 @@ DIRECTIONS = (
 )  # fmt: skip
 
 
-def direction_param(default: str, what: str, when=None) -> ChoiceParam:
+def direction_param(default: str, what: str, when=None, under=None) -> ChoiceParam:
     """A compass direction (a Param belongs to one class: each call makes one)."""
-    return ChoiceParam(default, "Direction", choices=DIRECTIONS, when=when,
+    return ChoiceParam(default, "Direction", choices=DIRECTIONS, when=when, under=under,
                        help=f"The way the {what} travels across the picture.")  # fmt: skip
 
 
 def angle_param(default: float, what: str, direction: str, when=None) -> FloatParam:
-    """The custom angle, active when the `direction` setting is Custom (and `when`)."""
+    """The custom angle, shown below the `direction` setting when it is Custom (and
+    `when`)."""
     return FloatParam(
-        default, "Angle", min=0.0, max=360.0, step=15.0, decimals=0, suffix="°",
+        default, "Angle", min=0.0, max=360.0, step=15.0, decimals=0, suffix="°", under=direction,
         when=lambda c: getattr(c, direction) == CUSTOM and (when is None or when(c)),
         help=f"The way the {what} travels: 0° toward the top of the picture, clockwise "
              "(90°: to the right).",

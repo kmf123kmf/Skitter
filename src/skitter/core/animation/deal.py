@@ -25,6 +25,7 @@ from skitter.core.slicing.params import (
     FloatParam,
     IntParam,
     RangeParam,
+    Section,
 )
 
 EDGES = {"bottom": (0, 1), "top": (0, -1), "left": (-1, 0), "right": (1, 0)}
@@ -192,6 +193,7 @@ class DealChoreography(Choreography):
         "Overlapping tiles always land bottom first."
     )
 
+    _decks = Section("Decks")
     position = ChoiceParam(
         "bottom", "Deck position", choices=POSITIONS,
         help="Where the deck sits, beside the mosaic (or in its middle). With several "
@@ -200,32 +202,32 @@ class DealChoreography(Choreography):
     )  # fmt: skip
     offset = FloatParam(
         0.1, "Offset", min=-0.5, max=3.0, step=0.05, suffix=" × mosaic",
-        when=lambda c: c.position not in ("center", "orbit"),
+        under="position", when=lambda c: c.position not in ("center", "orbit"),
         help="How far out from the mosaic's edge the deck sits (0: on the edge; "
              "less: over the mosaic). Decks off the picture deal tiles in from its edge.",
     )  # fmt: skip
     radius = FloatParam(
         0.75, "Radius", min=0.0, max=5.0, step=0.05, suffix=" × mosaic",
-        when=lambda c: c.position == "orbit",
+        under="position", when=lambda c: c.position == "orbit",
         help="How far from the mosaic's center the decks circle, in sizes of the mosaic "
              "(its longer side). Below 0.5 they pass over the mosaic.",
     )  # fmt: skip
     start_angle = FloatParam(
         180.0, "Starting angle", min=0.0, max=360.0, step=15.0, decimals=0, suffix="°",
-        when=lambda c: c.position == "orbit",
+        under="position", when=lambda c: c.position == "orbit",
         help="Where on the orbit the first deck starts: 0° above the mosaic, clockwise "
              "(180°: below it).",
     )  # fmt: skip
     orbit_turns = FloatParam(
         1.0, "Orbit speed", min=0.0, max=20.0, step=0.25, suffix=" turns",
-        when=lambda c: c.position == "orbit",
+        under="position", when=lambda c: c.position == "orbit",
         help="How many times the decks go round over the whole animation (0: they stay "
              "put on the orbit).",
     )  # fmt: skip
     orbit_direction = ChoiceParam(
         "clockwise", "Orbit direction",
         choices=[("clockwise", "Clockwise"), ("counter", "Counter-clockwise")],
-        when=lambda c: c.position == "orbit",
+        under="position", when=lambda c: c.position == "orbit",
     )  # fmt: skip
     decks = IntParam(
         1, "Decks", min=1, max=8,
@@ -236,7 +238,7 @@ class DealChoreography(Choreography):
         "around", "Arrangement",
         choices=[("around", "Around the mosaic"), ("side", "Side by side")],
         available=lambda c, value: value == "around" or c.position not in CORNERS,
-        when=lambda c: c.decks > 1 and c.position != "orbit",
+        under="decks", when=lambda c: c.decks > 1 and c.position != "orbit",
         help="Around: spread evenly around the mosaic, starting at the deck position. "
              "Side by side: spread evenly along that edge (or across the middle).",
     )  # fmt: skip
@@ -250,10 +252,14 @@ class DealChoreography(Choreography):
         help="How squarely the cards are stacked in a deck (1: perfectly; less: a few "
              "cards stick out, slightly turned).",
     )  # fmt: skip
+
+    _order = Section("Order")
     order = order_param("near", extra=DEAL_ORDERS)
     sweep = sweep_param()
     sweep_angle = sweep_angle_param()
     spread = spread_param(0.15)
+
+    _timing = Section("Timing")
     duration = FloatParam(
         8.0, "Duration", min=0.5, max=3600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first tile leaving its deck to the last coming to rest.",
@@ -271,9 +277,11 @@ class DealChoreography(Choreography):
     )  # fmt: skip
     last_gap = FloatParam(
         0.25, "Last gap", min=0.0, max=5.0, step=0.05, suffix=" s",
-        when=lambda c: c.wind_down > 0,
+        under="wind_down", when=lambda c: c.wind_down > 0,
         help="Time between the last two landings (at most half the wind-down).",
     )  # fmt: skip
+
+    _cards = Section("Cards")
     spin = RangeParam(
         (0.0, 0.5), "Spin", min=0.0, max=10.0, step=0.25, suffix=" turns",
         help="Extra turns each tile makes on its way, either way: each tile draws its "
@@ -285,6 +293,8 @@ class DealChoreography(Choreography):
         help="Cards lie face down in the deck, showing their backs, and are turned "
              "face up as they leave it, then slide face up.",
     )  # fmt: skip
+
+    _end = Section()
     seed = IntParam(1, "Seed", min=0, max=999_999)
 
     def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:

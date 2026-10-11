@@ -28,7 +28,13 @@ from skitter.core.animation.orders import (
     sweep_param,
 )
 from skitter.core.scene import MosaicScene
-from skitter.core.slicing.params import ChoiceParam, FloatParam, IntParam, TileSizeParam
+from skitter.core.slicing.params import (
+    ChoiceParam,
+    FloatParam,
+    IntParam,
+    Section,
+    TileSizeParam,
+)
 
 LIFT_LIMIT = 0.25  # carried tiles rise at most this share of the camera height
 MOTIONS = (("carry", "Carry"), ("slide", "Slide"))
@@ -88,15 +94,7 @@ class UnscrambleChoreography(Choreography):
         "swap them back, one tile home with every swap, until the picture is whole."
     )
 
-    motion = ChoiceParam(
-        "carry", "Motion", choices=MOTIONS,
-        help="Carry: tiles are lifted over the mosaic, casting shadows, and set down. "
-             "Slide: they glide across it. (A pile explodes instead: see Stack height.)",
-    )  # fmt: skip
-    order = order_param("random", "go home")
-    sweep = sweep_param()
-    sweep_angle = sweep_angle_param()
-    spread = spread_param(0.05, "order tiles go home in")
+    _scramble = Section("Scramble")
     scrambled = FloatParam(
         100.0, "Scrambled", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
         help="Share of the tiles that start out of place (the rest start at home).",
@@ -107,6 +105,33 @@ class UnscrambleChoreography(Choreography):
              "shuffled puzzle, large for tiles flying across the whole mosaic. (The last "
              "few tiles may have further to go.)",
     )  # fmt: skip
+
+    _motion = Section("Motion")
+    motion = ChoiceParam(
+        "carry", "Motion", choices=MOTIONS,
+        help="Carry: tiles are lifted over the mosaic, casting shadows, and set down. "
+             "Slide: they glide across it. (A pile explodes instead: see Stack height.)",
+    )  # fmt: skip
+    lift = TileSizeParam(
+        1.5, "Lift", min=0.1, max=10.0, step=0.1,
+        under="motion", when=lambda c: c.motion == "carry",
+        help="How high carried tiles rise, in base tiles (one of two trading places "
+             "flies lower, so they pass one over the other).",
+    )  # fmt: skip
+    tilt = FloatParam(
+        8.0, "Tilt", min=0.0, max=45.0, step=1.0, decimals=0, suffix="°",
+        under="motion", when=lambda c: c.motion == "carry",
+        help="How far a carried tile turns on the way, either way, as if held by hand; "
+             "it lands straight.",
+    )  # fmt: skip
+
+    _order = Section("Order")
+    order = order_param("random", "go home")
+    sweep = sweep_param()
+    sweep_angle = sweep_angle_param()
+    spread = spread_param(0.05, "order tiles go home in")
+
+    _timing = Section("Timing")
     duration = FloatParam(
         10.0, "Duration", min=0.5, max=3600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first swap until the last tile is home (a pile: from coming "
@@ -127,18 +152,8 @@ class UnscrambleChoreography(Choreography):
         help="Batches shrink over this last share of the duration, so the last few "
              "swaps happen one by one (0: batches alike to the end).",
     )  # fmt: skip
-    lift = TileSizeParam(
-        1.5, "Lift", min=0.1, max=10.0, step=0.1,
-        when=lambda c: c.motion == "carry",
-        help="How high carried tiles rise, in base tiles (one of two trading places "
-             "flies lower, so they pass one over the other).",
-    )  # fmt: skip
-    tilt = FloatParam(
-        8.0, "Tilt", min=0.0, max=45.0, step=1.0, decimals=0, suffix="°",
-        when=lambda c: c.motion == "carry",
-        help="How far a carried tile turns on the way, either way, as if held by hand; "
-             "it lands straight.",
-    )  # fmt: skip
+
+    _pile = Section("Pile", "Only when tiles lie on each other.")
     stack_height = FloatParam(
         0.25, "Stack height", min=0.02, max=1.0, step=0.05, suffix=" × mosaic",
         help="A pile (tiles lying on each other) first comes apart into evenly spaced "
@@ -159,6 +174,8 @@ class UnscrambleChoreography(Choreography):
         help="A pile: how much darker its bottom layer looks while apart (layers above "
              "it less), so the stack reads as deep.",
     )  # fmt: skip
+
+    _end = Section()
     seed = IntParam(1, "Seed", min=0, max=999_999)
 
     @classmethod

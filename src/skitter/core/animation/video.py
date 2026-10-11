@@ -153,16 +153,16 @@ class VideoSettings(Configurable):
     resolution = ChoiceParam("1080p", "Resolution", choices=[(i, n) for i, n, _ in RESOLUTIONS])
     width = IntParam(
         1920, "Width", min=MIN_SIDE, max=MAX_SIDE, suffix=" px",
-        when=lambda s: s.resolution in ("custom", "mosaic"),
+        under="resolution", when=lambda s: s.resolution in ("custom", "mosaic"),
     )  # fmt: skip
     height = IntParam(
         1080, "Height", min=MIN_SIDE, max=MAX_SIDE, suffix=" px",
-        when=lambda s: s.resolution == "custom",
+        under="resolution", when=lambda s: s.resolution == "custom",
     )  # fmt: skip
     frame_rate = ChoiceParam("30", "Frame rate", choices=FRAME_RATES)
     custom_fps = FloatParam(
         30.0, "Custom rate", min=1.0, max=120.0, step=1.0, decimals=3, suffix=" fps",
-        when=lambda s: s.frame_rate == "custom",
+        under="frame_rate", when=lambda s: s.frame_rate == "custom",
     )  # fmt: skip
     framing = ChoiceParam(
         "fit", "Framing", choices=[("fit", "Fit (whole mosaic)"), ("fill", "Fill (crop)")],
@@ -199,7 +199,7 @@ class VideoSettings(Configurable):
     )  # fmt: skip
     shutter = FloatParam(
         180.0, "Shutter angle", min=10.0, max=360.0, step=10.0, decimals=0, suffix="°",
-        when=lambda s: s.motion_blur > 0,
+        under="motion_blur", when=lambda s: s.motion_blur > 0,
         help="How much of each frame's time the blur covers (180° is the film look).",
     )  # fmt: skip
 

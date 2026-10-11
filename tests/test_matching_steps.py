@@ -733,7 +733,7 @@ def test_export_animation_from_the_animate_tab(sliced, photos, tmp_path, qapp):
     assert window.video_action.isEnabled() and animate.export_button.isEnabled()
 
     # The look: camera and light settings reach the player (it draws shadows mid-toss).
-    look_names = [p.name for p, _, _ in animate.look_form._rows]
+    look_names = animate.look_form.names()
     assert {"camera_height", "light_direction", "shadow_strength"} <= set(look_names)
     animate.look_form.editor("camera_height").widget.setValue(3.0)
     assert animate.player.camera.height == pytest.approx(3.0 * max(
@@ -819,7 +819,7 @@ def test_animate_tab_and_export_window_share_video_framing(sliced, photos):
     session.wait_for_job()
     animate = window.step(AnimateStep)
     tab = animate.video_form
-    assert [p.name for p, _, _ in tab._rows] == list(FRAME_SETTINGS)
+    assert tab.names() == list(FRAME_SETTINGS)
     animate.show_frame.setChecked(True)
 
     # Edited on the tab: the export frame follows, and the window opens with it.
@@ -832,7 +832,7 @@ def test_animate_tab_and_export_window_share_video_framing(sliced, photos):
     assert dialog.form.editor("resolution").widget.currentData() == "vertical"
     assert dialog.form.editor("margin").widget.value() == 20.0
     width, height = dialog.form.editor("width").widget, dialog.form.editor("height").widget
-    assert not width.isEnabled() and (width.value(), height.value()) == (1080, 1920)
+    assert not dialog.form.is_shown("width") and (width.value(), height.value()) == (1080, 1920)
     assert dialog.size_label.text().startswith("1,080 × 1,920")
 
     # Edited in the window: the tab shows it too.
@@ -841,12 +841,12 @@ def test_animate_tab_and_export_window_share_video_framing(sliced, photos):
     dialog.form.editor("height").widget.setValue(800)
     choose(dialog.form.editor("framing").widget, "fill")
     assert tab.editor("resolution").widget.currentData() == "custom"
-    assert tab.editor("width").widget.isEnabled() and tab.editor("width").widget.value() == 800
+    assert tab.is_shown("width") and tab.editor("width").widget.value() == 800
     assert tab.editor("framing").widget.currentData() == "fill"
     assert frame_aspect(animate) == pytest.approx(1.0)
     # Settings only the window has stay out of the tab.
     choose(dialog.form.editor("format").widget, "webm")
-    assert "format" not in [p.name for p, _, _ in tab._rows]
+    assert "format" not in tab.names()
 
 
 def test_back_from_animate_and_next_again(sliced, photos, qapp):

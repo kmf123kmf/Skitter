@@ -39,6 +39,6 @@ def orientation_param(label: str, help: str) -> ChoiceParam:
     return ChoiceParam(HORIZONTAL, label, choices=ORIENTATIONS, help=help)
 
 
-def seed_param(when: Callable | None = None) -> IntParam:
+def seed_param(when: Callable | None = None, under: str | None = None) -> IntParam:
     """The seed of an operation's randomness (same seed, same result)."""
-    return IntParam(1, "Seed", min=0, max=999_999, when=when)
+    return IntParam(1, "Seed", min=0, max=999_999, when=when, under=under)

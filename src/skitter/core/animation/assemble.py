@@ -28,7 +28,14 @@ from skitter.core.animation.orders import (
 )
 from skitter.core.easing import ease_out_back, ease_out_cubic
 from skitter.core.scene import MosaicScene
-from skitter.core.slicing.params import BoolParam, ChoiceParam, FloatParam, IntParam, RangeParam
+from skitter.core.slicing.params import (
+    BoolParam,
+    ChoiceParam,
+    FloatParam,
+    IntParam,
+    RangeParam,
+    Section,
+)
 
 TOSS_LIMIT = 0.8  # throws peak at most this share of the camera height (5x size)
 
@@ -43,6 +50,7 @@ class AssembleChoreography(Choreography):
         "from the camera, or gliding in. Overlapping tiles always land bottom first."
     )
 
+    _motion = Section("Motion")
     motion = ChoiceParam(
         "toss", "Motion",
         choices=[("toss", "Toss (gravity)"), ("drop", "Drop (from the camera)"),
@@ -51,11 +59,71 @@ class AssembleChoreography(Choreography):
              "bouncing. Drop: falls from beside the camera, looming large at first and "
              "shrinking onto its spot. Glide: slides in flat and slows to a stop.",
     )  # fmt: skip
+    distance = FloatParam(
+        1.5, "Distance", min=0.0, max=10.0, step=0.25, suffix=" × mosaic",
+        under="motion", when=lambda c: c.motion != "drop",
+        help="How far out tiles start, in mosaic sizes from the center.",
+    )  # fmt: skip
+    slant = FloatParam(
+        0.25, "Slant", min=0.0, max=3.0, step=0.05, suffix=" × mosaic",
+        under="motion", when=lambda c: c.motion == "drop",
+        help="How far beside its spot a tile starts, outward from the middle. 0 drops "
+             "straight down (tiles near the middle start just far enough out to come in "
+             "from the edge): they loom huge and cover the view. More slides tiles in "
+             "from the edges of the picture, smaller when they appear.",
+    )  # fmt: skip
+    arc = FloatParam(
+        0.4, "Arc height", min=0.0, max=5.0, step=0.05, suffix=" × mosaic",
+        under="motion", when=lambda c: c.motion == "toss",
+        help="How high tiles fly at the top of their arc. Higher arcs fall harder: "
+             "gravity follows from this and the flight time.",
+    )  # fmt: skip
+    bounce = RangeParam(
+        (0.2, 0.4),
+        "Bounce",
+        min=0.0,
+        max=0.8,
+        step=0.05,
+        under="motion",
+        when=lambda c: c.motion != "glide",
+        help="How springy a landing is: each bounce keeps this share of the speed "
+        "(0: no bounce); each tile draws its own from this range. A tile that "
+        "another lands on stops hopping before it, and soon stops rocking.",
+    )
+    wobble = RangeParam(
+        (2.0, 6.0), "Settle wobble", min=0.0, max=30.0, step=1.0, decimals=0, suffix="°",
+        under="motion", when=lambda c: c.motion != "glide",
+        help="A small rocking turn that dies away after landing, either way: each tile "
+             "draws its own amount from this range (equal ends: all the same).",
+    )  # fmt: skip
+    shrink = FloatParam(
+        0.3, "Start size", min=0.0, max=10.0, step=0.1, suffix=" ×",
+        under="motion", when=lambda c: c.motion == "glide",
+        help="Size of a tile at the start of its flight, relative to its final size.",
+    )  # fmt: skip
+    overshoot = BoolParam(
+        False, "Overshoot", under="motion", when=lambda c: c.motion == "glide",
+        help="Glide slightly past the spot and settle back.",
+    )  # fmt: skip
+    spin = RangeParam(
+        (0.0, 1.0), "Spin", min=0.0, max=20.0, step=0.25, suffix=" turns",
+        help="How far each tile turns on the way, either way: each tile draws its own "
+             "amount from this range (equal ends: all the same).",
+    )  # fmt: skip
+    flips = RangeParam(
+        (0, 0), "Flips", min=0, max=8, step=1, whole=True,
+        help="Whole times each tile turns over in flight (about one of its edges), "
+             "showing its back on the way; each tile draws its own number from this range. "
+             "Tiles always land face up, the right way round.",
+    )  # fmt: skip
 
+    _order = Section("Order")
     order = order_param("center")
     sweep = sweep_param()
     sweep_angle = sweep_angle_param()
     spread = spread_param(0.15)
+
+    _timing = Section("Timing")
     duration = FloatParam(
         8.0, "Duration", min=0.5, max=3600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first tile leaving to the last tile coming to rest."
@@ -72,65 +140,11 @@ class AssembleChoreography(Choreography):
     )  # fmt: skip
     last_gap = FloatParam(
         0.25, "Last gap", min=0.0, max=5.0, step=0.05, suffix=" s",
-        when=lambda c: c.wind_down > 0,
+        under="wind_down", when=lambda c: c.wind_down > 0,
         help="Time between the last two landings (at most half the wind-down).",
     )  # fmt: skip
-    distance = FloatParam(
-        1.5, "Distance", min=0.0, max=10.0, step=0.25, suffix=" × mosaic",
-        when=lambda c: c.motion != "drop",
-        help="How far out tiles start, in mosaic sizes from the center.",
-    )  # fmt: skip
-    slant = FloatParam(
-        0.25, "Slant", min=0.0, max=3.0, step=0.05, suffix=" × mosaic",
-        when=lambda c: c.motion == "drop",
-        help="How far beside its spot a tile starts, outward from the middle. 0 drops "
-             "straight down (tiles near the middle start just far enough out to come in "
-             "from the edge): they loom huge and cover the view. More slides tiles in "
-             "from the edges of the picture, smaller when they appear.",
-    )  # fmt: skip
-    spin = RangeParam(
-        (0.0, 1.0), "Spin", min=0.0, max=20.0, step=0.25, suffix=" turns",
-        help="How far each tile turns on the way, either way: each tile draws its own "
-             "amount from this range (equal ends: all the same).",
-    )  # fmt: skip
-    flips = RangeParam(
-        (0, 0), "Flips", min=0, max=8, step=1, whole=True,
-        help="Whole times each tile turns over in flight (about one of its edges), "
-             "showing its back on the way; each tile draws its own number from this range. "
-             "Tiles always land face up, the right way round.",
-    )  # fmt: skip
-    arc = FloatParam(
-        0.4, "Arc height", min=0.0, max=5.0, step=0.05, suffix=" × mosaic",
-        when=lambda c: c.motion == "toss",
-        help="How high tiles fly at the top of their arc. Higher arcs fall harder: "
-             "gravity follows from this and the flight time.",
-    )  # fmt: skip
-    bounce = RangeParam(
-        (0.2, 0.4),
-        "Bounce",
-        min=0.0,
-        max=0.8,
-        step=0.05,
-        when=lambda c: c.motion != "glide",
-        help="How springy a landing is: each bounce keeps this share of the speed "
-        "(0: no bounce); each tile draws its own from this range. A tile that "
-        "another lands on stops hopping before it, and soon stops rocking.",
-    )
-    wobble = RangeParam(
-        (2.0, 6.0), "Settle wobble", min=0.0, max=30.0, step=1.0, decimals=0, suffix="°",
-        when=lambda c: c.motion != "glide",
-        help="A small rocking turn that dies away after landing, either way: each tile "
-             "draws its own amount from this range (equal ends: all the same).",
-    )  # fmt: skip
-    shrink = FloatParam(
-        0.3, "Start size", min=0.0, max=10.0, step=0.1, suffix=" ×",
-        when=lambda c: c.motion == "glide",
-        help="Size of a tile at the start of its flight, relative to its final size.",
-    )  # fmt: skip
-    overshoot = BoolParam(
-        False, "Overshoot", when=lambda c: c.motion == "glide",
-        help="Glide slightly past the spot and settle back.",
-    )  # fmt: skip
+
+    _end = Section()
     seed = IntParam(1, "Seed", min=0, max=999_999)
 
     def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:

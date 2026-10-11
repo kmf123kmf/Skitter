@@ -9,6 +9,11 @@ Reading `op.columns` returns the instance's current value and assigning
 validates it. The UI builds an editor for each parameter from these
 declarations, and plans save and load the values, so a new operation needs
 no UI or serialization code of its own.
+
+A setting that applies only given others has `when` (forms hide it
+otherwise) and, if it belongs with one setting, `under` naming that one
+(forms show it indented right below it: declare it there). Long lists can
+be split into titled sections by declaring a `Section` before each group.
 """
 
 from collections.abc import Callable, Sequence
@@ -25,11 +30,13 @@ class Param:
         *,
         help: str = "",
         when: Callable[[Any], bool] | None = None,
+        under: str | None = None,
     ):
         self.default = default
         self.label = label
         self.help = help
-        self.when = when  # when it returns False the parameter is inactive (greyed out)
+        self.when = when  # when it returns False the parameter is inactive (hidden)
+        self.under = under  # the setting it belongs with (shown indented below it)
         self.name = ""
 
     def __set_name__(self, owner, name: str) -> None:
@@ -184,6 +191,20 @@ class ColorParam(Param):
         return tuple(int(value[i : i + 2], 16) / 255 for i in (1, 3, 5))
 
 
+class Section:
+    """A titled group in a settings form: the settings declared after it, up to the
+    next Section. A Section with no title ends the groups: the settings after it
+    (a seed, say) come last, under no heading."""
+
+    def __init__(self, title: str = "", help: str = ""):
+        self.title = title
+        self.help = help
+        self.name = ""
+
+    def __set_name__(self, owner, name: str) -> None:
+        self.name = name
+
+
 class Configurable:
     """An object whose settings are declared as Param class attributes.
 
@@ -204,6 +225,22 @@ class Configurable:
                 if isinstance(attr, Param):
                     found[name] = attr
         return list(found.values())
+
+    @classmethod
+    def sections(cls) -> list[tuple[Section | None, list[Param]]]:
+        """Declared parameters by Section, in declaration order; those before the first
+        Section come first, under None (all of them, for a class without Sections)."""
+        groups: list[tuple[Section | None, list[Param]]] = [(None, [])]
+        params = {p.name: p for p in cls.params()}
+        seen: set[str] = set()
+        for klass in reversed(cls.__mro__):
+            for name, attr in vars(klass).items():
+                if isinstance(attr, Section):
+                    groups.append((attr, []))
+                elif isinstance(attr, Param) and params.get(name) is attr and name not in seen:
+                    seen.add(name)
+                    groups[-1][1].append(attr)
+        return [(section, ps) for section, ps in groups if ps]
 
     def update(self, **values) -> None:
         for name, value in values.items():

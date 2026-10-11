@@ -67,7 +67,7 @@ class ContourSlicer(Subdivider):
     )  # fmt: skip
     background_angle = FloatParam(
         0.0, "Background angle", min=-90.0, max=90.0, step=15.0, decimals=0, suffix="°",
-        when=lambda op: op.outline_rows > 0,
+        under="outline_rows", when=lambda op: op.outline_rows > 0,
         help="Which way the background's straight rows run, clockwise (0°: across). "
              "Also where the image has no outlines at all.",
     )  # fmt: skip

@@ -30,6 +30,7 @@ from skitter.core.slicing.params import (
     IntParam,
     Param,
     RangeParam,
+    Section,
     TileSizeParam,
 )
 from skitter.core.slicing.patterns import (
@@ -73,6 +74,7 @@ __all__ = [
     "StageResult",
     "Subdivider",
     "RangeParam",
+    "Section",
     "TileSizeParam",
     "coverage",
     "get_operation_type",

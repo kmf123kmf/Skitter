@@ -51,7 +51,8 @@ def order_param(default: str, what: str = "land", extra=()) -> ChoiceParam:
 
 
 def sweep_param() -> ChoiceParam:
-    return compass.direction_param("down", "sweep", when=lambda c: c.order == SWEEP)
+    return compass.direction_param("down", "sweep", when=lambda c: c.order == SWEEP,
+                                   under="order")  # fmt: skip
 
 
 def sweep_angle_param() -> FloatParam:
@@ -61,7 +62,7 @@ def sweep_angle_param() -> FloatParam:
 def spread_param(default: float, what: str = "landing order") -> FloatParam:
     return FloatParam(
         default, "Spread", min=0.0, max=1.0, step=0.05,
-        when=lambda c: c.order not in RANDOM_ORDERS,
+        under="order", when=lambda c: c.order not in RANDOM_ORDERS,
         help=f"Randomness in the {what}, as a share of the whole sequence.",
     )  # fmt: skip
 

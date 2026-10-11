@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QMenu,
@@ -34,7 +35,10 @@ from skitter.core.slicing import (
     IntParam,
     Param,
     RangeParam,
+    Section,
 )
+from skitter.ui import preferences
+from skitter.ui.style import muted
 
 RANGE_BOX_MIN = 48  # px: the least each box of a range keeps (the row shares the rest)
 
@@ -232,12 +236,36 @@ def _choice_editor(param: ChoiceParam) -> Editor:
     return Editor(combo, set_value, on_change, refresh=refresh)
 
 
+INDENT = 14  # px: how far a setting sits in from the one it belongs with (Param.under)
+
+
+@dataclass
+class _Heading:
+    section: Section
+    button: QToolButton
+    note: QLabel | None  # the section's help, shown under its title
+    expanded: bool
+
+
+@dataclass
+class _Row:
+    param: Param
+    editor: Editor
+    label: QLabel
+    parent: "_Row | None"  # the row of the setting it belongs with (Param.under)
+    heading: _Heading | None
+
+
 class ParamForm(QWidget):
     """Edits the parameters of one object that declares Params (an operation).
 
     Edits are written straight to the object; `changed` then reports the
     parameter name. Several forms may edit one object (each showing some of
     its parameters); call `refresh()` on the others after it changes.
+
+    Settings that don't apply (Param.when) are hidden; one that belongs with
+    another (Param.under) sits indented below it. Sections (params.Section) get
+    a heading that folds them away; whether each is folded is remembered.
     """
 
     changed = Signal(str)
@@ -247,7 +275,8 @@ class ParamForm(QWidget):
         self._layout = QFormLayout(self)
         self._layout.setContentsMargins(0, 0, 0, 0)
         self._target = None
-        self._rows: list[tuple[Param, Editor, QLabel]] = []
+        self._rows: list[_Row] = []
+        self._headings: list[_Heading] = []
 
     def set_target(self, target, only=None) -> None:
         """Show editors for target's parameters (None clears the form).
@@ -257,49 +286,141 @@ class ParamForm(QWidget):
         while self._layout.rowCount():
             self._layout.removeRow(0)
         self._rows.clear()
+        self._headings.clear()
         self._target = target
         if target is None:
             return
-        for param in target.params():
-            if only is not None and param.name not in only:
+        groups = target.sections() if hasattr(target, "sections") else [(None, target.params())]
+        rows: dict[str, _Row] = {}
+        for section, params in groups:
+            params = [p for p in params if only is None or p.name in only]
+            if not params:
                 continue
-            editor = create_editor(param)
-            editor.set_value(getattr(target, param.name))
-            editor.widget.setToolTip(param.help)
-            editor.on_change(lambda value, p=param: self._on_edit(p, value))
-            label = QLabel(f"{param.label}:")
-            label.setToolTip(param.help)
-            self._layout.addRow(label, editor.widget)
-            self._rows.append((param, editor, label))
+            heading = None
+            if section is not None and section.title:
+                heading = self._add_heading(type(target), section)
+            elif section is not None and self._rows:  # the end of the sections
+                self._layout.addRow(_line(top=6))
+            for param in params:
+                editor = create_editor(param)
+                editor.set_value(getattr(target, param.name))
+                editor.widget.setToolTip(param.help)
+                editor.on_change(lambda value, p=param: self._on_edit(p, value))
+                label = QLabel(f"{param.label}:")
+                label.setToolTip(param.help)
+                parent = rows.get(param.under) if param.under else None
+                depth, up = 0, parent
+                while up is not None:
+                    depth, up = depth + 1, up.parent
+                label.setContentsMargins(INDENT * depth, 0, 0, 0)
+                self._layout.addRow(label, editor.widget)
+                rows[param.name] = row = _Row(param, editor, label, parent, heading)
+                self._rows.append(row)
         self._update_active()
+
+    def _add_heading(self, owner: type, section: Section) -> _Heading:
+        key = f"forms/{owner.__name__}/{section.name}/folded"
+        button = QToolButton()
+        button.setText(section.title)
+        button.setToolTip(f"Show or hide the {section.title.lower()} settings.")
+        button.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        button.setAutoRaise(True)
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        font = button.font()
+        font.setBold(True)
+        button.setFont(font)
+        bar = QWidget()
+        layout = QHBoxLayout(bar)
+        layout.setContentsMargins(0, 6 if self._rows else 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(button)
+        layout.addWidget(_line(), stretch=1)
+        self._layout.addRow(bar)
+        note = None
+        if section.help:
+            note = muted(QLabel(section.help))
+            self._layout.addRow(note)
+        heading = _Heading(section, button, note, not _folded(key))
+
+        def show_arrow() -> None:
+            button.setArrowType(
+                Qt.ArrowType.DownArrow if heading.expanded else Qt.ArrowType.RightArrow
+            )
+
+        def toggle() -> None:
+            heading.expanded = not heading.expanded
+            show_arrow()
+            preferences.settings().setValue(key, not heading.expanded)
+            self._update_visible()
+
+        show_arrow()
+        button.clicked.connect(toggle)
+        self._headings.append(heading)
+        return heading
 
     def refresh(self) -> None:
         """Show the target's current values (it was edited elsewhere), without reporting edits."""
-        for param, editor, _ in self._rows:
-            editor.widget.blockSignals(True)
+        for row in self._rows:
+            row.editor.widget.blockSignals(True)
             try:
-                editor.set_value(getattr(self._target, param.name))
+                row.editor.set_value(getattr(self._target, row.param.name))
             finally:
-                editor.widget.blockSignals(False)
+                row.editor.widget.blockSignals(False)
         self._update_active()
 
+    def names(self) -> list[str]:
+        """The settings the form edits, in order (shown or not)."""
+        return [row.param.name for row in self._rows]
+
     def editor(self, name: str) -> Editor:
-        return next(editor for param, editor, _ in self._rows if param.name == name)
+        return self._row(name).editor
+
+    def is_shown(self, name: str) -> bool:
+        """Whether the setting's row shows: it applies, and its section is open."""
+        return self._shown(self._row(name))
+
+    def headings(self) -> list[QToolButton]:
+        """The section headings' buttons (a click folds or opens one), in order."""
+        return [heading.button for heading in self._headings]
+
+    def is_open(self, title: str) -> bool:
+        """Whether the section with this title is open (not folded away)."""
+        return next(h.expanded for h in self._headings if h.section.title == title)
+
+    def _row(self, name: str) -> _Row:
+        return next(row for row in self._rows if row.param.name == name)
 
     def _on_edit(self, param: Param, value) -> None:
         setattr(self._target, param.name, value)
         self._update_active()
         self.changed.emit(param.name)
 
+    def _applies(self, row: _Row | None) -> bool:
+        """It applies, and so does the setting it belongs with."""
+        while row is not None:
+            if not row.param.is_active(self._target):
+                return False
+            row = row.parent
+        return True
+
+    def _shown(self, row: _Row) -> bool:
+        return (row.heading is None or row.heading.expanded) and self._applies(row)
+
+    def _update_visible(self) -> None:
+        for row in self._rows:
+            self._layout.setRowVisible(row.editor.widget, self._shown(row))
+        for heading in self._headings:
+            if heading.note is not None:
+                self._layout.setRowVisible(heading.note, heading.expanded)
+
     def _update_active(self) -> None:
         target = self._target
-        for param, editor, label in self._rows:
-            active = param.is_active(target)
-            editor.widget.setEnabled(active)
-            label.setEnabled(active)
-            if editor.refresh is not None:
-                editor.refresh(target)
-        for param, editor, _ in self._rows:
+        self._update_visible()
+        for row in self._rows:
+            if row.editor.refresh is not None:
+                row.editor.refresh(target)
+        for row in self._rows:
+            param, editor = row.param, row.editor
             if isinstance(param, ChoiceParam) and not param.is_available(
                 target, getattr(target, param.name)
             ):
@@ -309,3 +430,22 @@ class ParamForm(QWidget):
                 if fallback is not None:
                     editor.set_value(fallback)  # the editor reports it back through _on_edit
                     return
+
+
+def _line(top: int = 0) -> QWidget:
+    """A thin rule across the form (above: `top` px of space)."""
+    line = QFrame()
+    line.setFrameShape(QFrame.Shape.HLine)
+    line.setFrameShadow(QFrame.Shadow.Sunken)
+    if not top:
+        return line
+    box = QWidget()
+    layout = QHBoxLayout(box)
+    layout.setContentsMargins(0, top, 0, 0)
+    layout.addWidget(line)
+    return box
+
+
+def _folded(key: str) -> bool:
+    value = preferences.settings().value(key, False)
+    return value in (True, "true", "1", 1)
