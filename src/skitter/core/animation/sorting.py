@@ -390,20 +390,10 @@ def pancake(a, rng, info) -> Iterator[None]:
         yield
 
 
-def bogo(a, rng, info) -> Iterator[None]:
-    """Bogosort: shuffle and hope. A few hopeless shuffles, then (luckily) sorted."""
-    for _ in range(int(info.get("shuffles", 5))):
-        a[:] = rng.permutation(a)
-        yield
-    a.sort()
-    yield
-
-
 ALGORITHMS: dict[str, Algorithm] = {
     "bitonic": bitonic, "odd_even": odd_even, "merge": merge, "quick": quick, "radix": radix,
     "heap": heap, "selection": selection, "shear": shear, "insertion": insertion,
     "bubble": bubble, "cocktail": cocktail, "cant_believe": cant_believe, "pancake": pancake,
-    "bogo": bogo,
 }  # fmt: skip
 
 

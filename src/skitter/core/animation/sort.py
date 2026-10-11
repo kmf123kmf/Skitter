@@ -13,13 +13,27 @@ algorithm needs (a few seconds for Radix, many minutes for Bubble sort).
 Every step is shown as the algorithm made it. Rounds are stored as each
 photo's spot after each (`states`): only beyond STORED_SPOTS in all are
 steps grouped, to keep memory bounded.
+
+Three motions: photos glide to their new spots, the spots flip, or (none)
+photos jump to their new spots as each step begins, then hold. Flipping,
+a spot turns over in place like a card: its photo narrows to edge-on, and
+there (unseen) gives way to the photo coming to that spot, which widens back
+face up. Nothing crosses the mosaic, which suits algorithms moving many
+photos far at once (Pancake, Radix, Merge): gliding, those cross
+in a swarm, and a reversed stretch bunches up in its middle.
 """
 
 import math
 
 import numpy as np
 
-from skitter.core.animation.base import Choreography, TileFrame, Timeline, register_choreography
+from skitter.core.animation.base import (
+    Choreography,
+    Flips,
+    TileFrame,
+    Timeline,
+    register_choreography,
+)
 from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.sorting import path_order, sort_states
 from skitter.core.easing import ease_in_out_cubic
@@ -32,8 +46,9 @@ ALGORITHMS = (
     ("heap", "Heap sort"), ("selection", "Selection sort"), ("shear", "Shear sort (2D)"),
     ("insertion", "Insertion sort"), ("bubble", "Bubble sort"),
     ("cocktail", "Cocktail shaker sort"), ("cant_believe", "I can't believe it can sort"),
-    ("pancake", "Pancake sort"), ("bogo", "Bogosort"),
+    ("pancake", "Pancake sort"),
 )  # fmt: skip
+MOTIONS = (("glide", "Glide"), ("flip", "Flip"), ("none", "None"))
 PATHS = (("reading", "Reading order"), ("snake", "Snake"), ("hilbert", "Hilbert curve"),
          ("spiral", "Spiral"))  # fmt: skip
 STORED_SPOTS = 20_000_000  # rounds x photos kept at most (int32: 80 MB)
@@ -45,10 +60,13 @@ HIGHLIGHT = 0.45  # strongest highlight tint
 class SortTimeline(Timeline):
     """Photos moving between spots, round by round: `states` (S, N) the spot of each
     photo before the first round and after each; round r starts at r x `step` and its
-    moves take MOVE_SHARE of it. `highlight` (rgb or None) tints moving photos."""
+    moves take MOVE_SHARE of it. `highlight` (rgb or None) tints moving photos.
+    `motion`: "glide", "flip" (spots turn over in place, trading photos edge-on) or
+    "none" (photos jump as each step begins; see the module docstring)."""
 
     def __init__(self, scene: MosaicScene, states: np.ndarray, step: float,
-                 highlight: tuple[float, float, float] | None = None):  # fmt: skip
+                 highlight: tuple[float, float, float] | None = None,
+                 motion: str = "glide"):  # fmt: skip
         self.final = TileFrame.final(scene)
         self.states = np.asarray(states, np.int32)
         self.interval = max(float(step), 1e-6)
@@ -58,6 +76,7 @@ class SortTimeline(Timeline):
         self.duration = (rounds - 1) * self.interval + self.travel if rounds else self.interval
         self.highlight = None if highlight is None else np.asarray(highlight, np.float64)
         self.hover = HOVER * scene.tile_size[0]
+        self.motion = motion
 
     @property
     def rounds(self) -> int:
@@ -72,6 +91,18 @@ class SortTimeline(Timeline):
         r = min(int(t / self.interval), self.rounds - 1)
         p = min(max((t - r * self.interval) / self.travel, 0.0), 1.0)
         here, there = self.states[r], self.states[r + 1]
+        if self.motion == "none":  # jumped as the step began (t = its start: not yet)
+            begun = t > r * self.interval
+            place = there if begun else here
+            tint = b.tint
+            if self.highlight is not None and begun:  # what jumped flashes, fading
+                tint = b.tint.copy()
+                jumped = here != there
+                tint[jumped, :3] = self.highlight
+                tint[jumped, 3] = HIGHLIGHT * (1.0 - p)
+            return b.replace(center=b.center[place], size=b.size[place],
+                             rotation=b.rotation[place], tint=tint,
+                             order=np.argsort(place, kind="stable"))  # fmt: skip
         moving = (here != there) & (0.0 < p < 1.0)
         place = there if p >= 1.0 else here  # where each photo lies (or is leaving)
         if not moving.any():
@@ -79,6 +110,13 @@ class SortTimeline(Timeline):
                              rotation=b.rotation[place],
                              order=np.argsort(place, kind="stable"))  # fmt: skip
         e = ease_in_out_cubic(p)
+        if self.motion == "flip":  # the spot turns over: edge-on halfway, where the photos trade
+            place = np.where(moving & (e >= 0.5), there, here)
+            facing = np.where(moving, abs(math.cos(math.pi * e)), 1.0)
+            size = b.size[place].copy()
+            size[:, 0] *= np.maximum(facing, Flips.THINNEST)  # narrowing across
+            return b.replace(center=b.center[place], size=size, rotation=b.rotation[place],
+                             order=np.argsort(place, kind="stable"), facing=facing)  # fmt: skip
         center = b.center[here] + (b.center[there] - b.center[here]) * e
         size = b.size[here] + (b.size[there] - b.size[here]) * e
         turn = (b.rotation[there] - b.rotation[here] + math.pi) % math.tau - math.pi
@@ -119,8 +157,17 @@ class SortChoreography(Choreography):
              "sorted start. Bubble: the sorted end grows backwards, a pass at a time. "
              "Cocktail shaker: both ends at once. I can't believe it can sort: it looks "
              "backwards, and works. Pancake: only flipping the start over (about two "
-             "flips per photo: best on small mosaics). "
-             "Bogosort: shuffle and hope.",
+             "flips per photo: best on small mosaics, with Motion: Flip).",
+    )  # fmt: skip
+    motion = ChoiceParam(
+        "glide", "Motion", choices=MOTIONS,
+        help="Glide: photos slide to their new spots (best when moves are short, as in "
+             "Odd-even, Bubble or Insertion). Flip: each spot turns over in place, like "
+             "a card, and comes back showing its new photo; nothing crosses the mosaic "
+             "(best when many photos move far, as in Pancake, Radix or Merge). "
+             "Flipping, the turning shade marks what moves. None: photos "
+             "jump to their new spots as each step begins (with Highlight, what jumped "
+             "flashes and fades over the step).",
     )  # fmt: skip
     path = ChoiceParam(
         "reading", "Path", choices=PATHS,
@@ -173,4 +220,5 @@ class SortChoreography(Choreography):
         for s, a in enumerate(arrays):
             states[s, path[a]] = path
         highlight = ColorParam.rgb(self.highlight_color) if self.highlight else None
-        return SortTimeline(scene, states, self.step_time, highlight)
+        return SortTimeline(scene, states, self.step_time, highlight,
+                            self.motion)  # fmt: skip

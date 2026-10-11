@@ -20,7 +20,7 @@ NAMES = [a for a, _ in ALGORITHMS]
 def test_every_algorithm_sorts_any_length(algorithm, n):
     a = np.random.default_rng(n).permutation(n)
     states, cleanup = sort_states(a, algorithm, 1, 10_000, {"columns": 9})
-    assert not cleanup  # it sorted on its own (Bogosort, by its lucky last shuffle)
+    assert not cleanup  # it sorted on its own
     np.testing.assert_array_equal(states[0], a)
     np.testing.assert_array_equal(states[-1], np.arange(n))
     for state in states:
@@ -210,3 +210,49 @@ def test_the_slow_sorts_have_their_patterns():
     for s, t in zip(rounds("pancake")[:-1], rounds("pancake")[1:], strict=True):
         k = np.flatnonzero(s != t).max() + 1  # every step flips a stretch from the start over
         np.testing.assert_array_equal(t[:k], s[:k][::-1])
+
+
+def test_flipping_spots_trade_photos_edge_on():
+    scene = pile_scene()
+    timeline = SortChoreography(algorithm="pancake", motion="flip").timeline(scene)
+    for r in range(timeline.rounds):
+        here, there = timeline.states[r], timeline.states[r + 1]
+        moving = here != there
+        start = r * timeline.interval
+        for q in (0.1, 0.3, 0.45, 0.55, 0.7, 0.9):
+            frame = timeline.frame(start + q * timeline.travel)
+            # Every photo always lies on a spot: nothing crosses the mosaic.
+            before = np.allclose(frame.center[moving], scene.center[here[moving]])
+            after = np.allclose(frame.center[moving], scene.center[there[moving]])
+            assert before or after
+            np.testing.assert_allclose(frame.center[~moving], scene.center[here[~moving]])
+            assert frame.at_rest().all() and not frame.heights().any()
+        if r > 3:
+            break
+    # Edge-on halfway; face up (never back up) throughout.
+    half = timeline.frame(start + timeline.travel / 2)
+    assert half.facings()[moving].max() < 0.05 and (half.facings() >= 0).all()
+    np.testing.assert_array_equal(timeline.states[-1], np.arange(len(scene)))
+    # Drawn in the stacking order of the spots they lie in (before the trade: here).
+    frame = timeline.frame(start + 0.3 * timeline.travel)
+    np.testing.assert_array_equal(frame.draw_order(), np.argsort(here, kind="stable"))
+
+
+def test_without_motion_photos_jump_as_each_step_begins():
+    scene = tiled_scene(12, 8)
+    timeline = SortChoreography(algorithm="merge", motion="none").timeline(scene)
+    np.testing.assert_allclose(timeline.frame(0.0).center, scene.center[timeline.states[0]])
+    for r in range(timeline.rounds):
+        start = r * timeline.interval
+        for q in (0.01, 0.5, 0.99):  # straight after the jump, and holding through the step
+            frame = timeline.frame(start + q * timeline.travel)
+            np.testing.assert_allclose(frame.center, scene.center[timeline.states[r + 1]])
+            assert frame.at_rest().all() and not frame.heights().any()
+    # What jumped flashes, fading over the step; the rest stay plain.
+    jumped = timeline.states[0] != timeline.states[1]
+    early, late = (timeline.frame(q * timeline.travel) for q in (0.05, 0.9))
+    assert (early.tint[jumped, 3] > late.tint[jumped, 3]).all()
+    assert not early.tint[~jumped].any()
+    plain = SortChoreography(algorithm="merge", motion="none", highlight=False).timeline(scene)
+    assert not plain.frame(0.05 * plain.travel).tint.any()
+    assert timeline.frame(timeline.duration) is timeline.final
