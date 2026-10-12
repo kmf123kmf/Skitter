@@ -931,6 +931,12 @@ def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):
     animate.show_phase("show")  # another phase's tab, with its choreography's settings
     animate.choreography_box.setCurrentIndex(animate.choreography_box.findData("ripple"))
     assert overflowing_panels(window, qapp) == []
+    animate.show_phase("clear")  # every setting showing, and its notes (a warning among them)
+    animate.choreography_box.setCurrentIndex(animate.choreography_box.findData("blow_away"))
+    animate.project.phase_choreography("clear").update(direction="custom", lift=50.0)
+    window.session.animation_edited()
+    assert "Limited" in animate.form.note("lift")
+    assert overflowing_panels(window, qapp) == []
     animate.show_phase("build")  # builds with long settings
     for build in ("sort", "unscramble"):
         animate.choreography_box.setCurrentIndex(animate.choreography_box.findData(build))

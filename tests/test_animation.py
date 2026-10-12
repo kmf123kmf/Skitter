@@ -97,8 +97,9 @@ def assert_frame_equal(a: TileFrame, b: TileFrame):
     np.testing.assert_array_equal(a.draw_order(), b.draw_order())
 
 
-# Every registered choreography with its defaults, plus Assemble's other motion.
-CONFIGS = [(cls, {}) for cls in choreography_types()] + [
+# Every registered build and show with its defaults (they end on the finished mosaic;
+# clears don't, test_clear.py), plus Assemble's other motion.
+CONFIGS = [(cls, {}) for cls in choreography_types() if cls.phase != "clear"] + [
     (AssembleChoreography, {"motion": "glide"}),
     (AssembleChoreography, {"flips": 2}),
     (AssembleChoreography, {"motion": "glide", "flips": 1}),
@@ -492,7 +493,13 @@ def overlapping(c0, s0, r0, c1, s1, r1) -> np.ndarray:
     return ~apart
 
 
-@pytest.mark.parametrize(("cls", "settings"), CONFIGS, ids=CONFIG_IDS)
+# Clears too: a pile mustn't break on the way out either.
+CLEARS = choreography_types("clear")
+PILE_CONFIGS = CONFIGS + [(cls, {}) for cls in CLEARS]
+
+
+@pytest.mark.parametrize(("cls", "settings"), PILE_CONFIGS,
+                         ids=CONFIG_IDS + [cls.id for cls in CLEARS])  # fmt: skip
 def test_every_choreography_keeps_overlapping_tiles_in_stacking_order(cls, settings):
     # If a lower tile ever drew above a tile that covers it, where they overlap, it
     # would have to pop underneath later (at the latest on the last frame). The one
