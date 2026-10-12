@@ -240,6 +240,8 @@ class AnimateStep(StepPage):
         if scene is self.scene:
             return
         self.player.pause()
+        # The old mosaic's tiles go first: the new timeline may have more tiles.
+        self.player.set_content(None, None)
         if self.textures is not None:
             self.textures.changed.disconnect(self._on_textures)
             self.textures.patched.disconnect(self._on_textures)
@@ -284,6 +286,8 @@ class AnimateStep(StepPage):
         self.video_form.set_target(self.project.video_settings, only=FRAME_SETTINGS)
         self._show_phase()
         self.keys.selected = -1
+        if self.keys.viewfinder:  # another project's camera: back to the plain view
+            self.keys.set_viewfinder(False)
         self.keys.refresh()
 
     def _show_phase(self) -> None:

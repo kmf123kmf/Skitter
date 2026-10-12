@@ -1,6 +1,7 @@
 """Tiles and Matching steps, background jobs, and the tile atlas (headless)."""
 
 import math
+import sys
 from dataclasses import replace
 
 import numpy as np
@@ -1798,3 +1799,44 @@ def test_camera_keys_through_the_viewfinder(sliced, photos, qapp):
     keys.undo()
     keys.add_key()
     assert not keys.redo_action.isEnabled()
+
+
+def test_opening_another_project_resets_the_animate_view(sliced, photos, qapp, tmp_path,
+                                                         monkeypatch):  # fmt: skip
+    """Opening a project after looking through another one's camera: the Animate tab
+    shows the new mosaic (more tiles than the last, too) fitted, not through a camera."""
+    from skitter.ui.steps.animate import AnimateStep
+    from skitter.ui.steps.slicing import SlicingStep
+
+    window = sliced
+    window.resize(1400, 900)
+    window.show()
+    matched(window, photos, qapp)
+    large, small = tmp_path / "large.skitter", tmp_path / "small.skitter"
+    assert window._save_to(large)
+    window.tabs.setCurrentWidget(window.step(SlicingStep))
+    window.step(SlicingStep).columns.setValue(4)
+    qapp.processEvents()
+    window.session.start_matching()
+    window.session.wait_for_job()
+    window.session.textures.wait()
+    assert window._save_to(small)
+    animate = window.step(AnimateStep)
+    window.tabs.setCurrentWidget(animate)
+    animate.keys.add_key()
+    animate.keys.set_viewfinder(True)
+    animate.canvas.zoom_at(300, 300, 2.0)
+    animate.player.seek(1.0)
+    animate.player.play()
+    qapp.processEvents()
+    errors = []  # raised in Qt's slots (which only print them)
+    monkeypatch.setattr(sys, "excepthook", lambda kind, value, tb: errors.append(value))
+    assert window.open_project(large, ask=False)
+    window.tabs.setCurrentWidget(animate)
+    qapp.processEvents()
+    scene = window.session.scene
+    assert animate.scene is scene and len(animate.player._base) == len(scene) > 12
+    assert not animate.keys.viewfinder and animate.keys.pending is None
+    assert animate.canvas.fit_mode and animate.canvas.camera.rotation == 0
+    assert not animate.player.playing and animate.player.time == animate.player.duration
+    assert errors == []
