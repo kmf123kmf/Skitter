@@ -16,6 +16,7 @@
 - A slicing plan (`core/slicing/plan.py`) is one slicer (a registered operation) and, optionally, its cells split by detail (the quadtree, not a slicer of its own); the plan keeps every slicer's settings. Older files' stage lists are converted in `SlicingPlan.from_dict`.
 - New slicers: lattice patterns go through `slicing/frame.PinnedFrame` (anchor + rotation for free); shared settings (anchor, rotation, orientation, seed) come from `slicing/common.py`; size tiles with `ctx.tile_dims(scale)`.
 - numba kernels use `cache=True, nogil=True` (so background jobs don't block the UI thread).
+- An error raised in a Qt slot fails the test (`tests/conftest.py`'s autouse `slot_errors`: Qt only prints them). A test that expects one requests `slot_errors` and empties the list after checking it. Steps with background work of their own stop it in `shutdown()`, which the test `window` fixture calls as closing the window does.
 - Tests must never touch the real tile library: `tests/conftest.py` points `LOCALAPPDATA` at a temp dir; open libraries in `tmp_path`.
 - UI preferences go through `ui/preferences.settings()` (INI); `tests/conftest.py` redirects its path.
 - Build actions with `ui/actions.make_action` (its tooltip names its shortcut) and show them with `tool_button`; muted/warning text, progress bars and byte sizes come from `ui/style.py`. The export windows share `ui/export_window.ExportWindow`.

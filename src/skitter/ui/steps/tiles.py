@@ -612,6 +612,8 @@ class TilesStep(StepPage):
     def _analyze(self) -> None:
         """Analyze tile colors if the library changed since they were."""
         library = self.session.library
+        if library is not None and library.closed:
+            return  # shut down (a job stopping afterwards lands here)
         if library is None or not len(library.ids):
             self._colors = self._map = self._coverage = None
             self._colors_version = None
@@ -637,6 +639,11 @@ class TilesStep(StepPage):
         self._colors_job = job
         self._summary.setText("Analyzing tile colors…")
         job.start()
+
+    def shutdown(self) -> None:
+        if self._colors_job is not None:
+            self._colors_job.cancel()
+            self._colors_job.wait()
 
     def _colors_job_stopped(self) -> None:
         self._colors_job = None

@@ -1,7 +1,6 @@
 """Tiles and Matching steps, background jobs, and the tile atlas (headless)."""
 
 import math
-import sys
 from dataclasses import replace
 
 import numpy as np
@@ -21,8 +20,9 @@ def window(qapp, tmp_path):
     win = MainWindow()
     win.session.open_library(tmp_path / "cache")  # never the user's real library
     yield win
-    win.session.cancel_job()
-    win.session.wait_for_job()
+    for step in win.steps:  # as closing the window does
+        step.shutdown()
+    win.session.shutdown()
     win.session.library.close()
     win.deleteLater()
 
@@ -1801,8 +1801,7 @@ def test_camera_keys_through_the_viewfinder(sliced, photos, qapp):
     assert not keys.redo_action.isEnabled()
 
 
-def test_opening_another_project_resets_the_animate_view(sliced, photos, qapp, tmp_path,
-                                                         monkeypatch):  # fmt: skip
+def test_opening_another_project_resets_the_animate_view(sliced, photos, qapp, tmp_path):
     """Opening a project after looking through another one's camera: the Animate tab
     shows the new mosaic (more tiles than the last, too) fitted, not through a camera."""
     from skitter.ui.steps.animate import AnimateStep
@@ -1829,8 +1828,6 @@ def test_opening_another_project_resets_the_animate_view(sliced, photos, qapp, t
     animate.player.seek(1.0)
     animate.player.play()
     qapp.processEvents()
-    errors = []  # raised in Qt's slots (which only print them)
-    monkeypatch.setattr(sys, "excepthook", lambda kind, value, tb: errors.append(value))
     assert window.open_project(large, ask=False)
     window.tabs.setCurrentWidget(animate)
     qapp.processEvents()
@@ -1839,4 +1836,3 @@ def test_opening_another_project_resets_the_animate_view(sliced, photos, qapp, t
     assert not animate.keys.viewfinder and animate.keys.pending is None
     assert animate.canvas.fit_mode and animate.canvas.camera.rotation == 0
     assert not animate.player.playing and animate.player.time == animate.player.duration
-    assert errors == []
