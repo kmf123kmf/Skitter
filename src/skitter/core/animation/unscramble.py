@@ -4,9 +4,10 @@ Every tile starts on the table, most of them in another tile's place. Swap by
 swap, tiles go home in the chosen order: each swap slides one tile home and
 the tile lying there to the first one's old place, until the picture is
 whole. Swaps come in batches: every swap of a batch starts at
-once, and once they have all landed the whole mosaic lies still for a pause
-before the next batch (`batch_times`). Over the wind-down batches shrink,
-down to a single swap at the end.
+once (or, with Stagger, each at its own moment over that many seconds:
+`stagger_starts`), and once they have all landed the whole mosaic lies still
+for a pause before the next batch (`batch_times`). Over the wind-down
+batches shrink, down to a single swap at the end.
 
 Every tile keeps a level throughout, sliding over the tiles below it and
 under those above (photos in spots not their own may overlap: tiles of
@@ -33,7 +34,7 @@ from skitter.core.animation.base import (
 )
 from skitter.core.animation.landing import random_landing_order, wind_down_param
 from skitter.core.animation.look import AnimationLook
-from skitter.core.animation.moves import MovesTimeline, swap_plan
+from skitter.core.animation.moves import Moves, MovesTimeline, swap_plan
 from skitter.core.animation.orders import (
     order_key,
     order_param,
@@ -105,6 +106,28 @@ def batch_times(count: int, duration: float, travel: float, pause: float,
     return np.repeat(np.arange(batches) * step, sizes)
 
 
+def stagger_starts(moves: Moves, stagger: float, rng: np.random.Generator) -> Moves:
+    """The same moves, each swap of a batch (moves with the same start; rows 2k and
+    2k + 1 are a swap) starting at its own random moment over `stagger` seconds: the
+    first at the batch's start, the last `stagger` later. A batch of one swap starts
+    on time, except the last, which starts `stagger` late so it still ends the build."""
+    if stagger <= 0 or not len(moves):
+        return moves
+    begin = moves.start[::2]  # each swap's batch start
+    batches, batch = np.unique(begin, return_inverse=True)
+    batch = batch.reshape(-1)
+    draw = rng.random(len(begin))
+    low = np.full(len(batches), np.inf)
+    high = np.full(len(batches), -np.inf)
+    np.minimum.at(low, batch, draw)
+    np.maximum.at(high, batch, draw)
+    width = (high - low)[batch]
+    offset = np.divide(draw - low[batch], width, out=np.zeros_like(draw), where=width > 0)
+    offset[(width == 0) & (batch == len(batches) - 1)] = 1.0  # the last batch, one swap
+    start = np.repeat(begin + stagger * offset, 2)
+    return Moves(moves.tile, start, moves.source, moves.target, moves.bend)
+
+
 @register_choreography
 class UnscrambleChoreography(Choreography):
     id = "unscramble"
@@ -158,9 +181,15 @@ class UnscrambleChoreography(Choreography):
     )  # fmt: skip
     pause = FloatParam(
         0.5, "Pause", min=0.0, max=10.0, step=0.1, decimals=2, suffix=" s",
-        help="Swaps come in batches, all of a batch at once; between batches the whole "
-             "mosaic lies still at least this long. (As many batches as fit in the "
-             "duration.)",
+        help="Swaps come in batches; from the last swap of a batch landing to the next "
+             "batch, the whole mosaic lies still at least this long. (As many batches "
+             "as fit in the duration.)",
+    )  # fmt: skip
+    stagger = FloatParam(
+        0.0, "Stagger", min=0.0, max=10.0, step=0.1, decimals=2, suffix=" s",
+        help="The swaps of a batch start at random moments over this long, instead of "
+             "all at once, so they land at different times too (0: a batch moves as "
+             "one). The pause starts when the last of them lands.",
     )  # fmt: skip
     wind_down = wind_down_param(
         0.0,
@@ -182,6 +211,7 @@ class UnscrambleChoreography(Choreography):
         rng = np.random.default_rng(self.seed)
         n = len(scene)
         travel = min(self.travel, self.duration)
+        stagger = min(self.stagger, self.duration - travel)
         count = int(round(n * self.scrambled / 100.0))
         chosen = np.zeros(n, bool)
         chosen[rng.choice(n, size=count, replace=False)] = True
@@ -189,7 +219,8 @@ class UnscrambleChoreography(Choreography):
         key = np.argsort(np.argsort(order_key(scene, self, rng), kind="stable"))
         key = key / max(n - 1, 1) + rng.uniform(-1.0, 1.0, n) * self.spread
         home_order = np.flatnonzero(chosen)[np.argsort(key[chosen], kind="stable")]
-        times = batch_times(len(home_order), self.duration, travel, self.pause,
+        # A batch moves for its swaps' time plus the stagger.
+        times = batch_times(len(home_order), self.duration, travel + stagger, self.pause,
                             self.wind_down * self.duration)  # fmt: skip
         places, moves = swap_plan(n, home_order, times, rng, scene.center,
                                   self.reach * scene.tile_size[0])  # fmt: skip
@@ -208,29 +239,36 @@ class UnscrambleChoreography(Choreography):
         share = self.scatter / 100.0
         loose = scene.center + share * (anywhere - scene.center)
         loose_turn = share * rng.uniform(-math.pi, math.pi, n)
+        # Last, so changing the stagger changes nothing else.
+        moves = stagger_starts(moves, stagger, rng)
         timeline = MovesTimeline(scene, places, moves, travel, self.duration, levels, loose,
                                  loose_turn)  # fmt: skip
-        timeline.notes = tuple(self._notes(times, travel))
+        timeline.notes = tuple(self._notes(times, travel, stagger))
         return timeline
 
-    def _notes(self, times: np.ndarray, travel: float) -> list[Note]:
+    def _notes(self, times: np.ndarray, travel: float, stagger: float) -> list[Note]:
         """What the timing settings came to (Timeline.notes), from when each tile goes
         home (`times`: batch_times)."""
         notes = []
         if travel < self.travel:
             notes.append(Note("travel", f"Shortened to {seconds(travel)}, the duration.", True))
+        if stagger < self.stagger - 1e-9:
+            notes.append(Note("stagger", f"Shortened to {seconds(stagger)}: with the move "
+                                         "time, it must fit in the duration.", True))  # fmt: skip
         starts, sizes = np.unique(times, return_counts=True)
         if len(starts) < 2:
             if len(times) > 2:
-                notes.append(Note("duration", f"Only one batch fits (a move and the pause "
-                                              f"take {seconds(self.travel + self.pause)}): "
-                                              "every swap at once.", True))  # fmt: skip
+                batch = seconds(self.travel + self.stagger + self.pause)
+                notes.append(Note("duration", f"Only one batch fits (its moves and the pause "
+                                              f"take {batch}): every swap in one go.",
+                                  True))  # fmt: skip
             return notes
         gaps = np.diff(starts)
         notes.append(Note("duration", f"{len(starts)} batches of about "
                                       f"{len(times) / 2 / len(starts):.0f} swaps, "
                                       f"{pace(float(np.median(gaps)))}.", False))  # fmt: skip
-        still = float(gaps.min()) - travel  # the shortest stillness between batches
+        # The shortest stillness between batches (a batch of one swap moves for less).
+        still = float(gaps.min()) - travel - stagger
         if still > 1.1 * self.pause + 0.02:  # (not just rounding)
             notes.append(Note("pause", f"{seconds(still)} or more: the batches spread out to "
                                        "fill the duration."))  # fmt: skip
@@ -241,6 +279,10 @@ class UnscrambleChoreography(Choreography):
             else:
                 shrinking = int((sizes < np.median(sizes) - 1).sum())  # (not rounding)
                 tail = seconds(self.wind_down * self.duration)
-                notes.append(Note("wind_down", f"= {tail}: the last {shrinking} batches "
-                                               "shrink."))  # fmt: skip
+                last = (
+                    "the last batch shrinks"
+                    if shrinking == 1
+                    else f"the last {shrinking} batches shrink"
+                )
+                notes.append(Note("wind_down", f"= {tail}: {last}."))
         return notes

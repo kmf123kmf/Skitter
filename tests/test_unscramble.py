@@ -319,3 +319,43 @@ def test_unscramble_paths_curve_each_swap_alike(paths):
         partner = [t for t, s in zip(m.tile[first], m.source[first], strict=True) if s == target]
         if partner and target != source:
             assert np.sign(tile_side[int(partner[0])]) == np.sign(tile_side[int(tile)])
+
+
+@pytest.mark.parametrize("wind_down", [0.0, 0.3])
+def test_unscramble_staggers_the_swaps_of_a_batch_and_pauses_after_the_last(wind_down):
+    """With Stagger, the swaps of a batch start (and land) at their own moments over
+    that long, a swap's two tiles together; the pause starts when the last one lands,
+    and the last still ends the build."""
+    scene = tiled_scene(24, 16)
+    settings = dict(wind_down=wind_down, duration=12.0, pause=0.5)
+    timeline = UnscrambleChoreography(stagger=1.0, **settings).timeline(scene)
+    m, travel = timeline.moves, timeline.travel
+    pairs = {}
+    for source, target, start in zip(m.source, m.target, m.start, strict=True):
+        pairs.setdefault((min(source, target), max(source, target)), set()).add(start)
+    assert all(len(starts) == 1 for starts in pairs.values())  # a swap moves as one
+    # Batches: moves starting within the stagger of the batch's first.
+    starts = np.sort(np.unique(m.start))
+    batch = np.concatenate([[0], np.cumsum(np.diff(starts) > 1.0 + 1e-9)])
+    first = np.array([starts[batch == b].min() for b in range(batch[-1] + 1)])
+    last = np.array([starts[batch == b].max() for b in range(batch[-1] + 1)])
+    assert len(first) > 3
+    spans = last - first
+    many = np.array([(batch == b).sum() > 1 for b in range(len(first))])
+    np.testing.assert_allclose(spans[many], 1.0)  # each batch spread over the stagger
+    assert (first[1:] - (last[:-1] + travel) >= 0.5 - 1e-9).all()  # then the pause
+    assert m.start.max() + travel == pytest.approx(timeline.duration)  # the last ends it
+    final = timeline.frame(timeline.duration)
+    np.testing.assert_allclose(final.center, scene.center)
+    # Mid-batch, some swaps are moving while others have yet to start or have landed.
+    mid = first[1] + 0.5 + travel / 2
+    k, p, moving, _ = timeline.play.at(mid)
+    assert moving.any() and (~moving[m.tile[np.abs(m.start - first[1]) < 1.0 + 1e-9]]).any()
+
+
+def test_unscramble_notes_a_stagger_too_long_for_the_duration():
+    timeline = UnscrambleChoreography(duration=2.0, travel=0.8, stagger=5.0).timeline(
+        tiled_scene(12, 8)
+    )
+    notes = {n.setting: n for n in timeline.notes}
+    assert notes["stagger"].warning and "Shortened to 1.20 s" in notes["stagger"].text
