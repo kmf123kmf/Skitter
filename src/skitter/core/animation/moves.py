@@ -29,7 +29,7 @@ import numpy as np
 from numba import njit
 
 from skitter.core.animation.base import TileFrame, Timeline
-from skitter.core.easing import ease_in_out_cubic
+from skitter.core.easing import Easing, ease_in_out_cubic
 from skitter.core.scene import MosaicScene
 
 BULGE = 0.15  # how far paths curve aside, as a share of the distance travelled
@@ -100,16 +100,19 @@ class MovesTimeline(Timeline):
     """Tiles starting at `places` (N,) and moved by `moves`, each taking `travel`
     seconds, sliding along the table at their `levels` (N,: lower drawn first; see the
     module docstring). Places not yet solved lie at `loose` (N, 2), turned `loose_turn`
-    (N,) more (default: their spots, unturned). The last frame, at `duration`, is the
-    finished mosaic: every tile must end at home."""
+    (N,) more (default: their spots, unturned). `easing` paces each move (default:
+    starting and ending at rest). The last frame, at `duration`, is the finished
+    mosaic: every tile must end at home."""
 
     def __init__(self, scene: MosaicScene, places, moves: Moves, travel: float,
-                 duration: float, levels, loose=None, loose_turn=None):  # fmt: skip
+                 duration: float, levels, loose=None, loose_turn=None,
+                 easing: Easing = ease_in_out_cubic):  # fmt: skip
         self.final = TileFrame.final(scene)
         self.duration = float(duration)
         self.play = _Playback(len(scene), moves, places, travel, self.duration)
         self.moves, self.places, self.travel = self.play.moves, self.play.places, self.play.travel
         self.order = np.argsort(np.asarray(levels), kind="stable")
+        self.easing = easing
         b = self.final
         self.loose = b.center if loose is None else np.asarray(loose, np.float64)
         self.loose_turn = np.zeros(len(b)) if loose_turn is None else np.asarray(loose_turn)
@@ -136,7 +139,7 @@ class MovesTimeline(Timeline):
         if moving.any():
             i = np.flatnonzero(moving)
             mk = k[i]
-            e = ease_in_out_cubic(p[i])
+            e = self.easing(p[i])
             (a, ta), (z, tz) = self._at(i, m.source[mk]), self._at(i, m.target[mk])
             way = z - a
             side = np.stack([-way[:, 1], way[:, 0]], axis=1)  # perpendicular, as long as the way

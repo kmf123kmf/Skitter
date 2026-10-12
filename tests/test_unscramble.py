@@ -8,6 +8,7 @@ from test_show import tiled_scene
 from skitter.core.animation.moves import swap_plan
 from skitter.core.animation.unscramble import (
     UnscrambleChoreography,
+    batch_plan,
     batch_sizes,
     batch_times,
 )
@@ -82,21 +83,38 @@ def test_swap_plan_never_moves_a_tile_twice_at_once():
 # Batches
 
 
-def test_batches_fill_the_duration_with_pauses_between():
-    times = batch_times(500, duration=10.0, travel=0.8, pause=0.5)
+@pytest.mark.parametrize(
+    ("travel", "pause", "stagger", "batches", "move"),
+    [
+        (0.8, 0.5, 0.0, 8, 0.8125),  # 8 x 0.8125 + 7 x 0.5 = 10
+        (0.8, 0.0, 0.0, 13, 10 / 13),  # no pause: batches back to back
+        (3.0, 0.0, 0.0, 3, 10 / 3),  # the move stretches...
+        (4.0, 0.0, 0.0, 3, 10 / 3),  # ...or shrinks, whichever keeps it nearer
+        (1.0, 0.5, 0.5, 5, 1.1),  # 5 x (1.1 + 0.5) + 4 x 0.5 = 10
+    ],
+)
+def test_batches_fill_the_duration_exactly_the_move_time_giving(travel, pause, stagger,
+                                                                batches, move):  # fmt: skip
+    """The pause and stagger are exact; the move time takes up what a whole number of
+    batches leaves over, the number keeping it nearest the setting."""
+    b, t = batch_plan(10.0, travel, pause, stagger)
+    assert (b, t) == (batches, pytest.approx(move))
+    step = t + stagger + pause
+    times = batch_times(500, b, step)
     starts, sizes = np.unique(times, return_counts=True)
-    assert starts[0] == 0 and starts[-1] == pytest.approx(10.0 - 0.8)  # ends at the end
-    assert (np.diff(starts) >= 0.8 + 0.5 - 1e-9).all()  # a pause after every batch
-    assert len(starts) == 8 and sizes.sum() == 500
+    assert starts[0] == 0 and starts[-1] + t + stagger == pytest.approx(10.0)  # ends at the end
+    np.testing.assert_allclose(np.diff(starts), step)  # exactly the pause after every batch
+    assert len(starts) == batches and sizes.sum() == 500
     assert sizes.max() - sizes.min() <= 1  # no wind-down: alike
 
 
 def test_batches_shrink_over_the_wind_down_to_a_single_swap():
-    times = batch_times(500, duration=20.0, travel=0.8, pause=0.5, wind_down=6.0)
+    batches, travel = batch_plan(20.0, 0.8, 0.5)
+    times = batch_times(500, batches, travel + 0.5, wind_down=6.0)
     _, sizes = np.unique(times, return_counts=True)
     assert sizes.sum() == 500 and sizes[-1] == 2  # one swap of two tiles, last
     assert (np.diff(sizes) <= 1).all()  # never growing
-    assert sizes[0] == sizes[len(sizes) // 2]  # alike before the wind-down
+    assert abs(sizes[0] - sizes[len(sizes) // 2]) <= 1  # alike before the wind-down
     few = batch_sizes(5, batches=8, tail=3)
     assert few.sum() == 5 and few[-1] >= 2 and few.max() <= 3
 
@@ -359,3 +377,27 @@ def test_unscramble_notes_a_stagger_too_long_for_the_duration():
     )
     notes = {n.setting: n for n in timeline.notes}
     assert notes["stagger"].warning and "Shortened to 1.20 s" in notes["stagger"].text
+
+
+@pytest.mark.parametrize("flow", ["eased", "settle", "steady"])
+def test_unscramble_with_no_pause_runs_batches_back_to_back_paced_by_flow(flow):
+    """No pause, no stagger: each batch starts the moment the last one lands. Eased
+    moves start (and end) at rest, a beat between batches; the others set off at speed,
+    so the motion carries on."""
+    scene = tiled_scene(24, 16)
+    timeline = UnscrambleChoreography(pause=0.0, flow=flow, wind_down=0.0).timeline(scene)
+    starts, travel = np.unique(timeline.moves.start), timeline.travel
+    assert len(starts) > 3
+    np.testing.assert_allclose(np.diff(starts), travel)  # no gap
+    t, dt = starts[1], 0.02 * travel
+    before, after = timeline.frame(t + 1e-9), timeline.frame(t + dt)
+    moved = np.hypot(*(after.center - before.center).T)
+    m = timeline.moves
+    batch = m.start == t
+    going = m.tile[batch]
+    distance = np.hypot(*(scene.center[m.source[batch]] - scene.center[m.target[batch]]).T)
+    share = np.median(moved[going] / np.maximum(distance, 1e-9))  # of the way, in 2% of the time
+    if flow == "eased":
+        assert share < 0.001
+    else:
+        assert share > 0.019  # at speed: steady 2%, settling about 6%

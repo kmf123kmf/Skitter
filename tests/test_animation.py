@@ -1024,7 +1024,7 @@ def test_timing_limits_are_noted_as_warnings():
                                                         travel=3.0))["travel"]  # fmt: skip
     assert "Limited" in warnings(AssembleChoreography(arc=5.0))["arc"]
     assert "Shortened" in warnings(DealChoreography(duration=2.0, slide=5.0))["slide"]
-    assert "Shortened" in warnings(UnscrambleChoreography(duration=1.0, travel=3.0))["travel"]
+    assert "shortened" in warnings(UnscrambleChoreography(duration=1.0, travel=3.0))["travel"]
     assert "one batch" in warnings(UnscrambleChoreography(duration=1.0))["duration"]
     assert "Limited" in warnings(WaveChoreography(amplitude=10.0))["amplitude"]
     # Moves filling the whole duration: every tile lands at once.
