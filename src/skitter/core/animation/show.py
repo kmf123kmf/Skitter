@@ -26,7 +26,14 @@ from dataclasses import dataclass
 import numpy as np
 
 from skitter.core.animation import compass
-from skitter.core.animation.base import Choreography, TileFrame, Timeline, register_choreography
+from skitter.core.animation.base import (
+    Choreography,
+    Note,
+    TileFrame,
+    Timeline,
+    register_choreography,
+    seconds,
+)
 from skitter.core.animation.lift import Lift
 from skitter.core.animation.look import AnimationLook, scene_extent
 from skitter.core.scene import MosaicScene
@@ -115,16 +122,25 @@ class SurfaceTimeline(Timeline):
 
 
 def _surface(choreography, scene: MosaicScene, look: AnimationLook | None, front_of,
-             count: int) -> SurfaceTimeline:  # fmt: skip
-    """The timeline of a show with the shared settings below; front_of(points) -> Front."""
+             count: int, what: str) -> SurfaceTimeline:  # fmt: skip
+    """The timeline of a show with the shared settings below; front_of(points) -> Front.
+    what: "ring" or "wave", for its notes."""
     look = look or AnimationLook()
     lift = Lift(scene, choreography.still_below / 100.0, look, choreography.shading)
     tile = scene.tile_size[0]
     amplitude = min(choreography.amplitude * tile,
                     HEIGHT_LIMIT * look.camera_height * scene_extent(scene))  # fmt: skip
-    return SurfaceTimeline(lift, front_of(lift.points), choreography.duration,
-                           choreography.wavelength * tile, amplitude, count,
-                           choreography.fading / 100.0)  # fmt: skip
+    timeline = SurfaceTimeline(lift, front_of(lift.points), choreography.duration,
+                               choreography.wavelength * tile, amplitude, count,
+                               choreography.fading / 100.0)  # fmt: skip
+    notes = [Note("duration", f"The {what}s travel {timeline.speed / tile:.1f} tiles a second; "
+                              f"each lifts a tile for {seconds(timeline.period)}.")]  # fmt: skip
+    if amplitude < choreography.amplitude * tile - 1e-9:
+        notes.append(Note("amplitude", f"Limited to {amplitude / tile:.2f} tiles: higher would "
+                                       "come too near the camera (Look: Camera height).",
+                          True))  # fmt: skip
+    timeline.notes = tuple(notes)
+    return timeline
 
 
 # Settings Ripple and Wave share (a Param belongs to one class: each call makes one).
@@ -209,7 +225,8 @@ class RippleChoreography(Choreography):
 
     def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:
         origin = np.asarray(scene.canvas) * (self.center_x / 100.0, self.center_y / 100.0)
-        return _surface(self, scene, look, lambda points: ring_front(points, origin), self.rings)
+        return _surface(self, scene, look, lambda points: ring_front(points, origin), self.rings,
+                        "ring")  # fmt: skip
 
 
 @register_choreography
@@ -242,4 +259,4 @@ class WaveChoreography(Choreography):
 
     def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:
         return _surface(self, scene, look, lambda points: line_front(points, self.degrees),
-                        self.count)  # fmt: skip
+                        self.count, "wave")  # fmt: skip

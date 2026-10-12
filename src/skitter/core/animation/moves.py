@@ -7,13 +7,19 @@ taking the tile that lay there to the first one's old place.
 
 `MovesTimeline` plays them. A tile lies still at its current place, at its
 own size and turn, until a move slides it along the table to another place,
-`travel` seconds later; paths curve to one side ("keep right"), so two tiles
-trading places pass side by side. A photo lying in a spot not its own may
+`travel` seconds later. A path may curve to one side (`bend`); the two tiles
+of a swap curve alike (each to its own right, or each to its left), so they
+pass side by side, the pair turning around its middle. A photo lying in a spot not its own may
 hang over its neighbors (tiles of different sizes or turns, a pile), so every
 tile has a level and keeps it throughout: it slides over the tiles below it
 and under those above, and which of two lies on top never changes. Levels
 that keep every tile above those it lies on in the finished mosaic (a pile)
 leave nothing to pop at the end.
+
+A place not yet solved (holding a photo not its own) may lie loose, away from
+its spot (`loose`, `loose_turn`): a photo there lies at that loose position,
+turned by that much more. A photo going home goes to its true spot, so solved
+places show the picture where it belongs while the rest are still scattered.
 """
 
 import math
@@ -31,26 +37,37 @@ BULGE = 0.15  # how far paths curve aside, as a share of the distance travelled
 
 @dataclass(frozen=True)
 class Moves:
-    """Moves, one per row: `tile` leaves place `source` for place `target` at `start`."""
+    """Moves, one per row: `tile` leaves place `source` for place `target` at `start`.
+    `bend`: which way its path curves: 1 to its right (a swap's pair turning
+    counter-clockwise on screen), -1 to its left (clockwise), 0 straight."""
 
     tile: np.ndarray  # (M,) int
     start: np.ndarray  # (M,) seconds
     source: np.ndarray  # (M,) place
     target: np.ndarray  # (M,) place
+    bend: np.ndarray | None = None  # (M,); None: all 1
 
     @classmethod
     def none(cls) -> "Moves":
         i = np.zeros(0, np.int64)
-        return cls(i, np.zeros(0), i, i)
+        return cls(i, np.zeros(0), i, i, np.zeros(0))
 
     def __len__(self) -> int:
         return len(self.tile)
+
+    def bends(self) -> np.ndarray:
+        return np.ones(len(self)) if self.bend is None else np.asarray(self.bend, np.float64)
 
     def sorted(self) -> "Moves":
         """The same moves, by tile, then start."""
         order = np.lexsort((self.start, self.tile))
         return Moves(self.tile[order], self.start[order], self.source[order],
-                     self.target[order])  # fmt: skip
+                     self.target[order], self.bends()[order])  # fmt: skip
+
+    def bent(self, bend) -> "Moves":
+        """The same moves, curving as `bend` (one per move) says."""
+        return Moves(self.tile, self.start, self.source, self.target,
+                     np.asarray(bend, np.float64))  # fmt: skip
 
 
 class _Playback:
@@ -82,35 +99,52 @@ class _Playback:
 class MovesTimeline(Timeline):
     """Tiles starting at `places` (N,) and moved by `moves`, each taking `travel`
     seconds, sliding along the table at their `levels` (N,: lower drawn first; see the
-    module docstring). The last frame, at `duration`, is the finished mosaic: every
-    tile must end at home."""
+    module docstring). Places not yet solved lie at `loose` (N, 2), turned `loose_turn`
+    (N,) more (default: their spots, unturned). The last frame, at `duration`, is the
+    finished mosaic: every tile must end at home."""
 
     def __init__(self, scene: MosaicScene, places, moves: Moves, travel: float,
-                 duration: float, levels):  # fmt: skip
+                 duration: float, levels, loose=None, loose_turn=None):  # fmt: skip
         self.final = TileFrame.final(scene)
         self.duration = float(duration)
         self.play = _Playback(len(scene), moves, places, travel, self.duration)
         self.moves, self.places, self.travel = self.play.moves, self.play.places, self.play.travel
         self.order = np.argsort(np.asarray(levels), kind="stable")
+        b = self.final
+        self.loose = b.center if loose is None else np.asarray(loose, np.float64)
+        self.loose_turn = np.zeros(len(b)) if loose_turn is None else np.asarray(loose_turn)
+
+    def _at(self, tile, place) -> tuple[np.ndarray, np.ndarray]:
+        """(centers, turns) of photos `tile` lying at `place`: at home, its spot;
+        elsewhere, the place's loose position and turn."""
+        b = self.final
+        home = place == tile
+        center = np.where(home[:, None], b.center[place], self.loose[place])
+        return center, b.rotation[tile] + np.where(home, 0.0, self.loose_turn[place])
 
     def frame(self, t: float) -> TileFrame:
         t = float(t)
         if t >= self.duration:
             return self.final  # exactly, whatever the rounding of the times
         b, m = self.final, self.moves
+        tiles = np.arange(len(b))
         if not len(m):  # nothing moves: every tile lies where it starts
-            return b.replace(center=b.center[self.places], order=self.order)
+            center, rotation = self._at(tiles, self.places)
+            return b.replace(center=center, rotation=rotation, order=self.order)
         k, p, moving, place = self.play.at(max(t, 0.0))
-        center = b.center[place].copy()
+        center, rotation = self._at(tiles, place)
         if moving.any():
             i = np.flatnonzero(moving)
             mk = k[i]
             e = ease_in_out_cubic(p[i])
-            a, z = b.center[m.source[mk]], b.center[m.target[mk]]
+            (a, ta), (z, tz) = self._at(i, m.source[mk]), self._at(i, m.target[mk])
             way = z - a
             side = np.stack([-way[:, 1], way[:, 0]], axis=1)  # perpendicular, as long as the way
-            center[i] = a + way * e[:, None] + side * (BULGE * np.sin(math.pi * e))[:, None]
-        return b.replace(center=center, order=self.order)
+            arc = BULGE * np.sin(math.pi * e) * self.moves.bends()[mk]
+            center[i] = a + way * e[:, None] + side * arc[:, None]
+            turn = (tz - ta + math.pi) % math.tau - math.pi  # the shorter way
+            rotation[i] = ta + turn * e
+        return b.replace(center=center, rotation=rotation, order=self.order)
 
 
 def swap_plan(n: int, home_order: np.ndarray, times: np.ndarray, rng: np.random.Generator,
@@ -131,6 +165,7 @@ def swap_plan(n: int, home_order: np.ndarray, times: np.ndarray, rng: np.random.
 
     Built backwards from the finished mosaic, batch by batch from the last: undoing a
     swap trades a tile of the batch (home from then on) with a tile still to go home.
+    The moves come in swaps: rows 2k and 2k + 1 are one swap's two tiles.
     """
     order = np.asarray(home_order, np.int64)
     times = np.asarray(times, np.float64)

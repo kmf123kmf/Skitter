@@ -6,8 +6,20 @@ from dataclasses import dataclass
 import numpy as np
 
 from skitter.core.animation import compass
-from skitter.core.animation.base import Choreography, TileFrame, Timeline, register_choreography
-from skitter.core.animation.landing import landing_times, last_gap_param, wind_down_param
+from skitter.core.animation.base import (
+    Choreography,
+    Note,
+    TileFrame,
+    Timeline,
+    register_choreography,
+    seconds,
+)
+from skitter.core.animation.landing import (
+    landing_notes,
+    landing_times,
+    last_gap_param,
+    wind_down_param,
+)
 from skitter.core.animation.look import AnimationLook, scene_extent
 from skitter.core.animation.orders import (
     RANDOM_ORDERS,
@@ -333,7 +345,7 @@ class DealChoreography(Choreography):
             land = lead + landing_times(n, self.duration - lead, self._tail(), self.last_gap)
             land = land[rank]
             depart = np.maximum(land - slide, 0.0)
-        slide = land - depart
+        pushed, slide = slide, land - depart
 
         # Stacked: the first to leave on top.
         height = np.zeros(n)
@@ -345,10 +357,31 @@ class DealChoreography(Choreography):
 
         turn = (rng.choice([-1.0, 1.0], n)
                 * params.spin.draw(self.spin, rng, n) * math.tau)  # fmt: skip
-        return DealTimeline(
+        timeline = DealTimeline(
             scene, path, deck, local, skew, height, depart, slide, turn,
             face_down=self.face_down, flip_axis=rng.integers(0, 2, n),
         )  # fmt: skip
+        timeline.notes = tuple(self._notes(land, slide, pushed, slide_time))
+        return timeline
+
+    def _notes(self, land, slide, pushed, slide_time: float) -> list[Note]:
+        """What the timing settings came to (Timeline.notes)."""
+        notes = []
+        if slide_time < self.slide:
+            notes.append(Note("slide", f"Shortened to {seconds(slide_time)}, the duration.",
+                              True))  # fmt: skip
+        if len(slide):
+            text = f"Slides take {seconds(float(slide.min()))} to {seconds(float(slide.max()))}."
+            hurried = int((slide < pushed - 1e-6).sum())
+            if hurried:  # couldn't leave early enough: pushed harder, to leave at 0
+                text += f" {hurried} tiles slide faster than the rest, to leave at the start."
+            notes.append(Note("slide", text, bool(hurried)))
+        notes += landing_notes(land, float(slide.mean()) if len(slide) else 0.0,
+                               self._tail(), self.last_gap)  # fmt: skip
+        if self.position == "orbit" and self.orbit_turns > 0:
+            turn = seconds(self.duration / self.orbit_turns)
+            notes.append(Note("orbit_turns", f"One turn every {turn}."))
+        return notes
 
     def _reach_key(self, scene: MosaicScene, path: DeckPath) -> np.ndarray:
         """Nearest (or farthest) first. Fixed decks: by distance to the nearest deck.

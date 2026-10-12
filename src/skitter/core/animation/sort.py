@@ -30,6 +30,7 @@ import numpy as np
 from skitter.core.animation.base import (
     Choreography,
     Flips,
+    Note,
     TileFrame,
     Timeline,
     register_choreography,
@@ -221,5 +222,9 @@ class SortChoreography(Choreography):
         for s, a in enumerate(arrays):
             states[s, path[a]] = path
         highlight = ColorParam.rgb(self.highlight_color) if self.highlight else None
-        return SortTimeline(scene, states, self.step_time, highlight,
-                            self.motion)  # fmt: skip
+        timeline = SortTimeline(scene, states, self.step_time, highlight,
+                                self.motion)  # fmt: skip
+        steps = timeline.rounds
+        timeline.notes = (Note("step_time", f"{steps} step{'s' if steps != 1 else ''}: "
+                                            f"{timeline.duration:.1f} s in all."),)  # fmt: skip
+        return timeline

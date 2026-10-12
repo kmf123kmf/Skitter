@@ -23,6 +23,12 @@ shadows).
 
 Overlapping tiles (a photo pile) must land bottom first; landing.py makes
 such orders, for orderings with a direction and for random ones.
+
+A timeline's `notes` say what its choreography's settings came to in this
+plan: values that follow from them (how often tiles land, how many move at
+once) and limits they ran into (a flight shortened to fit the duration).
+The settings form shows each note under its setting, so nothing a setting
+does is hidden; any setting the plan quietly limits should say so in a note.
 """
 
 import math
@@ -87,10 +93,36 @@ class TileFrame:
         return np.ones(len(self)) if self.facing is None else self.facing
 
 
+@dataclass(frozen=True)
+class Note:
+    """What a setting came to in a plan, shown under it: a value that follows from the
+    settings (or that it has no effect), or (warning) a limit it ran into, so it didn't
+    get its way."""
+
+    setting: str  # the Param's name
+    text: str
+    warning: bool = False
+
+
+def seconds(t: float) -> str:
+    """A time for a note: "1.25 s", or "40 ms" under a tenth of a second."""
+    return f"{t * 1000:.0f} ms" if abs(t) < 0.1 else f"{t:.2f} s"
+
+
+def pace(gap: float) -> str:
+    """How often something happens, every `gap` seconds: "one every 1.20 s",
+    "about 40 a second"."""
+    if gap <= 0:
+        return "all at once"
+    return f"one every {seconds(gap)}" if gap >= 0.25 else f"about {1 / gap:.0f} a second"
+
+
 class Timeline(ABC):
-    """A planned animation: every tile's state at any time in [0, duration]."""
+    """A planned animation: every tile's state at any time in [0, duration]. `notes`:
+    what its choreography's settings came to (see the module docstring)."""
 
     duration: float
+    notes: tuple[Note, ...] = ()
 
     @abstractmethod
     def frame(self, t: float) -> TileFrame:

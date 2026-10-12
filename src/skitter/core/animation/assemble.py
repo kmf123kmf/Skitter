@@ -8,13 +8,20 @@ from skitter.core.animation.base import (
     Choreography,
     FlightTimeline,
     Flips,
+    Note,
     TileFrame,
     Timeline,
     TossTimeline,
     cover_after_impact,
     register_choreography,
+    seconds,
 )
-from skitter.core.animation.landing import landing_times, last_gap_param, wind_down_param
+from skitter.core.animation.landing import (
+    landing_notes,
+    landing_times,
+    last_gap_param,
+    wind_down_param,
+)
 from skitter.core.animation.look import NEAR, AnimationLook, clear_of_axis, scene_extent
 from skitter.core.animation.orders import (
     RANDOM_ORDERS,
@@ -213,6 +220,15 @@ class AssembleChoreography(Choreography):
         )
         if drop:
             start_center = self._drop_starts(scene, final, middle, extent, rng)
+        notes = []
+        if travel < self.travel - 1e-9:
+            trip = "its flight and bounces" if tossed else "its flight"
+            notes.append(Note("travel", f"Shortened to {seconds(travel)}: a tile's whole trip "
+                                        f"({trip}) must fit in the duration.", True))  # fmt: skip
+        if self.motion == "toss" and apex < self.arc * extent - 1e-9:
+            text = (f"Limited to {apex / extent:.2f} × mosaic: higher throws would reach the "
+                    "camera (Look: Camera height).")  # fmt: skip
+            notes.append(Note("arc", text, True))
         if tossed:
             for window in windows:
                 delay = place * window
@@ -223,15 +239,28 @@ class AssembleChoreography(Choreography):
                 )  # fmt: skip
                 if timeline.duration <= self.duration + 1e-9:
                     break
-            return timeline
-        start = final.replace(
-            center=start_center,
-            size=final.size * self.shrink,
-            rotation=start_rotation,
-            alpha=np.zeros(n),
-        )
-        easing = ease_out_back if self.overshoot else ease_out_cubic
-        return FlightTimeline(scene, start, delay, travel, easing=easing, flips=flips)
+            if n:
+                settle = seconds(float(free.max()))
+                notes.append(Note("bounce", f"Bouncing and settling take up to {settle} after "
+                                            "landing."))  # fmt: skip
+        else:
+            start = final.replace(
+                center=start_center,
+                size=final.size * self.shrink,
+                rotation=start_rotation,
+                alpha=np.zeros(n),
+            )
+            easing = ease_out_back if self.overshoot else ease_out_cubic
+            timeline = FlightTimeline(scene, start, delay, travel, easing=easing, flips=flips)
+        notes += landing_notes(delay + travel, travel, self.wind_down * self.duration,
+                               self.last_gap)  # fmt: skip
+        if tossed and timeline.duration < self.duration - 0.05:
+            notes.append(Note("duration", f"Everything lies still at {timeline.duration:.1f} s."))
+        elif timeline.duration > self.duration + 0.05:
+            notes.append(Note("duration", f"Runs to {timeline.duration:.1f} s: the last tiles "
+                                          "need longer to settle.", True))  # fmt: skip
+        timeline.notes = tuple(notes)
+        return timeline
 
     def _drop_starts(self, scene, final: TileFrame, middle, extent: float, rng) -> np.ndarray:
         """Where dropped tiles start: beside their spots by the slant, outward from the

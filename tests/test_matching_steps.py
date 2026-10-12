@@ -934,6 +934,12 @@ def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):
     for build in ("sort", "unscramble"):
         animate.choreography_box.setCurrentIndex(animate.choreography_box.findData(build))
         assert overflowing_panels(window, qapp) == [], build
+    # Notes under the settings, long warnings among them (a flight cut short, and so on).
+    animate.choreography_box.setCurrentIndex(animate.choreography_box.findData("assemble"))
+    animate.project.choreography.update(duration=2.0, travel=3.0, arc=5.0, last_gap=2.0)
+    window.session.animation_edited()
+    assert "Shortened" in animate.form.note("travel")
+    assert overflowing_panels(window, qapp) == []
     step = matching_step(window)  # the Jigsaw Puzzle method, with its result
     window.tabs.setCurrentWidget(step)
     step.method_box.setCurrentIndex(step.method_box.findData("jigsaw"))

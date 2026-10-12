@@ -249,6 +249,7 @@ class AnimateStep(StepPage):
             self.scene = self.textures = None
             self.camera_path = None
             self.player.set_timeline(None)
+            self._show_notes()
             self.player.set_content(None, None)
             self.transport.refresh()
             self.transport.status.setText("No mosaic: match tiles first.")
@@ -261,6 +262,7 @@ class AnimateStep(StepPage):
         self.transport.status.setText(self.textures.status)
         timeline = self.project.animation(scene)
         self.player.set_timeline(timeline, time=timeline.duration)  # open on the finished mosaic
+        self._show_notes()
         self._plan_camera()
         self.player.set_camera(TableCamera.for_scene(scene, self.project.animation_look))
         self.player.set_content(self.textures.pages, self.textures.instances(),
@@ -313,6 +315,7 @@ class AnimateStep(StepPage):
             self.description.setText(f"No {PHASE_NAMES[self.phase].lower()} choreographies "
                                      "yet.")  # fmt: skip
         self.form.set_target(chosen)
+        self._show_notes()
         # A phase left out has no holds.
         self.holds_form.set_target(None if chosen is None else self.project.phase_holds[self.phase])
 
@@ -351,6 +354,14 @@ class AnimateStep(StepPage):
         timeline = self.project.animation(self.scene)
         self._plan_camera(timeline)
         self.player.set_timeline(timeline, timeline.duration if at_end else None)
+        self._show_notes()
+
+    def _show_notes(self) -> None:
+        """Under the settings, what they came to in the plan (Timeline.notes)."""
+        timeline = self.player.timeline
+        part = None if timeline is None else timeline.parts.get(self.phase)
+        notes = () if part is None else part.notes
+        self.form.set_notes((n.setting, n.text, n.warning) for n in notes)
 
     def _sync_transport(self) -> None:
         """Frame steps match the export's frames; controls follow whether there's a timeline;

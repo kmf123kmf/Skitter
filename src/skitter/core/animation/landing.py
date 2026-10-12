@@ -26,9 +26,11 @@ import math
 import numpy as np
 from numba import njit
 
+from skitter.core.animation.base import Note, pace, seconds
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.params import FloatParam
 
+CROWDED = 0.05  # seconds: landings closer together than this all come at once
 RANDOM_SWEEPS = 100  # Gibbs sweeps for random_landing_order (settled after about 20)
 
 
@@ -134,6 +136,42 @@ def landing_times(n: int, window: float, wind_down: float = 0.0,
     times = np.where(count <= rate * steady, count / rate, steady + np.minimum(into, tail))
     times[-1] = window
     return np.maximum.accumulate(times)
+
+
+def landing_notes(landings: np.ndarray, moving: float, wind_down: float,
+                  last_gap: float) -> list[Note]:  # fmt: skip
+    """Notes on landings at `landings` (seconds, any order), paced by landing_times with
+    a wind-down of `wind_down` seconds and `last_gap`: when they come and how often
+    (under the duration), how many tiles move at once (each `moving` seconds, on
+    average), and what the wind-down and last gap came to."""
+    times = np.sort(np.asarray(landings, np.float64))
+    if len(times) < 2:
+        return []
+    span = float(times[-1] - times[0])
+    if span < CROWDED:
+        return [Note("duration", f"Every tile lands at about {times[-1]:.1f} s: their moves "
+                                 "take up the whole duration, leaving no time to spread the "
+                                 "landings out.", True)]  # fmt: skip
+    gap = float(times[1] - times[0])  # the steady pace, before any wind-down
+    at_once = f", about {moving / gap:.0f} tiles moving at once" if gap > 0 else ""
+    notes = [Note("duration", f"Landings from {times[0]:.1f} to {times[-1]:.1f} s, "
+                              f"{pace(gap)}{at_once}.")]  # fmt: skip
+    if wind_down <= 0:
+        return notes
+    tail = min(wind_down, span)
+    if last_gap > tail / 2 + 1e-9:
+        notes.append(Note("last_gap", f"Limited to {seconds(tail / 2)} (half the "
+                                      "wind-down).", warning=True))  # fmt: skip
+    elif span / (len(times) - 1) >= last_gap:  # landing_times keeps them even
+        notes.append(Note("wind_down", f"No effect: landings are already {seconds(gap)} "
+                                       "apart, at least the last gap."))  # fmt: skip
+        return notes
+    if wind_down > span + 1e-9:
+        notes.append(Note("wind_down", f"Limited to {seconds(tail)}: landings only span "
+                                       f"{seconds(span)}.", warning=True))  # fmt: skip
+    else:
+        notes.append(Note("wind_down", f"= {seconds(tail)}."))
+    return notes
 
 
 def landing_gap(n: int) -> int:

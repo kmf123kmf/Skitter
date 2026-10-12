@@ -12,13 +12,25 @@ Every tile keeps a level throughout, sliding over the tiles below it and
 under those above (photos in spots not their own may overlap: tiles of
 different sizes, a pile), so no tile ever pops over or under another. The
 levels are a random order that keeps every tile above those it lies on in
-the finished mosaic, so a pile ends in its own order. See moves.py for the
+the finished mosaic, so a pile ends in its own order. With Scatter, places
+not yet solved lie loose, away from their spots and turned, so the start
+doesn't show the shape of the slicing (many small spots where the picture
+has detail); a photo going home goes to its true spot. See moves.py for the
 moves and the swap plan.
 """
 
+import math
+
 import numpy as np
 
-from skitter.core.animation.base import Choreography, Timeline, register_choreography
+from skitter.core.animation.base import (
+    Choreography,
+    Note,
+    Timeline,
+    pace,
+    register_choreography,
+    seconds,
+)
 from skitter.core.animation.landing import random_landing_order, wind_down_param
 from skitter.core.animation.look import AnimationLook
 from skitter.core.animation.moves import MovesTimeline, swap_plan
@@ -32,12 +44,20 @@ from skitter.core.animation.orders import (
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.common import seed_param
 from skitter.core.slicing.params import (
+    ChoiceParam,
     FloatParam,
     Section,
     TileSizeParam,
 )
 
 # Settings of earlier versions, now gone (tiles slide; piles no longer explode).
+PATHS = (
+    ("mixed", "Mixed"),
+    ("counter", "Counter-clockwise"),
+    ("clockwise", "Clockwise"),
+    ("straight", "Straight"),
+)
+BENDS = {"counter": 1.0, "clockwise": -1.0, "straight": 0.0}  # Mixed: either, at random
 RETIRED = frozenset({"motion", "lift", "tilt", "stack_height", "explode", "pile_spread",
                      "depth_shading"})  # fmt: skip
 
@@ -106,6 +126,13 @@ class UnscrambleChoreography(Choreography):
              "shuffled puzzle, large for tiles flying across the whole mosaic. (The last "
              "few tiles may have further to go.)",
     )  # fmt: skip
+    scatter = FloatParam(
+        50.0, "Scatter", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
+        help="How loosely tiles out of place lie: 0% in their spots (the scrambled "
+             "mosaic keeps the shape of its tiles, e.g. dense where it was split by "
+             "detail), 100% anywhere over the mosaic, turned any way. A tile going home "
+             "goes to its true spot.",
+    )  # fmt: skip
 
     _order = Section("Order")
     order = order_param("random", "go home")
@@ -121,6 +148,13 @@ class UnscrambleChoreography(Choreography):
     travel = FloatParam(
         0.8, "Move time", min=0.1, max=10.0, step=0.1, decimals=2, suffix=" s",
         help="How long each move takes (at most the duration).",
+    )  # fmt: skip
+    paths = ChoiceParam(
+        "mixed", "Paths", choices=PATHS,
+        help="How the two tiles of a swap pass each other: curving aside, the pair "
+             "turning around its middle one way or the other (Mixed: each swap at "
+             "random, so the moves don't seem to swirl around the mosaic), or straight, "
+             "one over the other.",
     )  # fmt: skip
     pause = FloatParam(
         0.5, "Pause", min=0.0, max=10.0, step=0.1, decimals=2, suffix=" s",
@@ -161,4 +195,52 @@ class UnscrambleChoreography(Choreography):
                                   self.reach * scene.tile_size[0])  # fmt: skip
         # Levels: random, every tile above those it lies on in the finished mosaic.
         levels = random_landing_order(scene, int(rng.integers(2**31)))
-        return MovesTimeline(scene, places, moves, travel, self.duration, levels)
+        # Each swap's pair curves alike: Mixed draws a way for each swap.
+        swaps = len(moves) // 2
+        if self.paths == "mixed":
+            way = rng.choice([-1.0, 1.0], swaps)
+        else:
+            way = np.full(swaps, BENDS[self.paths])
+        moves = moves.bent(np.repeat(way, 2))
+        # Loose places: toward a random point of the mosaic, turned, by Scatter.
+        x0, y0, x1, y1 = scene.bounds
+        anywhere = rng.uniform((x0, y0), (x1, y1), (n, 2))
+        share = self.scatter / 100.0
+        loose = scene.center + share * (anywhere - scene.center)
+        loose_turn = share * rng.uniform(-math.pi, math.pi, n)
+        timeline = MovesTimeline(scene, places, moves, travel, self.duration, levels, loose,
+                                 loose_turn)  # fmt: skip
+        timeline.notes = tuple(self._notes(times, travel))
+        return timeline
+
+    def _notes(self, times: np.ndarray, travel: float) -> list[Note]:
+        """What the timing settings came to (Timeline.notes), from when each tile goes
+        home (`times`: batch_times)."""
+        notes = []
+        if travel < self.travel:
+            notes.append(Note("travel", f"Shortened to {seconds(travel)}, the duration.", True))
+        starts, sizes = np.unique(times, return_counts=True)
+        if len(starts) < 2:
+            if len(times) > 2:
+                notes.append(Note("duration", f"Only one batch fits (a move and the pause "
+                                              f"take {seconds(self.travel + self.pause)}): "
+                                              "every swap at once.", True))  # fmt: skip
+            return notes
+        gaps = np.diff(starts)
+        notes.append(Note("duration", f"{len(starts)} batches of about "
+                                      f"{len(times) / 2 / len(starts):.0f} swaps, "
+                                      f"{pace(float(np.median(gaps)))}.", False))  # fmt: skip
+        still = float(gaps.min()) - travel  # the shortest stillness between batches
+        if still > 1.1 * self.pause + 0.02:  # (not just rounding)
+            notes.append(Note("pause", f"{seconds(still)} or more: the batches spread out to "
+                                       "fill the duration."))  # fmt: skip
+        if self.wind_down > 0:
+            if sizes.max() <= 2:
+                notes.append(Note("wind_down", "No effect: every batch is already a single "
+                                               "swap."))  # fmt: skip
+            else:
+                shrinking = int((sizes < np.median(sizes) - 1).sum())  # (not rounding)
+                tail = seconds(self.wind_down * self.duration)
+                notes.append(Note("wind_down", f"= {tail}: the last {shrinking} batches "
+                                               "shrink."))  # fmt: skip
+        return notes

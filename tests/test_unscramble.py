@@ -106,7 +106,7 @@ def test_batches_shrink_over_the_wind_down_to_a_single_swap():
 
 def test_unscramble_starts_scrambled_and_whole():
     scene = tiled_scene(24, 16)
-    timeline = UnscrambleChoreography().timeline(scene)
+    timeline = UnscrambleChoreography(scatter=0.0).timeline(scene)
     start = timeline.frame(0.0)
     assert start.at_rest().all() and not start.heights().any()
     # Every place holds exactly one tile, nearly all of them the wrong one.
@@ -167,7 +167,7 @@ def test_unscramble_fixes_tiles_in_its_order(order):
 
 def test_unscramble_partners_pass_side_by_side_one_over_the_other():
     scene = tiled_scene(12, 8)
-    timeline = UnscrambleChoreography(wind_down=0.0).timeline(scene)
+    timeline = UnscrambleChoreography(wind_down=0.0, scatter=0.0).timeline(scene)
     m = timeline.moves
     s = m.start[0]
     pair = np.flatnonzero(m.start == s)[:2]
@@ -259,3 +259,63 @@ def test_unscramble_keeps_every_tile_at_its_level(scene_of, settings):
     assert moved
     final = timeline.frame(timeline.duration)
     np.testing.assert_allclose(final.center, TileFrame.final(scene).center)
+
+
+def test_unscramble_scatters_unsolved_places_and_sends_tiles_home_to_their_spots():
+    """With Scatter, a tile out of place lies loose (away from any spot, turned), so the
+    scrambled mosaic doesn't show its slicing's shape; going home, it goes to its
+    true spot."""
+    scene = split_grid()
+    timeline = UnscrambleChoreography(scatter=100.0, duration=6.0).timeline(scene)
+    start = timeline.frame(0.0)
+    out = timeline.places != np.arange(len(scene))
+    off = np.hypot(*(start.center - scene.center[timeline.places]).T)
+    assert np.median(off[out]) > 10  # not in its spot (tiles are 10 and 20 wide)
+    turned = (start.rotation - scene.rotation + np.pi) % (2 * np.pi) - np.pi
+    assert np.abs(turned[out]).mean() > 0.5
+    assert not off[~out].any() and not turned[~out].any()  # tiles at home stay put
+    # A tile's move home ends at its spot, turned straight.
+    m = timeline.moves
+    k = int(np.flatnonzero(m.target == m.tile)[0])
+    tile = m.tile[k]
+    done = timeline.frame(m.start[k] + timeline.travel + 1e-6)
+    np.testing.assert_allclose(done.center[tile], scene.center[tile], atol=1e-9)
+    assert done.rotation[tile] == pytest.approx(scene.rotation[tile])
+    # Nothing jumps: no tile moves faster than the longest move at its fastest (eased:
+    # 3 times its average speed mid-way; the curve adds a little).
+    longest = np.hypot(*np.ptp(scene.corners.reshape(-1, 2), axis=0))
+    fastest = 3.0 * 1.2 * longest / timeline.travel / 120
+    times = np.arange(0.0, timeline.duration, 1 / 120)
+    centers = np.array([timeline.frame(t).center for t in times])
+    assert np.hypot(*np.diff(centers, axis=0).T).max() < fastest
+
+
+@pytest.mark.parametrize("paths", ["mixed", "counter", "clockwise", "straight"])
+def test_unscramble_paths_curve_each_swap_alike(paths):
+    """Both tiles of a swap curve the same way (each to its own right, or left), so they
+    pass side by side; Mixed picks the way for each swap at random, so the batch
+    doesn't seem to swirl around the mosaic."""
+    scene = tiled_scene(24, 16)
+    timeline = UnscrambleChoreography(paths=paths, scatter=0.0, wind_down=0.0).timeline(scene)
+    m = timeline.moves
+    first = m.start == m.start.min()
+    frame = timeline.frame(m.start.min() + timeline.travel / 2)
+    a, z = scene.center[m.source[first]], scene.center[m.target[first]]
+    way = z - a
+    off = frame.center[m.tile[first]] - a
+    side = (way[:, 0] * off[:, 1] - way[:, 1] * off[:, 0]) / np.hypot(*way.T)  # + : right
+    tile_side = dict(zip(m.tile[first].tolist(), side.tolist(), strict=True))
+    if paths == "straight":
+        assert np.abs(side).max() < 1e-9
+        return
+    sign = np.sign(side)
+    expected = {"counter": [1.0], "clockwise": [-1.0], "mixed": [-1.0, 1.0]}[paths]
+    assert set(sign.tolist()) == set(expected)
+    if paths == "mixed":
+        assert 0.25 < np.mean(sign > 0) < 0.75
+    # A swap's two tiles: one goes to the other's place.
+    for tile, source, target in zip(m.tile[first], m.source[first], m.target[first],
+                                    strict=True):  # fmt: skip
+        partner = [t for t, s in zip(m.tile[first], m.source[first], strict=True) if s == target]
+        if partner and target != source:
+            assert np.sign(tile_side[int(partner[0])]) == np.sign(tile_side[int(tile)])

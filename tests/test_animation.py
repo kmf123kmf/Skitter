@@ -963,6 +963,96 @@ def test_param_form_hides_what_does_not_apply_indents_and_folds_sections(qapp):
     assert not again.is_open("Shape") and not again.is_shown("kind")
 
 
+def test_param_form_shows_notes_under_their_settings(qapp):
+    from skitter.core.slicing import ChoiceParam, Configurable, IntParam
+    from skitter.ui.style import WARNING_STYLE
+    from skitter.ui.widgets.param_form import ParamForm
+
+    class Thing(Configurable):
+        kind = ChoiceParam("a", "Kind", choices=[("a", "A"), ("b", "B")])
+        size = IntParam(2, "Size", under="kind", when=lambda t: t.kind == "b")
+        seed = IntParam(1, "Seed")
+
+    form = ParamForm()
+    form.set_target(Thing())
+    form.set_notes(
+        [
+            ("kind", "Came to <a>.", False),
+            ("kind", "Limited.", True),
+            ("size", "Hidden with its setting.", False),
+            ("other", "Left out.", False),
+        ]
+    )
+    assert form.note("kind") == "Came to <a>.\nLimited." and form.note("seed") == ""
+    rows = {row.param.name: row for row in form._rows}
+    assert WARNING_STYLE in rows["kind"].note.text()
+    # The note sits right under its setting, and shows only when the setting does.
+    layout = form._layout
+    below = layout.getWidgetPosition(rows["kind"].editor.widget)[0] + 1
+    assert layout.getWidgetPosition(rows["kind"].note)[0] == below
+    assert layout.isRowVisible(rows["kind"].note) and not layout.isRowVisible(rows["size"].note)
+    form.editor("kind").widget.setCurrentIndex(1)
+    assert layout.isRowVisible(rows["size"].note)
+    form.set_notes([("seed", "Only this.", False)])  # replaces them all
+    assert form.note("kind") == "" and not layout.isRowVisible(rows["kind"].note)
+    assert form.note("seed") == "Only this."
+
+
+def test_every_choreography_notes_what_its_timing_came_to():
+    """Every choreography says, under its own settings, what its timing came to (how
+    often tiles land, how fast waves travel, how long a sort takes)."""
+    scene = grid_scene()
+    for cls in choreography_types():
+        notes = cls().timeline(scene).notes
+        names = {p.name for p in cls.params()}
+        assert notes, cls.id
+        assert all(note.setting in names for note in notes), cls.id
+        assert not any(note.warning for note in notes), (cls.id, notes)  # defaults fit
+
+
+def warnings(choreography, scene=None) -> dict[str, str]:
+    notes = choreography.timeline(scene or grid_scene()).notes
+    return {note.setting: note.text for note in notes if note.warning}
+
+
+def test_timing_limits_are_noted_as_warnings():
+    """A setting the plan quietly limits says so (nothing a setting does is hidden)."""
+    from skitter.core.animation.show import WaveChoreography
+
+    assert "Shortened" in warnings(AssembleChoreography(duration=2.0, travel=3.0))["travel"]
+    assert "Shortened" in warnings(AssembleChoreography(motion="glide", duration=1.0,
+                                                        travel=3.0))["travel"]  # fmt: skip
+    assert "Limited" in warnings(AssembleChoreography(arc=5.0))["arc"]
+    assert "Shortened" in warnings(DealChoreography(duration=2.0, slide=5.0))["slide"]
+    assert "Shortened" in warnings(UnscrambleChoreography(duration=1.0, travel=3.0))["travel"]
+    assert "one batch" in warnings(UnscrambleChoreography(duration=1.0))["duration"]
+    assert "Limited" in warnings(WaveChoreography(amplitude=10.0))["amplitude"]
+    # Moves filling the whole duration: every tile lands at once.
+    assert (
+        "Every tile lands" in warnings(AssembleChoreography(duration=2.0, travel=3.0))["duration"]
+    )
+    # The last gap is at most half the wind-down; with landings already far apart, the
+    # wind-down does nothing.
+    gap = warnings(AssembleChoreography(wind_down=0.05, last_gap=2.0))
+    assert "half the wind-down" in gap["last_gap"]
+    sparse = AssembleChoreography(duration=600.0).timeline(grid_scene()).notes
+    (idle,) = [note for note in sparse if note.setting == "wind_down"]
+    assert "No effect" in idle.text and not idle.warning  # not a limit: muted
+
+
+def test_landing_notes_report_when_and_how_often_tiles_land():
+    from skitter.core.animation.landing import landing_notes
+
+    notes = {n.setting: n for n in landing_notes(1.0 + np.linspace(0.0, 9.0, 91), 2.0, 0.0, 0.0)}
+    assert set(notes) == {"duration"}
+    assert notes["duration"].text == (
+        "Landings from 1.0 to 10.0 s, about 10 a second, about 20 tiles moving at once."
+    )
+    times = landing_times(200, 10.0, 2.0, 0.3)
+    notes = {n.setting: n for n in landing_notes(times, 1.0, 2.0, 0.3)}
+    assert notes["wind_down"].text == "= 2.00 s." and "last_gap" not in notes
+
+
 def every_configurable_type() -> list[type]:
     from skitter.core.animation import PhaseHolds
     from skitter.core.animation.look import AnimationLook

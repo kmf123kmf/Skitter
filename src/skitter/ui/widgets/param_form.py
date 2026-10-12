@@ -7,9 +7,10 @@ their own factory use their base class's.
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from html import escape
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap, QTextDocument
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -38,7 +39,7 @@ from skitter.core.slicing import (
     Section,
 )
 from skitter.ui import preferences
-from skitter.ui.style import muted
+from skitter.ui.style import MUTED_STYLE, WARNING_STYLE, muted
 
 RANGE_BOX_MIN = 48  # px: the least each box of a range keeps (the row shares the rest)
 
@@ -254,6 +255,8 @@ class _Row:
     label: QLabel
     parent: "_Row | None"  # the row of the setting it belongs with (Param.under)
     heading: _Heading | None
+    depth: int = 0  # how many settings it sits under
+    note: QLabel | None = None  # what the setting came to (set_notes), right under it
 
 
 class ParamForm(QWidget):
@@ -265,7 +268,8 @@ class ParamForm(QWidget):
 
     Settings that don't apply (Param.when) are hidden; one that belongs with
     another (Param.under) sits indented below it. Sections (params.Section) get
-    a heading that folds them away; whether each is folded is remembered.
+    a heading that folds them away; whether each is folded is remembered. Notes
+    (`set_notes`) show what settings came to, each under its setting.
     """
 
     changed = Signal(str)
@@ -314,7 +318,7 @@ class ParamForm(QWidget):
                     depth, up = depth + 1, up.parent
                 label.setContentsMargins(INDENT * depth, 0, 0, 0)
                 self._layout.addRow(label, editor.widget)
-                rows[param.name] = row = _Row(param, editor, label, parent, heading)
+                rows[param.name] = row = _Row(param, editor, label, parent, heading, depth)
                 self._rows.append(row)
         self._update_active()
 
@@ -357,6 +361,39 @@ class ParamForm(QWidget):
         button.clicked.connect(toggle)
         self._headings.append(heading)
         return heading
+
+    def set_notes(self, notes) -> None:
+        """Show notes under settings, replacing any shown: (name, text, warning) each
+        (warning: in the warning color). Several notes on one setting share its row;
+        names the form doesn't show are left out."""
+        texts: dict[str, list[tuple[str, bool]]] = {}
+        for name, text, warning in notes:
+            texts.setdefault(name, []).append((text, warning))
+        for row in self._rows:
+            lines = texts.get(row.param.name, [])
+            if not lines and row.note is None:
+                continue
+            if row.note is None:
+                row.note = QLabel()
+                row.note.setWordWrap(True)
+                row.note.setTextFormat(Qt.TextFormat.RichText)
+                row.note.setContentsMargins(INDENT * (row.depth + 1), 0, 0, 2)
+                index, _ = self._layout.getWidgetPosition(row.editor.widget)
+                self._layout.insertRow(index + 1, row.note)
+            row.note.setText("<br>".join(
+                f'<span style="{WARNING_STYLE if warning else MUTED_STYLE}">{escape(text)}</span>'
+                for text, warning in lines
+            ))  # fmt: skip
+        self._update_visible()
+
+    def note(self, name: str) -> str:
+        """The note under a setting, as plain text (lines joined by newlines; "": none)."""
+        label = self._row(name).note
+        if label is None:
+            return ""
+        doc = QTextDocument()
+        doc.setHtml(label.text())
+        return doc.toPlainText()
 
     def refresh(self) -> None:
         """Show the target's current values (it was edited elsewhere), without reporting edits."""
@@ -408,7 +445,10 @@ class ParamForm(QWidget):
 
     def _update_visible(self) -> None:
         for row in self._rows:
-            self._layout.setRowVisible(row.editor.widget, self._shown(row))
+            shown = self._shown(row)
+            self._layout.setRowVisible(row.editor.widget, shown)
+            if row.note is not None:
+                self._layout.setRowVisible(row.note, shown and bool(row.note.text()))
         for heading in self._headings:
             if heading.note is not None:
                 self._layout.setRowVisible(heading.note, heading.expanded)
