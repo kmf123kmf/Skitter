@@ -50,7 +50,7 @@ def random_landing_order(scene: MosaicScene, seed: int, sweeps: int = RANDOM_SWE
     pairs = scene.overlaps
     by_upper = pairs[np.argsort(pairs[:, 1], kind="stable")]
     by_lower = pairs[np.argsort(pairs[:, 0], kind="stable")]
-    keys = (np.arange(n) + 0.5) / max(n, 1)
+    keys = (scene.levels + 0.5) / max(n, 1)
     _conditioned_keys(
         keys, np.searchsorted(by_upper[:, 1], np.arange(n + 1)), by_upper[:, 0].copy(),
         np.searchsorted(by_lower[:, 0], np.arange(n + 1)), by_lower[:, 1].copy(),
@@ -182,7 +182,7 @@ def landing_gap(n: int) -> int:
 def landing_order(scene: MosaicScene, preference, gap: int | None = None) -> np.ndarray:
     """(N,) each tile's place in the landing sequence (0 lands first).
 
-    Tiles land by preference (lower values first; ties by stacking order),
+    Tiles land by preference (lower values first; ties by array order),
     except that a tile never lands before every tile below it that it
     overlaps (scene.overlaps): at each step the most preferred tile whose
     support has fully landed goes next.

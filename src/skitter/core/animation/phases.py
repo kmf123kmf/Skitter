@@ -18,6 +18,18 @@ Because every boundary is the finished mosaic at rest, any choreographies of
 the three phases combine with no special cases. Show and clear are optional
 (None).
 
+Chains: a build or a clear may be several choreographies played one after
+another (`plan_chain`), planned outward from the finished mosaic so that each
+link starts exactly where the one before it ends. A build's last link ends at
+the finished mosaic; each one before it lands on the next one's first frame,
+planned on the scene laid out that way (MosaicScene.laid_out): Assemble
+tossing the photos onto Unscramble's scrambled table, say. A clear's first
+link starts at the finished mosaic; each one after it starts from the last
+frame of the one before. So a link that another leads into (or follows)
+must rest on the table there (`Choreography.rests_on_table`), and the link
+on the other side must plan on any layout (`fits_any_layout`): `can_chain`.
+The phase's `hold_between` pauses between links.
+
 Holds: each phase can hold still before and after its motion
 (`PhaseHolds`: its first frame, then its last; for the build, the empty
 table and the finished mosaic). They belong to the phase: a phase's span is
@@ -29,6 +41,7 @@ be). That is the whole video: `VideoClock` (the spans and the length) is
 what camera keys anchor to (keyframes.py) and what the export plans with.
 """
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -57,6 +70,14 @@ class PhaseHolds(Configurable):
         help="Show the phase's last frame this long after its motion ends (for Build: the "
              "finished mosaic).",
     )  # fmt: skip
+    hold_between = FloatParam(
+        0.0, "Hold between", min=0.0, max=600.0, step=0.5, decimals=1, suffix=" s",
+        when=lambda c: c.chained,
+        help="Where one choreography of the phase hands over to the next (a lead-in "
+             "landing, say), hold still this long before the next one starts.",
+    )  # fmt: skip
+
+    chained = False  # the phase is a chain (shows Hold between); not a setting
 
 
 def default_holds() -> dict[str, PhaseHolds]:
@@ -157,18 +178,96 @@ class PhasedTimeline(Timeline):
         return timeline.frame(min(max(t - span.motion[0], 0.0), timeline.duration))
 
 
+def can_chain(first, then) -> bool:
+    """Whether choreography `first` (a class or one) can play right before `then` in
+    one phase's chain (see the module docstring)."""
+    if first.phase != then.phase or first.id == then.id:
+        return False
+    if first.phase == "build":  # planned backward: the first lands on the next one's start
+        return first.fits_any_layout and then.rests_on_table
+    if first.phase == "clear":  # planned forward: the next starts from the first one's end
+        return first.rests_on_table and then.fits_any_layout
+    return False
+
+
+class ChainTimeline(Timeline):
+    """A phase's chain: its links' timelines played one after another, holding still
+    `pause` seconds between each and the next. `starts`: when each link begins."""
+
+    def __init__(self, links: Sequence[Timeline], pause: float = 0.0):
+        if not links:
+            raise ValueError("a chain needs a link")
+        self.links = tuple(links)
+        self.pause = max(float(pause), 0.0)
+        starts, t = [], 0.0
+        for link in self.links:
+            starts.append(t)
+            t += link.duration + self.pause
+        self.starts = tuple(starts)
+        self.duration = t - self.pause
+
+    def link_at(self, t: float) -> int:
+        """Which link plays at time t (in the pause after one: that one, at its end)."""
+        k = len(self.starts) - 1
+        while k > 0 and t < self.starts[k]:
+            k -= 1
+        return k
+
+    def frame(self, t: float) -> TileFrame:
+        t = min(max(float(t), 0.0), self.duration)
+        k = self.link_at(t)
+        link = self.links[k]
+        return link.frame(min(t - self.starts[k], link.duration))
+
+
+def plan_chain(chain: Sequence[Choreography], scene: MosaicScene,
+               look: "AnimationLook | None" = None, pause: float = 0.0) -> Timeline:  # fmt: skip
+    """The timeline of one phase's choreographies, in playing order: one alone plans as
+    usual; several, a ChainTimeline, each link planned on the scene laid out where the
+    link next to it (toward the finished mosaic) starts or ends."""
+    chain = list(chain)
+    if not chain:
+        raise ValueError("a chain needs a choreography")
+    for first, then in zip(chain, chain[1:], strict=False):
+        if not can_chain(first, then):
+            raise ValueError(f"{first.name} can't lead into {then.name}")
+    if len(chain) == 1:
+        return chain[0].timeline(scene, look)
+    links: list = [None] * len(chain)
+    on = scene
+    if chain[0].phase == "build":  # from the last link back: each lands where the next starts
+        for k in range(len(chain) - 1, -1, -1):
+            links[k] = chain[k].timeline(on, look)
+            on = scene.laid_out(links[k].frame(0.0))
+    else:  # a clear, from the first: each starts where the one before ended
+        for k, choreography in enumerate(chain):
+            links[k] = choreography.timeline(on, look)
+            on = scene.laid_out(links[k].frame(links[k].duration))
+    return ChainTimeline(links, pause)
+
+
 def plan_phases(
-    choreographies: dict[str, Choreography | None], scene: MosaicScene,
-    look: "AnimationLook | None" = None, holds: dict[str, PhaseHolds] | None = None,
+    choreographies: "dict[str, Choreography | Sequence[Choreography] | None]",
+    scene: MosaicScene, look: "AnimationLook | None" = None,
+    holds: dict[str, PhaseHolds] | None = None,
 ) -> PhasedTimeline:  # fmt: skip
-    """The animation of the chosen choreographies ({phase: choreography or None}),
-    each phase between its holds."""
+    """The animation of the chosen choreographies ({phase: a choreography, a chain of
+    them in playing order, or None}), each phase between its holds."""
     parts = {}
+    holds = holds or {}
     for phase in PHASES:
-        choreography = choreographies.get(phase)
-        if choreography is not None and choreography.phase != phase:
-            raise ValueError(f"{choreography.name} is a {choreography.phase} choreography, "
-                             f"not a {phase} one")  # fmt: skip
-        parts[phase] = None if choreography is None else choreography.timeline(scene, look)
-    seconds = {phase: (h.hold_before, h.hold_after) for phase, h in (holds or {}).items()}
+        chosen = choreographies.get(phase)
+        if chosen is None:
+            chain = []
+        elif isinstance(chosen, Choreography):
+            chain = [chosen]
+        else:
+            chain = list(chosen)
+        for choreography in chain:
+            if choreography.phase != phase:
+                raise ValueError(f"{choreography.name} is a {choreography.phase} "
+                                 f"choreography, not a {phase} one")  # fmt: skip
+        pause = holds[phase].hold_between if phase in holds else 0.0
+        parts[phase] = plan_chain(chain, scene, look, pause) if chain else None
+    seconds = {phase: (h.hold_before, h.hold_after) for phase, h in holds.items()}
     return PhasedTimeline(parts, seconds)

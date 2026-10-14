@@ -141,6 +141,7 @@ class SortChoreography(Choreography):
     name = "Sort"
     phase = "build"
     photos_take_spots = True
+    rests_on_table = True
     description = (
         "A sorting algorithm puts the scrambled mosaic in order, round by round, like a "
         "sorting visualizer with photos for bars: the spots lined up along a path, each "

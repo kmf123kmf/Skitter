@@ -51,6 +51,7 @@ TOSS_LIMIT = 0.8  # throws peak at most this share of the camera height (5x size
 class AssembleChoreography(Choreography):
     id = "assemble"
     name = "Assemble"
+    fits_any_layout = True
     description = (
         "Tiles fly in from all around the mosaic, spinning, and land in place: tossed "
         "onto the table under gravity (with bounces and a settling wobble), dropped "

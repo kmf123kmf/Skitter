@@ -11,6 +11,12 @@ picture each tile mixes in, core/blend.py), the scene carries
 attributes that animations can order or group tiles by (position, reading
 order, colors, match error, repeated photos). All lengths are in mosaic
 units (see slicing/layout.py).
+
+`laid_out` gives the same tiles lying elsewhere on the table (another
+choreography's first or last frame, a chain's link: animation/phases.py),
+for planning only: a choreography planned on it lands on (or starts from)
+that layout as it would on the finished mosaic. Its stacking order is its
+own (`stack`), and `overlaps` follow it. Drawing still uses the real scene.
 """
 
 from dataclasses import dataclass, fields, replace
@@ -47,6 +53,7 @@ class MosaicScene:
     tile_size: tuple[float, float]  # base tile (width, height)
     picture: bool = False  # tiles are pieces of the picture (see picture_uv), not photos
     blend: np.ndarray | None = None  # (N,) share of the picture each tile mixes in; None: 0
+    stack: np.ndarray | None = None  # (N,) tiles bottom to top (laid_out); None: array order
 
     @classmethod
     def from_result(
@@ -117,6 +124,32 @@ class MosaicScene:
                 if name in self.__dict__:
                     scene.__dict__[name] = self.__dict__[name]
         return scene
+
+    def laid_out(self, frame) -> "MosaicScene":
+        """The same tiles lying as in `frame` (a TileFrame of tiles still on the table:
+        its centers, sizes, turns and stacking order), for planning on (see the module
+        docstring). Every other attribute is the scene's."""
+        n = len(self)
+        if len(frame) != n:
+            raise ValueError(f"a layout of {len(frame)} tiles for a scene of {n}")
+        stack = np.asarray(frame.draw_order(), np.int64)
+        return replace(
+            self,
+            center=np.asarray(frame.center, np.float64).copy(),
+            size=np.asarray(frame.size, np.float64).copy(),
+            rotation=np.asarray(frame.rotation, np.float64).copy(),
+            stack=None if np.array_equal(stack, np.arange(n)) else stack,
+        )
+
+    @cached_property
+    def levels(self) -> np.ndarray:
+        """(N,) each tile's place in the stack, 0 at the bottom."""
+        n = len(self)
+        if self.stack is None:
+            return np.arange(n)
+        levels = np.empty(n, np.int64)
+        levels[self.stack] = np.arange(n)
+        return levels
 
     # Display
 
@@ -202,8 +235,9 @@ class MosaicScene:
     def overlaps(self) -> np.ndarray:
         """(M, 2) pairs (lower, upper) of tiles whose final rectangles overlap.
 
-        lower < upper (scene order is bottom to top). Tiles that only touch
-        along an edge, like grid neighbors, don't count.
+        lower lies under upper (lower < upper, scene order being bottom to top, unless
+        laid out with a stack of its own). Tiles that only touch along an edge, like grid
+        neighbors, don't count.
         """
         n = len(self)
         if n < 2:
@@ -230,7 +264,12 @@ class MosaicScene:
         for axis in (*axes_a, *axes_b):
             reach = _reach(half_a, axes_a, axis) + _reach(half_b, axes_b, axis)
             separated |= np.abs(np.sum(d * axis, axis=1)) >= reach - tol
-        return np.stack([a[~separated], b[~separated]], axis=1)
+        pairs = np.stack([a[~separated], b[~separated]], axis=1)
+        if self.stack is not None:  # lower first by the layout's own stack
+            levels = self.levels
+            flip = levels[pairs[:, 0]] > levels[pairs[:, 1]]
+            pairs[flip] = pairs[flip, ::-1]
+        return pairs
 
     @cached_property
     def visible_share(self) -> np.ndarray:

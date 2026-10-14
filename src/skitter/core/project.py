@@ -8,7 +8,7 @@ import numpy as np
 from skitter.core.animation import PHASES, Choreography, PhasedTimeline, choreography_types
 from skitter.core.animation.keyframes import CameraTrack
 from skitter.core.animation.look import AnimationLook
-from skitter.core.animation.phases import PhaseHolds, default_holds, plan_phases
+from skitter.core.animation.phases import PhaseHolds, can_chain, default_holds, plan_phases
 from skitter.core.animation.video import VideoSettings
 from skitter.core.assembly import ExportSettings
 from skitter.core.blend import BlendSettings
@@ -43,13 +43,17 @@ class Project:
     export_settings: ExportSettings = field(default_factory=ExportSettings)
 
     # Animate step: one settings object per choreography (of every phase), the one chosen
-    # for each phase (phases.py; show and clear may be None) and each phase's holds,
-    # the camera, the look.
+    # for each phase (phases.py; show and clear may be None), those chained to it (a
+    # build's lead-ins, first first; a clear's follow-ups) and each phase's holds, the
+    # camera, the look.
     choreographies: dict[str, Choreography] = field(
         default_factory=lambda: {cls.id: cls() for cls in choreography_types()}
     )
     phase_choices: dict[str, str | None] = field(
         default_factory=lambda: {"build": "assemble", "show": None, "clear": None}
+    )
+    phase_links: dict[str, list[str]] = field(
+        default_factory=lambda: {phase: [] for phase in PHASES}
     )
     phase_holds: dict[str, PhaseHolds] = field(default_factory=default_holds)
     camera_track: CameraTrack = field(default_factory=CameraTrack)  # keyframes (keyframes.py)
@@ -66,10 +70,32 @@ class Project:
         choice = self.phase_choices.get(phase)
         return None if choice is None else self.choreographies[choice]
 
+    def phase_chain(self, phase: str) -> list[Choreography]:
+        """The phase's choreographies in playing order (phases.py: a build's lead-ins
+        first, a clear's follow-ups after it); empty: the phase is left out. Links that
+        can't chain (a choreography since changed) are left out."""
+        own = self.phase_choreography(phase)
+        if own is None:
+            return []
+        links = [self.choreographies[i] for i in self.phase_links.get(phase, ())
+                 if i in self.choreographies]  # fmt: skip
+        chain = [own]
+        if phase == "build":  # outward from its own: the lead-ins, last first
+            for link in reversed(links):
+                if not can_chain(link, chain[0]):
+                    break
+                chain.insert(0, link)
+        else:
+            for link in links:
+                if not can_chain(chain[-1], link):
+                    break
+                chain.append(link)
+        return chain
+
     def animation(self, scene, look: AnimationLook | None = None) -> PhasedTimeline:
         """The whole animation of a scene (the whole video): the chosen phases, one after
         another, each between its holds."""
-        chosen = {phase: self.phase_choreography(phase) for phase in PHASES}
+        chosen = {phase: self.phase_chain(phase) or None for phase in PHASES}
         return plan_phases(chosen, scene, self.animation_look if look is None else look,
                            self.phase_holds)  # fmt: skip
 

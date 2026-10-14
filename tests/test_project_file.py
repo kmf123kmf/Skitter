@@ -82,7 +82,8 @@ def test_a_project_survives_a_round_trip(tmp_path):
         np.testing.assert_array_equal(getattr(again.regions, name), getattr(project.regions, name))
     assert again.choreography.id == "deal" and again.choreographies["deal"].decks == 3
     assert again.phase_choices == {"build": "deal", "show": None, "clear": None}
-    assert again.phase_holds["build"].values() == {"hold_before": 0.5, "hold_after": 3.0}
+    assert again.phase_holds["build"].values() == {"hold_before": 0.5, "hold_after": 3.0,
+                                                   "hold_between": 0.0}  # fmt: skip
     assert again.phase_holds["clear"].hold_after == 1.5
     assert again.camera_track == project.camera_track
     plan = again.slicing_plan
@@ -105,8 +106,8 @@ def test_older_animation_settings_are_carried_over(tmp_path):
     project = loaded.project
     assert loaded.problems == []  # the old holds aren't "unknown settings"
     assert project.phase_choices == {"build": "deal", "show": None, "clear": None}
-    assert project.phase_holds["build"].values() == {"hold_before": 1.5, "hold_after": 3.0}
-    assert project.phase_holds["clear"].values() == {"hold_before": 0.0, "hold_after": 0.0}
+    holds = {phase: (h.hold_before, h.hold_after) for phase, h in project.phase_holds.items()}
+    assert holds["build"] == (1.5, 3.0) and holds["clear"] == (0.0, 0.0)
 
     # A file with the Still show (a pause, now part of the build's hold after) and the
     # clear phase's first name.
@@ -120,6 +121,31 @@ def test_older_animation_settings_are_carried_over(tmp_path):
     loaded = load_project(path)
     assert loaded.problems == [] and loaded.project.phase_choices["show"] is None
     assert loaded.project.phase_holds["build"].hold_after == 3.5
+
+
+def test_a_lead_in_survives_a_round_trip(tmp_path):
+    project = sample_project()
+    project.choreography_id = "unscramble"
+    project.phase_links["build"] = ["deal"]
+    project.phase_holds["build"].update(hold_between=1.5)
+    path = tmp_path / "chain.skitter"
+    save_project(path, project, committed=True, mosaic=None)
+    loaded = load_project(path)
+    again = loaded.project
+    assert loaded.problems == [] and again.phase_links["build"] == ["deal"]
+    assert [c.id for c in again.phase_chain("build")] == ["deal", "unscramble"]
+    assert again.phase_holds["build"].hold_between == 1.5
+    # A link that can't chain to the phase's own (it changed since) isn't played.
+    again.choreography_id = "assemble"
+    assert [c.id for c in again.phase_chain("build")] == ["assemble"]
+
+
+def test_a_lead_in_that_is_gone_is_left_out(tmp_path):
+    path = tmp_path / "gone.skitter"
+    save_project(path, sample_project(), committed=True, mosaic=None)
+    rewrite(path, lambda doc: doc.update(phase_links={"build": ["vanished", "ripple"]}))
+    loaded = load_project(path)
+    assert loaded.project.phase_links["build"] == [] and len(loaded.problems) == 2
 
 
 def test_phase_choices_that_are_gone_or_misplaced_fall_back(tmp_path):

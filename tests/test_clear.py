@@ -79,13 +79,38 @@ def test_without_a_sweep_every_tile_sets_off_at_once():
 
 def test_tiles_blow_downwind():
     scene = tiled_scene()
-    timeline = BlowAwayChoreography(direction="down", gusts=0.0, skid_jitter=0.0).timeline(scene)
+    timeline = BlowAwayChoreography(direction="down", gusts=0.0, skid_jitter=0.0,
+                                    spread=0.0).timeline(scene)  # fmt: skip
     frame = timeline.frame(1.5)
     moved = frame.center - scene.center
     going = ~frame.at_rest()
     assert going.any()
     assert (moved[going, 1] > 0).all()  # down the picture
     np.testing.assert_allclose(moved[:, 0], 0.0, atol=1e-9)  # nothing drifts sideways
+
+
+def test_tiles_fan_out_within_the_spread():
+    scene = tiled_scene()
+    choreography = BlowAwayChoreography(direction="down", gusts=0.0, skid_jitter=0.0, spread=60.0)
+    timeline = choreography.timeline(scene)
+    frame = timeline.frame(2.0)
+    moved = frame.center - scene.center
+    going = moved[:, 1] > 1.0
+    assert going.sum() > 100
+    turn = np.degrees(np.arctan2(moved[going, 0], moved[going, 1]))
+    assert np.abs(turn).max() <= 30.0 + 1e-6  # within the cone, either side
+    assert (turn < -10).any() and (turn > 10).any()
+    assert np.abs(turn).mean() < 15.0  # most near the middle
+    # Flying at an angle, a tile still goes only once it is the distance down the wind.
+    gone = BlowAwayChoreography(direction="down", spread=90.0, distance=0.5).timeline(scene)
+    _, _, _, y1 = scene.bounds
+    out = y1 + 0.5 * (y1 - scene.bounds[1])
+    reach = np.hypot(*scene.size.T) / 2
+    for t in np.linspace(0.0, gone.duration, 21):
+        frame = gone.frame(t)
+        hidden = frame.alpha == 0
+        assert (frame.center[hidden, 1] - reach[hidden] >= out - 1e-6).all()
+        assert (frame.center[~hidden, 1] - reach[~hidden] < out).all()
 
 
 def test_a_pile_blows_away_top_first():

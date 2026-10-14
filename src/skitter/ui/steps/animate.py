@@ -2,7 +2,9 @@
 
 Pick a choreography for each phase of the animation (core/animation,
 phases.py: Build, then optionally Show and Clear, chosen on the Animation
-group's tabs, each with its own holds before and after), edit their settings
+group's tabs, each with its own holds before and after), and, where one can
+chain to it, a lead-in (a build landing where the chosen one starts; a
+clear's follow-up, "Then"), edit their settings
 and the look, then play or scrub the timeline (its strip shows the phases and
 their holds), and export it as a video (Export Animation): the video is
 exactly this animation. The choreographies, the camera's keys, the look and
@@ -36,7 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from skitter.core.animation import PHASE_NAMES, PHASES, PhasedTimeline
+from skitter.core.animation import PHASE_NAMES, PHASES, ChainTimeline, PhasedTimeline, can_chain
 from skitter.core.animation.camera import CameraPath, Shot, home_shot
 from skitter.core.animation.look import TableCamera
 from skitter.core.animation.phases import OPTIONAL
@@ -153,15 +155,37 @@ class AnimateStep(StepPage):
         self.form.changed.connect(lambda _: self.session.animation_edited())
         self.holds_form = ParamForm()  # the phase's holds (phases.PhaseHolds)
         self.holds_form.changed.connect(lambda _: self.session.animation_edited())
+        # The choreography chained to the phase's own (phases.py: a build's lead-in, a
+        # clear's follow-up), offered only where one can chain, and its settings.
+        self.link_box = QComboBox()
+        self.link_box.currentIndexChanged.connect(self._on_link)
+        self.link_label = QLabel()
+        self.link_heading = QLabel()
+        font = self.link_heading.font()
+        font.setBold(True)
+        self.link_heading.setFont(font)
+        self.link_heading.setContentsMargins(0, 8, 0, 0)
+        self.link_description = muted(QLabel())
+        self.link_description.setWordWrap(True)
+        self.link_form = ParamForm()
+        self.link_form.changed.connect(lambda _: self.session.animation_edited())
+        self.link_section = QWidget()
+        section = QVBoxLayout(self.link_section)
+        section.setContentsMargins(0, 0, 0, 0)
+        section.addWidget(self.link_heading)
+        section.addWidget(self.link_description)
+        section.addWidget(self.link_form)
         group = QGroupBox("Animation")
         layout = QVBoxLayout(group)
         layout.addWidget(self.phase_tabs)
-        top = QFormLayout()
+        self.choices = top = QFormLayout()
         top.addRow("Choreography:", self.choreography_box)
+        top.addRow(self.link_label, self.link_box)
         layout.addLayout(top)
         layout.addWidget(self.description)
         layout.addWidget(self.holds_form)  # the phase's, so above its choreography's settings
         layout.addWidget(self.form)
+        layout.addWidget(self.link_section)
         self._show_phase()
         return group
 
@@ -319,13 +343,76 @@ class AnimateStep(StepPage):
             self.description.setText(f"No {PHASE_NAMES[self.phase].lower()} choreographies "
                                      "yet.")  # fmt: skip
         self.form.set_target(chosen)
+        self._show_link_choices()
+        self._show_link()
+
+    def _link_choices(self) -> list:
+        """The choreographies that can chain to the phase's own: lead into a build, follow
+        a clear (phases.can_chain)."""
+        own = self.project.phase_choreography(self.phase)
+        if own is None:
+            return []
+        build = self.phase == "build"
+        return [c for c in self.project.choreographies.values()
+                if (can_chain(c, own) if build else can_chain(own, c))]  # fmt: skip
+
+    def _show_link_choices(self) -> None:
+        """The Lead-in (Then, for a clear) row: None and every choreography that can chain
+        here, the chained one chosen; hidden where none can."""
+        choices = self._link_choices()
+        box = self.link_box
+        box.blockSignals(True)
+        box.clear()
+        box.addItem("None", None)
+        for choreography in choices:
+            box.addItem(choreography.name, choreography.id)
+            box.setItemData(box.count() - 1, choreography.description,
+                            Qt.ItemDataRole.ToolTipRole)  # fmt: skip
+        linked = self.project.phase_links.get(self.phase) or [None]
+        box.setCurrentIndex(max(box.findData(linked[0]), 0))
+        box.blockSignals(False)
+        self.link_label.setText("Lead-in:" if self.phase == "build" else "Then:")
+        tip = (
+            "A build played first, landing the tiles where this one starts."
+            if self.phase == "build"
+            else "A clear played next, from where this one ends."
+        )
+        for widget in (self.link_label, box):
+            widget.setToolTip(tip)
+        self.choices.setRowVisible(1, bool(choices))
+
+    def chained(self):
+        """The choreography chained to the current phase's own, as played (None: none)."""
+        chain = self.project.phase_chain(self.phase)
+        if len(chain) < 2:
+            return None
+        return chain[0] if self.phase == "build" else chain[-1]
+
+    def _show_link(self) -> None:
+        """The chained choreography's settings under its own, and the phase's holds (Hold
+        between, with a chain; a phase left out has none)."""
+        link = self.chained()
+        self.link_section.setVisible(link is not None)
+        if link is not None:
+            way = "Lead-in" if self.phase == "build" else "Then"
+            self.link_heading.setText(f"{way}: {link.name}")
+            self.link_description.setText(link.description)
+        self.link_form.set_target(link)
         self._show_notes()
-        # A phase left out has no holds.
-        self.holds_form.set_target(None if chosen is None else self.project.phase_holds[self.phase])
+        own = self.project.phase_choreography(self.phase)
+        holds = self.project.phase_holds[self.phase]
+        holds.chained = link is not None
+        self.holds_form.set_target(None if own is None else holds)
 
     def _on_choreography(self) -> None:
         self.project.phase_choices[self.phase] = self.choreography_box.currentData()
         self._show_choreography()
+        self.session.animation_edited()
+
+    def _on_link(self) -> None:
+        chosen = self.link_box.currentData()
+        self.project.phase_links[self.phase] = [] if chosen is None else [chosen]
+        self._show_link()
         self.session.animation_edited()
 
     def _on_animation_changed(self) -> None:
@@ -333,6 +420,7 @@ class AnimateStep(StepPage):
         self.video_form.refresh()
         self.look_form.refresh()
         self.holds_form.refresh()
+        self.link_form.refresh()
         self._apply_look()
         self._replan()
         self._sync_transport()
@@ -364,8 +452,12 @@ class AnimateStep(StepPage):
         """Under the settings, what they came to in the plan (Timeline.notes)."""
         timeline = self.player.timeline
         part = None if timeline is None else timeline.parts.get(self.phase)
-        notes = () if part is None else part.notes
+        notes, link_notes = () if part is None else part.notes, ()
+        if isinstance(part, ChainTimeline):  # its own, and the link chained to it
+            own, link = (-1, 0) if self.phase == "build" else (0, -1)
+            notes, link_notes = part.links[own].notes, part.links[link].notes
         self.form.set_notes((n.setting, n.text, n.warning) for n in notes)
+        self.link_form.set_notes((n.setting, n.text, n.warning) for n in link_notes)
 
     def _sync_transport(self) -> None:
         """Frame steps match the export's frames; controls follow whether there's a timeline;

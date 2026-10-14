@@ -124,6 +124,7 @@ class DealTimeline(Timeline):
                  depart, slide, turn, face_down: bool = False, flip_axis=None):  # fmt: skip
         n = len(scene)
         self.final = TileFrame.final(scene)
+        self.levels = scene.levels
         self.path = path
         self.deck = np.asarray(deck, np.int64)
         self.local = np.asarray(local, np.float64).reshape(n, 2)
@@ -183,14 +184,14 @@ class DealTimeline(Timeline):
         height = np.where(placed, 0.0, height)
         # At rest in stacking order, then everything else from low to high (decks
         # draw bottom card first; ties in stacking order).
-        order = np.lexsort((np.arange(len(p)), np.where(placed, 0.0, height), ~placed))
+        order = np.lexsort((self.levels, np.where(placed, 0.0, height), ~placed))
         return TileFrame(
             center=np.where(placed[:, None], b.center, center),
             size=size,
             rotation=np.where(placed, b.rotation, rotation),
             alpha=np.ones(len(p)),
             tint=b.tint.copy(),
-            order=None if placed.all() else order,
+            order=b.order if placed.all() else order,
             height=height,
             rest=None if placed.all() else placed,
             facing=facing,
@@ -201,6 +202,7 @@ class DealTimeline(Timeline):
 class DealChoreography(Choreography):
     id = "deal"
     name = "Deal"
+    fits_any_layout = True
     description = (
         "Tiles are dealt like cards from one or more decks on the table: each slides "
         "off the top of its deck and across the table to its place, slowing to a stop. "

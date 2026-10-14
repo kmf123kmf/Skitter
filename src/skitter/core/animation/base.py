@@ -62,7 +62,7 @@ class TileFrame:
 
     @classmethod
     def final(cls, scene: MosaicScene) -> "TileFrame":
-        """The finished mosaic."""
+        """The finished mosaic (of a laid-out scene: its layout, in its stacking order)."""
         n = len(scene)
         return cls(
             center=scene.center.copy(),
@@ -70,6 +70,7 @@ class TileFrame:
             rotation=scene.rotation.copy(),
             alpha=np.ones(n),
             tint=np.zeros((n, 4)),
+            order=None if scene.stack is None else scene.stack.copy(),
         )
 
     def __len__(self) -> int:
@@ -145,6 +146,13 @@ class Choreography(Configurable, ABC):
     # stacking order follows the spots, not the photos (tests check such choreographies
     # on their own terms).
     photos_take_spots: ClassVar[bool] = False
+    # Chains (phases.py). rests_on_table: its open end (a build's first frame, a clear's
+    # last) has every tile lying still on the table, face up, so another choreography
+    # can lead into it (or follow it). fits_any_layout: it plans only from the scene, so
+    # on a laid-out one (MosaicScene.laid_out) it lands on (or starts from) that layout:
+    # it can lead into (or follow) one that rests on the table.
+    rests_on_table: ClassVar[bool] = False
+    fits_any_layout: ClassVar[bool] = False
 
     @abstractmethod
     def timeline(self, scene: MosaicScene, look: "AnimationLook | None" = None) -> Timeline:
@@ -207,6 +215,7 @@ class FlightTimeline(Timeline):
         n = len(scene)
         self.flips = flips if flips is not None else Flips.none(n)
         self.final = TileFrame.final(scene)
+        self.levels = scene.levels
         self.start = start
         self.delay = np.broadcast_to(np.asarray(delay, dtype=np.float64), (n,))
         self.travel = np.maximum(np.broadcast_to(np.asarray(travel, dtype=np.float64), (n,)), 1e-6)
@@ -223,7 +232,7 @@ class FlightTimeline(Timeline):
         e = self.easing(p)
         col = e[:, None]
         landed = p >= 1.0
-        order = np.lexsort((np.arange(len(p)), ~landed))  # landed first, then in stacking order
+        order = np.lexsort((self.levels, ~landed))  # landed first, then in stacking order
         flying = t > self.delay
         if self.fade > 0:
             alpha = lerp(a.alpha, b.alpha, progress(t, self.delay, self.travel * self.fade))
@@ -238,7 +247,7 @@ class FlightTimeline(Timeline):
             rotation=lerp(a.rotation, b.rotation, e),
             alpha=np.where(landed, b.alpha, alpha),
             tint=lerp(a.tint, b.tint, col),
-            order=None if landed.all() else order,
+            order=b.order if landed.all() else order,
             rest=None if landed.all() else landed,
             facing=facing,
         )
@@ -282,6 +291,7 @@ class TossTimeline(Timeline):
         n = len(scene)
         self.flips = flips if flips is not None else Flips.none(n)
         self.final = TileFrame.final(scene)
+        self.levels = scene.levels
         self.start_center = np.asarray(start_center, dtype=np.float64)
         self.start_rotation = np.asarray(start_rotation, dtype=np.float64)
         self.delay = np.broadcast_to(np.asarray(delay, dtype=np.float64), (n,))
@@ -406,7 +416,7 @@ class TossTimeline(Timeline):
         # both in stacking order: a tile may land on one still settling. Then tiles
         # still falling, from low to high: nearer the camera covers what is further down.
         falling = ~landed
-        order = np.lexsort((np.arange(len(tau)), np.where(falling, height, 0.0), falling, ~rest))
+        order = np.lexsort((self.levels, np.where(falling, height, 0.0), falling, ~rest))
         size, facing = b.size.copy(), None
         if self.flips:  # whole turns over the flight: face up from the first impact on
             size, facing = self.flips.apply(size, p)
@@ -417,7 +427,7 @@ class TossTimeline(Timeline):
             rotation=np.where(rest, b.rotation, rotation),
             alpha=np.where(tau > 0, 1.0, 0.0),
             tint=b.tint.copy(),
-            order=None if rest.all() else order,
+            order=b.order if rest.all() else order,
             height=height,
             rest=None if rest.all() else rest,
         )

@@ -104,6 +104,7 @@ def document(project: Project, committed: bool) -> dict:
         "choreographies": {key: c.values() for key, c in project.choreographies.items()},
         "choreography": project.choreography_id,  # the build's (the only phase, once)
         "phases": {phase: project.phase_choices.get(phase) for phase in OPTIONAL},
+        "phase_links": {phase: list(ids) for phase, ids in project.phase_links.items() if ids},
         "phase_holds": {phase: holds.values() for phase, holds in project.phase_holds.items()},
         "camera_track": project.camera_track.to_dict(),
         "animation_look": project.animation_look.values(),
@@ -238,6 +239,16 @@ def _project(doc: dict, source: np.ndarray, problems: list[str]) -> Project:
         elif choice is not None:
             problems.append(f"{PHASE_NAMES[phase]}: {choice!r} isn't available; "
                             f"{'the default' if phase == 'build' else 'none'} is used")  # fmt: skip
+    for phase, ids in (doc.get("phase_links") or {}).items():
+        if phase not in PHASES or not isinstance(ids, list):
+            continue
+        for choice in ids:
+            known = project.choreographies.get(choice) if isinstance(choice, str) else None
+            if known is not None and known.phase == phase:
+                project.phase_links[phase].append(choice)
+            else:
+                problems.append(f"{PHASE_NAMES[phase]}: {choice!r} isn't available to chain; "
+                                "left out")  # fmt: skip
     if "phase_holds" not in doc:
         _old_animation(project, old_holds, saved.get("still") if still else None)
     if isinstance(doc.get("camera_track"), dict):

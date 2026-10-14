@@ -941,6 +941,11 @@ def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):
     for build in ("sort", "unscramble"):
         animate.choreography_box.setCurrentIndex(animate.choreography_box.findData(build))
         assert overflowing_panels(window, qapp) == [], build
+    # A lead-in: its row, its settings under Unscramble's, and the Hold between.
+    animate.link_box.setCurrentIndex(animate.link_box.findData("assemble"))
+    assert animate.link_section.isVisible() and animate.holds_form.is_shown("hold_between")
+    assert overflowing_panels(window, qapp) == []
+    animate.link_box.setCurrentIndex(0)
     # Notes under the settings, long warnings among them (a flight cut short, and so on).
     animate.choreography_box.setCurrentIndex(animate.choreography_box.findData("assemble"))
     animate.project.choreography.update(duration=2.0, travel=3.0, arc=5.0, last_gap=2.0)
@@ -1418,6 +1423,50 @@ def test_animate_tab_camera_moves_the_frame_and_the_view_follows(sliced, photos)
     assert animate.canvas.camera.rotation == pytest.approx(0.0)
     assert animate.keys.clear_keys(confirm=False) and not session.project.camera_track.keys
     assert not animate.transport.timeline.keys
+
+
+def test_animate_tab_chains_a_lead_in_to_the_build(sliced, photos, qapp):
+    from skitter.core.animation import ChainTimeline
+    from skitter.ui.steps.animate import AnimateStep
+
+    window, session = sliced, sliced.session
+    build_library(window, photos)
+    session.project.match_method.update(refine_seconds=0.2, adaptive_rounds=0)
+    session.start_matching()
+    session.wait_for_job()
+    animate = window.step(AnimateStep)
+    window.tabs.setCurrentWidget(animate)
+    project, player = session.project, animate.player
+    box, links = animate.choreography_box, animate.link_box
+    # Assemble starts on an empty table: nothing can lead into it.
+    assert box.currentData() == "assemble" and animate.link_box.isHidden()
+    assert animate.link_section.isHidden()
+    box.setCurrentIndex(box.findData("unscramble"))
+    assert not animate.link_box.isHidden()
+    assert [links.itemData(i) for i in range(links.count())] == [None, "assemble", "deal"]
+    alone = player.duration
+    assert not animate.holds_form.is_shown("hold_between")
+    links.setCurrentIndex(links.findData("assemble"))
+    assert project.phase_links["build"] == ["assemble"] and session.modified
+    assert not animate.link_section.isHidden()
+    assert animate.link_form._target is project.choreographies["assemble"]
+    assert animate.link_heading.text() == "Lead-in: Assemble"
+    part = player.timeline.parts["build"]
+    assert isinstance(part, ChainTimeline)
+    lead = project.choreographies["assemble"].duration
+    assert player.duration == pytest.approx(alone + lead, abs=0.6)  # (settling may end early)
+    assert animate.link_form.note("duration")  # the lead-in's own notes, under its settings
+    animate.holds_form.editor("hold_between").widget.setValue(1.5)
+    assert player.duration == pytest.approx(alone + part.links[0].duration + 1.5)
+    # Back to a build nothing leads into: the lead-in is kept, but not played.
+    box.setCurrentIndex(box.findData("deal"))
+    assert animate.link_box.isHidden() and animate.link_section.isHidden()
+    assert project.phase_chain("build") == [project.choreographies["deal"]]
+    box.setCurrentIndex(box.findData("unscramble"))
+    assert links.currentData() == "assemble"
+    links.setCurrentIndex(0)
+    assert project.phase_links["build"] == [] and animate.link_section.isHidden()
+    assert player.duration == pytest.approx(alone)
 
 
 def test_animate_tab_chooses_a_choreography_and_holds_per_phase(fade, sliced, photos, qapp):  # noqa: F811

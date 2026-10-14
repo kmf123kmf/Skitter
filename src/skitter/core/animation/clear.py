@@ -11,6 +11,10 @@ frames are exact at any time:
   wind's speed W at its own rate k (a drag model: speed W (1 - e^(-k tau)),
   so it has blown `downwind` W (tau - (1 - e^(-k tau)) / k) after tau
   seconds). Its share of the wind's speed, s, drives the rest:
+- Each tile flies its own heading within a cone about the wind's direction
+  (Spread; most near the middle), so it gains cos(angle) of its travel
+  along the wind. The gusts' sideways drift and the rattle's shuffle stay
+  square to the wind, so how far along the wind a tile has come is exact.
 - It skids along the table, rattling (Skid jitter), until s reaches its
   skid share, then lifts (height rising with the square of the speed above
   that, as lift grows with airspeed) toward its own ceiling, bobbing and
@@ -110,16 +114,19 @@ def half_extent(size: np.ndarray, rotation: np.ndarray, direction: np.ndarray) -
 class WindTimeline(Timeline):
     """Tiles blown away downwind (see the module docstring).
 
-    Per tile: release (seconds), rate k (1/s), skid (share of the wind's speed),
+    Per tile: heading (unit vector), release (seconds), rate k (1/s), skid (share of
+    the wind's speed),
     ceiling (mosaic units), spin and tumble (turns a second at full speed), rattle
     (radians), and the gusts' bob and drift.
     """
 
-    def __init__(self, scene: MosaicScene, wind: float, direction: np.ndarray, release, gone,
-                 k, skid, ceiling, spin, flips: Flips, rattle, waves, duration: float):  # fmt: skip
+    def __init__(self, scene: MosaicScene, wind: float, direction: np.ndarray, heading,
+                 release, gone, k, skid, ceiling, spin, flips: Flips, rattle, waves,
+                 duration: float):  # fmt: skip
         self.final = TileFrame.final(scene)
         self.wind = float(wind)
-        self.direction = np.asarray(direction, np.float64)
+        self.direction = np.asarray(direction, np.float64)  # the wind's
+        self.heading = np.asarray(heading, np.float64)  # (N, 2) each tile's, unit vectors
         self.across = np.array([-self.direction[1], self.direction[0]])
         self.release, self.gone, self.k = release, gone, k
         self.skid, self.ceiling, self.spin, self.flips = skid, ceiling, spin, flips
@@ -156,7 +163,7 @@ class WindTimeline(Timeline):
                             np.exp(-RATTLE_DECAY * (speed - skid)))  # fmt: skip
         skidding = np.where(skid > 0, skidding, 0.0)
         sideways = speed * self._wave(self.drift, tau) + skidding * self._wave(self.shuffle, tau)
-        center = (b.center + downwind[:, None] * self.direction
+        center = (b.center + downwind[:, None] * self.heading
                   + sideways[:, None] * self.across)  # fmt: skip
         rotation = (b.rotation + self.spin * math.tau * downwind / self.wind
                     + skidding * self._wave(self.shake, tau))  # fmt: skip
@@ -192,6 +199,12 @@ class BlowAwayChoreography(Choreography):
 
     direction = compass.direction_param("right", "wind")
     angle = compass.angle_param(90.0, "wind", "direction")
+    spread = FloatParam(
+        15.0, "Spread", min=0.0, max=90.0, step=5.0, decimals=0, suffix="°",
+        help="How widely the tiles' paths fan out from the wind's direction: each tile "
+             "flies its own way within a cone this wide, most near the middle (0: all "
+             "straight downwind).",
+    )  # fmt: skip
     duration = FloatParam(
         4.0, "Duration", min=0.5, max=600.0, step=0.5, decimals=1, suffix=" s",
         help="From the first gust until the last tile has flown its distance; the wind "
@@ -297,12 +310,18 @@ class BlowAwayChoreography(Choreography):
             wave(0.5 * rattle * reach, 6.0, 9.0),
         )
 
+        # Each tile's heading in the cone; it gains cos(turn) of its travel along the wind.
+        turn = math.radians(self.spread) / 2 * rng.triangular(-1.0, 0.0, 1.0, n)
+        across = np.array([-direction[1], direction[0]])
+        heading = np.cos(turn)[:, None] * direction + np.sin(turn)[:, None] * across
+        gain = np.cos(turn)
+
         # Gone: `distance` picture lengths past the downwind edge, all of the tile.
         x0, y0, x1, y1 = scene.bounds if n else (0.0, 0.0, 1.0, 1.0)
         middle = np.array([(x0 + x1) / 2, (y0 + y1) / 2])
         length = abs((x1 - x0) * direction[0]) + abs((y1 - y0) * direction[1])
         out = middle @ direction + (0.5 + self.distance) * length
-        exit_distance = out + reach - along
+        exit_distance = (out + reach - along) / gain
 
         # Piles: a tile under another sets off once the one on top is PEEL of the way clear.
         pairs = scene.overlaps
@@ -310,8 +329,8 @@ class BlowAwayChoreography(Choreography):
         lower = np.ascontiguousarray(pairs[:, 0])
         upper = np.ascontiguousarray(pairs[:, 1])
         half = half_extent(scene.size, scene.rotation, direction)
-        clear_distance = PEEL * np.maximum(half[lower] + reach[upper]
-                                           - (along[upper] - along[lower]), 0.0)  # fmt: skip
+        overlap = np.maximum(half[lower] + reach[upper] - (along[upper] - along[lower]), 0.0)
+        clear_distance = PEEL * overlap / gain[upper]  # along the wind, by the upper's heading
 
         release, gone = np.zeros(n), np.zeros(n)
 
@@ -332,8 +351,8 @@ class BlowAwayChoreography(Choreography):
         wind = hi
         last_gone(wind)
 
-        timeline = WindTimeline(scene, wind, direction, release, gone, k, skid, ceiling, spin,
-                                flips, rattle, waves, total)  # fmt: skip
+        timeline = WindTimeline(scene, wind, direction, heading, release, gone, k, skid,
+                                ceiling, spin, flips, rattle, waves, total)  # fmt: skip
         notes = [Note("duration", f"The wind blows {wind / tile:.1f} tiles a second."),
                  Note("distance", f"{self.distance * length / tile:.0f} tiles past the "
                                   "edge.")]  # fmt: skip

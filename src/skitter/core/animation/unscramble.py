@@ -158,6 +158,7 @@ class UnscrambleChoreography(Choreography):
     id = "unscramble"
     name = "Unscramble"
     phase = "build"
+    rests_on_table = True
     description = (
         "The mosaic starts scrambled, its tiles in each other's places; invisible hands "
         "slide them back, one tile home with every swap, until the picture is whole."

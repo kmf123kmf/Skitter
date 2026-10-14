@@ -32,7 +32,7 @@ os.environ.setdefault("SVT_LOG", "1")  # AV1 encoder: errors only, not its banne
 class VideoJob:
     path: Path
     scene: MosaicScene
-    choreographies: dict[str, Choreography | None]  # copies, per phase (None: left out)
+    choreographies: dict[str, list[Choreography] | None]  # copies: each phase's chain
     holds: dict[str, PhaseHolds]  # copies, per phase
     track: CameraTrack  # the camera's keys (immutable)
     settings: VideoSettings  # a copy

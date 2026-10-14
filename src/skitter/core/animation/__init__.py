@@ -29,10 +29,13 @@ from skitter.core.animation.landing import landing_order, landing_times, random_
 from skitter.core.animation.phases import (
     PHASE_NAMES,
     PHASES,
+    ChainTimeline,
     PhasedTimeline,
     PhaseHolds,
     PhaseSpan,
     VideoClock,
+    can_chain,
+    plan_chain,
     plan_phases,
 )
 
@@ -43,6 +46,9 @@ __all__ = [
     "PhaseSpan",
     "VideoClock",
     "PhasedTimeline",
+    "ChainTimeline",
+    "can_chain",
+    "plan_chain",
     "plan_phases",
     "show",
     "unregister_choreography",

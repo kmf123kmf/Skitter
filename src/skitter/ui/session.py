@@ -933,8 +933,8 @@ class Session(QObject):
         project, scene = self.project, self.scene
         choreographies = {}
         for phase in PHASES:
-            chosen = project.phase_choreography(phase)
-            choreographies[phase] = None if chosen is None else chosen.copy()
+            chain = [chosen.copy() for chosen in project.phase_chain(phase)]
+            choreographies[phase] = chain or None
         holds = {phase: h.copy() for phase, h in project.phase_holds.items()}
         settings = project.video_settings.copy()
         background = project.animation_look.background

@@ -2,18 +2,21 @@
 
 import numpy as np
 import pytest
-from test_animation import grid_scene
+from test_animation import CONFIGS, assert_frame_equal, grid_scene, overlapping, pile_scene
 
 from skitter.core.animation import (
     PHASES,
+    ChainTimeline,
     Choreography,
     PhasedTimeline,
     PhaseHolds,
     TileFrame,
     Timeline,
     VideoClock,
+    can_chain,
     choreography_types,
     get_choreography,
+    plan_chain,
     plan_phases,
     register_choreography,
     unregister_choreography,
@@ -154,3 +157,81 @@ def test_clocks_without_phases_are_all_build():
     clock = VideoClock(4.0)
     assert clock.phase_span("build") == (0.0, 4.0) and clock.phase_span("show") == (4.0, 4.0)
     assert clock.phase_span("clear") == (4.0, 4.0)
+
+
+# Chains: lead-ins landing where the next build starts (phases.py, plan_chain).
+
+LEADS = [(cls, kw) for cls, kw in CONFIGS if cls.fits_any_layout]
+LED = [cls for cls in choreography_types("build") if cls.rests_on_table]
+CHAIN_IDS = [f"{cls.id}{'-' + '-'.join(map(str, kw.values())) if kw else ''}" for cls, kw in LEADS]
+
+
+def test_chains_join_builds_that_land_anywhere_to_builds_that_start_on_the_table():
+    builds = {cls.id: cls for cls in choreography_types("build")}
+    assert {cls.id for cls in LED} == {"sort", "unscramble"}
+    assert {cls.id for cls, _ in LEADS} == {"assemble", "deal"}
+    assert can_chain(builds["assemble"], builds["unscramble"])
+    assert not can_chain(builds["unscramble"], builds["assemble"])  # Assemble starts empty
+    assert not can_chain(builds["sort"], builds["unscramble"])  # Sort only ends at home
+    assert not can_chain(builds["deal"], builds["deal"])
+    with pytest.raises(ValueError):
+        plan_chain([builds["unscramble"](), builds["assemble"]()], grid_scene())
+
+
+@pytest.mark.parametrize("led", LED, ids=[cls.id for cls in LED])
+@pytest.mark.parametrize(("cls", "settings"), LEADS, ids=CHAIN_IDS)
+def test_a_lead_in_lands_exactly_where_the_next_build_starts(cls, settings, led):
+    """On a pile: the lead-in ends on the next build's first frame (its stacking order
+    too), keeping overlapping tiles in that layout's stacking order all the way (see
+    test_every_choreography_keeps_overlapping_tiles_in_stacking_order)."""
+    scene = pile_scene()
+    chain = plan_chain([cls(**settings), led()], scene, pause=0.5)
+    assert isinstance(chain, ChainTimeline)
+    lead, main = chain.links
+    start = main.frame(0.0)
+    assert_frame_equal(lead.frame(lead.duration), start)
+    np.testing.assert_array_equal(lead.frame(lead.duration).draw_order(), start.draw_order())
+    # Played in turn, holding still between them; the chain ends on the finished mosaic.
+    assert chain.duration == pytest.approx(lead.duration + 0.5 + main.duration)
+    assert_frame_equal(chain.frame(lead.duration + 0.25), start)
+    assert_frame_equal(chain.frame(chain.duration), TileFrame.final(scene))
+    layout = scene.laid_out(start)
+    lower, upper = layout.overlaps.T
+    for t in np.linspace(0, lead.duration, 61):
+        frame = lead.frame(t)
+        rank = np.empty(len(scene), np.int64)
+        rank[frame.draw_order()] = np.arange(len(scene))
+        visible = (frame.alpha[lower] > 0) & (frame.alpha[upper] > 0)
+        visible &= overlapping(frame.center[lower], frame.size[lower], frame.rotation[lower],
+                               frame.center[upper], frame.size[upper],
+                               frame.rotation[upper])  # fmt: skip
+        nearer = frame.heights()[lower] > frame.heights()[upper]
+        wrong = visible & (rank[upper] < rank[lower]) & ~nearer
+        assert not wrong.any(), f"{wrong.sum()} lower tiles drawn on top at {t:.2f} s"
+
+
+def test_a_laid_out_scene_stacks_as_its_layout():
+    scene = pile_scene()
+    start = get_choreography("unscramble")(duration=4.0).timeline(scene).frame(0.0)
+    layout = scene.laid_out(start)
+    np.testing.assert_allclose(layout.center, start.center)
+    np.testing.assert_array_equal(TileFrame.final(layout).draw_order(), start.draw_order())
+    lower, upper = layout.overlaps.T
+    assert len(lower) and (layout.levels[lower] < layout.levels[upper]).all()
+    assert scene.laid_out(TileFrame.final(scene)).stack is None  # its own order: as is
+
+
+def test_chains_play_in_their_phase_between_its_holds():
+    scene = grid_scene()
+    lead = get_choreography("assemble")(duration=2.0)
+    main = get_choreography("unscramble")(duration=3.0)
+    build_holds = PhaseHolds(hold_before=1.0, hold_between=0.5, hold_after=1.0)
+    timeline = plan_phases({"build": [lead, main]}, scene, holds={"build": build_holds})
+    part = timeline.parts["build"]
+    assert isinstance(part, ChainTimeline) and part.starts[1] == pytest.approx(
+        part.links[0].duration + 0.5)  # fmt: skip
+    assert timeline.span("build").length == pytest.approx(1.0 + part.duration + 1.0)
+    assert_frame_equal(timeline.frame(timeline.duration), TileFrame.final(scene))
+    # One choreography alone plans as before (no chain).
+    alone = plan_phases({"build": [main]}, scene).parts["build"]
+    assert not isinstance(alone, ChainTimeline)
