@@ -943,7 +943,8 @@ def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):
         assert overflowing_panels(window, qapp) == [], build
     # A lead-in: its row, its settings under Unscramble's, and the Hold between.
     animate.link_box.setCurrentIndex(animate.link_box.findData("assemble"))
-    assert animate.link_section.isVisible() and animate.holds_form.is_shown("hold_between")
+    assert animate.chain_tabs.isVisible() and animate.holds_form.is_shown("hold_between")
+    assert animate.form._target is animate.project.choreographies["assemble"]
     assert overflowing_panels(window, qapp) == []
     animate.link_box.setCurrentIndex(0)
     # Notes under the settings, long warnings among them (a flight cut short, and so on).
@@ -1438,34 +1439,49 @@ def test_animate_tab_chains_a_lead_in_to_the_build(sliced, photos, qapp):
     window.tabs.setCurrentWidget(animate)
     project, player = session.project, animate.player
     box, links = animate.choreography_box, animate.link_box
+    tabs, form = animate.chain_tabs, animate.form
     # Assemble starts on an empty table: nothing can lead into it.
-    assert box.currentData() == "assemble" and animate.link_box.isHidden()
-    assert animate.link_section.isHidden()
+    assert box.currentData() == "assemble" and animate.link_box.isHidden() and tabs.isHidden()
     box.setCurrentIndex(box.findData("unscramble"))
     assert not animate.link_box.isHidden()
     assert [links.itemData(i) for i in range(links.count())] == [None, "assemble", "deal"]
     alone = player.duration
     assert not animate.holds_form.is_shown("hold_between")
+    # Choosing a lead-in shows its settings, to set it up; tabs in playing order switch
+    # the one form between it and the build, with each one's description and notes.
     links.setCurrentIndex(links.findData("assemble"))
     assert project.phase_links["build"] == ["assemble"] and session.modified
-    assert not animate.link_section.isHidden()
-    assert animate.link_form._target is project.choreographies["assemble"]
-    assert animate.link_heading.text() == "Lead-in: Assemble"
+    assert not tabs.isHidden() and [tabs.tabText(i) for i in range(tabs.count())] == [
+        "Assemble", "Unscramble"]  # fmt: skip
+    assert tabs.currentIndex() == 0 and form._target is project.choreographies["assemble"]
+    assert animate.description.text() == project.choreographies["assemble"].description
     part = player.timeline.parts["build"]
     assert isinstance(part, ChainTimeline)
     lead = project.choreographies["assemble"].duration
     assert player.duration == pytest.approx(alone + lead, abs=0.6)  # (settling may end early)
-    assert animate.link_form.note("duration")  # the lead-in's own notes, under its settings
+    assert form.note("duration").startswith("Landings")  # the lead-in's own notes
+    tabs.setCurrentIndex(1)
+    assert form._target is project.choreographies["unscramble"]
+    assert "batches" in form.note("duration")  # Unscramble's
+    form.editor("duration").widget.setValue(6.0)  # edits go to the one shown
+    assert project.choreographies["unscramble"].duration == 6.0
+    assert tabs.currentIndex() == 1 and form._target is project.choreographies["unscramble"]
+    alone -= 4.0
     animate.holds_form.editor("hold_between").widget.setValue(1.5)
+    part = player.timeline.parts["build"]
     assert player.duration == pytest.approx(alone + part.links[0].duration + 1.5)
     # Back to a build nothing leads into: the lead-in is kept, but not played.
     box.setCurrentIndex(box.findData("deal"))
-    assert animate.link_box.isHidden() and animate.link_section.isHidden()
+    assert animate.link_box.isHidden() and tabs.isHidden()
+    assert form._target is project.choreographies["deal"]
     assert project.phase_chain("build") == [project.choreographies["deal"]]
     box.setCurrentIndex(box.findData("unscramble"))
-    assert links.currentData() == "assemble"
+    assert (
+        links.currentData() == "assemble" and form._target is project.choreographies["unscramble"]
+    )
     links.setCurrentIndex(0)
-    assert project.phase_links["build"] == [] and animate.link_section.isHidden()
+    assert project.phase_links["build"] == [] and tabs.isHidden()
+    assert form._target is project.choreographies["unscramble"]
     assert player.duration == pytest.approx(alone)
 
 

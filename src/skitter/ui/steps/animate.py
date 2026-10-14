@@ -4,7 +4,8 @@ Pick a choreography for each phase of the animation (core/animation,
 phases.py: Build, then optionally Show and Clear, chosen on the Animation
 group's tabs, each with its own holds before and after), and, where one can
 chain to it, a lead-in (a build landing where the chosen one starts; a
-clear's follow-up, "Then"), edit their settings
+clear's follow-up, "Then": a chain, switched between by the tabs above the
+settings, in playing order), edit their settings
 and the look, then play or scrub the timeline (its strip shows the phases and
 their holds), and export it as a video (Export Animation): the video is
 exactly this animation. The choreographies, the camera's keys, the look and
@@ -60,6 +61,11 @@ MARGIN = 0.05  # view margin around the mosaic, share of its size
 FRAME_DIM = 0.6  # opacity of the shade outside the export frame
 FAR = 1e7  # mosaic units: "everywhere" for the shade
 FRAME_SETTINGS = ("resolution", "width", "height", "framing", "margin")  # what the video shows
+# The style draws a chosen tab much like the others: mark it plainly.
+TAB_STYLE = (
+    "QTabBar::tab { padding: 4px 6px; border-bottom: 2px solid transparent; }"
+    "QTabBar::tab:selected { font-weight: bold; border-bottom: 2px solid palette(highlight); }"
+)
 
 
 class AnimateStep(StepPage):
@@ -134,12 +140,7 @@ class AnimateStep(StepPage):
         self.phase_tabs = QTabBar()
         self.phase_tabs.setExpanding(True)
         self.phase_tabs.setDocumentMode(True)
-        # The style draws the chosen tab much like the others: mark it plainly.
-        self.phase_tabs.setStyleSheet(
-            "QTabBar::tab { padding: 4px 6px; border-bottom: 2px solid transparent; }"
-            "QTabBar::tab:selected { font-weight: bold;"
-            " border-bottom: 2px solid palette(highlight); }"
-        )
+        self.phase_tabs.setStyleSheet(TAB_STYLE)
         for phase in PHASES:
             self.phase_tabs.addTab(PHASE_NAMES[phase])
         self.phase_tabs.setTabToolTip(0, "Putting the mosaic together.")
@@ -156,25 +157,17 @@ class AnimateStep(StepPage):
         self.holds_form = ParamForm()  # the phase's holds (phases.PhaseHolds)
         self.holds_form.changed.connect(lambda _: self.session.animation_edited())
         # The choreography chained to the phase's own (phases.py: a build's lead-in, a
-        # clear's follow-up), offered only where one can chain, and its settings.
+        # clear's follow-up), offered only where one can chain. With a chain, tabs in
+        # playing order choose whose settings the form shows (`editing`).
         self.link_box = QComboBox()
         self.link_box.currentIndexChanged.connect(self._on_link)
         self.link_label = QLabel()
-        self.link_heading = QLabel()
-        font = self.link_heading.font()
-        font.setBold(True)
-        self.link_heading.setFont(font)
-        self.link_heading.setContentsMargins(0, 8, 0, 0)
-        self.link_description = muted(QLabel())
-        self.link_description.setWordWrap(True)
-        self.link_form = ParamForm()
-        self.link_form.changed.connect(lambda _: self.session.animation_edited())
-        self.link_section = QWidget()
-        section = QVBoxLayout(self.link_section)
-        section.setContentsMargins(0, 0, 0, 0)
-        section.addWidget(self.link_heading)
-        section.addWidget(self.link_description)
-        section.addWidget(self.link_form)
+        self.chain_tabs = QTabBar()
+        self.chain_tabs.setExpanding(True)
+        self.chain_tabs.setDocumentMode(True)
+        self.chain_tabs.setStyleSheet(TAB_STYLE)
+        self.chain_tabs.currentChanged.connect(self._on_chain_tab)
+        self.editing = None  # the choreography whose settings the form shows
         group = QGroupBox("Animation")
         layout = QVBoxLayout(group)
         layout.addWidget(self.phase_tabs)
@@ -182,10 +175,10 @@ class AnimateStep(StepPage):
         top.addRow("Choreography:", self.choreography_box)
         top.addRow(self.link_label, self.link_box)
         layout.addLayout(top)
+        layout.addWidget(self.holds_form)  # the phase's, so above its choreographies' settings
+        layout.addWidget(self.chain_tabs)
         layout.addWidget(self.description)
-        layout.addWidget(self.holds_form)  # the phase's, so above its choreography's settings
         layout.addWidget(self.form)
-        layout.addWidget(self.link_section)
         self._show_phase()
         return group
 
@@ -333,18 +326,8 @@ class AnimateStep(StepPage):
         self._show_choreography()
 
     def _show_choreography(self) -> None:
-        chosen = self.project.phase_choreography(self.phase)
-        if chosen is not None:
-            self.description.setText(chosen.description)
-        elif self.choreography_box.count() > 1:
-            self.description.setText(f"No {PHASE_NAMES[self.phase].lower()} phase: choose one "
-                                     "to add it.")  # fmt: skip
-        else:
-            self.description.setText(f"No {PHASE_NAMES[self.phase].lower()} choreographies "
-                                     "yet.")  # fmt: skip
-        self.form.set_target(chosen)
         self._show_link_choices()
-        self._show_link()
+        self._show_chain(self.project.phase_choreography(self.phase))
 
     def _link_choices(self) -> list:
         """The choreographies that can chain to the phase's own: lead into a build, follow
@@ -381,28 +364,49 @@ class AnimateStep(StepPage):
             widget.setToolTip(tip)
         self.choices.setRowVisible(1, bool(choices))
 
-    def chained(self):
-        """The choreography chained to the current phase's own, as played (None: none)."""
-        chain = self.project.phase_chain(self.phase)
-        if len(chain) < 2:
-            return None
-        return chain[0] if self.phase == "build" else chain[-1]
-
-    def _show_link(self) -> None:
-        """The chained choreography's settings under its own, and the phase's holds (Hold
-        between, with a chain; a phase left out has none)."""
-        link = self.chained()
-        self.link_section.setVisible(link is not None)
-        if link is not None:
-            way = "Lead-in" if self.phase == "build" else "Then"
-            self.link_heading.setText(f"{way}: {link.name}")
-            self.link_description.setText(link.description)
-        self.link_form.set_target(link)
-        self._show_notes()
+    def _show_chain(self, editing=None) -> None:
+        """The phase's holds (Hold between, with a chain; a phase left out has none), the
+        chain's tabs in playing order (shown with a chain), and the settings of `editing`
+        (one of the chain; default: the phase's own)."""
         own = self.project.phase_choreography(self.phase)
+        chain = self.project.phase_chain(self.phase)
+        if editing not in chain:
+            editing = own
         holds = self.project.phase_holds[self.phase]
-        holds.chained = link is not None
+        holds.chained = len(chain) > 1
         self.holds_form.set_target(None if own is None else holds)
+        tabs = self.chain_tabs
+        tabs.blockSignals(True)
+        while tabs.count():
+            tabs.removeTab(0)
+        for choreography in chain:
+            tabs.addTab(choreography.name)
+            role = ("Its own" if choreography is own
+                    else "Lead-in" if self.phase == "build" else "Then")  # fmt: skip
+            tabs.setTabToolTip(tabs.count() - 1, f"{role}: {choreography.name}'s settings.")
+        if chain:
+            tabs.setCurrentIndex(chain.index(editing))
+        tabs.blockSignals(False)
+        tabs.setVisible(len(chain) > 1)
+        self._edit(editing)
+
+    def _edit(self, choreography) -> None:
+        """Show this choreography's description and settings (None: the phase is left out)."""
+        self.editing = choreography
+        name = PHASE_NAMES[self.phase].lower()
+        if choreography is not None:
+            self.description.setText(choreography.description)
+        elif self.choreography_box.count() > 1:
+            self.description.setText(f"No {name} phase: choose one to add it.")
+        else:
+            self.description.setText(f"No {name} choreographies yet.")
+        self.form.set_target(choreography)
+        self._show_notes()
+
+    def _on_chain_tab(self, index: int) -> None:
+        chain = self.project.phase_chain(self.phase)
+        if 0 <= index < len(chain):
+            self._edit(chain[index])
 
     def _on_choreography(self) -> None:
         self.project.phase_choices[self.phase] = self.choreography_box.currentData()
@@ -410,9 +414,11 @@ class AnimateStep(StepPage):
         self.session.animation_edited()
 
     def _on_link(self) -> None:
+        """A lead-in (or follow-up) chosen: its settings show, to set it up; None: the
+        phase's own again."""
         chosen = self.link_box.currentData()
         self.project.phase_links[self.phase] = [] if chosen is None else [chosen]
-        self._show_link()
+        self._show_chain(None if chosen is None else self.project.choreographies[chosen])
         self.session.animation_edited()
 
     def _on_animation_changed(self) -> None:
@@ -420,7 +426,6 @@ class AnimateStep(StepPage):
         self.video_form.refresh()
         self.look_form.refresh()
         self.holds_form.refresh()
-        self.link_form.refresh()
         self._apply_look()
         self._replan()
         self._sync_transport()
@@ -452,12 +457,12 @@ class AnimateStep(StepPage):
         """Under the settings, what they came to in the plan (Timeline.notes)."""
         timeline = self.player.timeline
         part = None if timeline is None else timeline.parts.get(self.phase)
-        notes, link_notes = () if part is None else part.notes, ()
-        if isinstance(part, ChainTimeline):  # its own, and the link chained to it
-            own, link = (-1, 0) if self.phase == "build" else (0, -1)
-            notes, link_notes = part.links[own].notes, part.links[link].notes
+        notes = () if part is None else part.notes
+        if isinstance(part, ChainTimeline):  # the notes of the link being edited
+            chain = self.project.phase_chain(self.phase)
+            k = chain.index(self.editing) if self.editing in chain else -1
+            notes = part.links[k].notes if 0 <= k < len(part.links) else ()
         self.form.set_notes((n.setting, n.text, n.warning) for n in notes)
-        self.link_form.set_notes((n.setting, n.text, n.warning) for n in link_notes)
 
     def _sync_transport(self) -> None:
         """Frame steps match the export's frames; controls follow whether there's a timeline;
