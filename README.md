@@ -7,7 +7,7 @@ A photo mosaic generator with an animated graphical interface.
 - **numpy** and **Pillow** handle image processing and mosaic algorithms (`skitter.core`). **pillow-heif** adds HEIC / HEIF photos (iPhone); readable types are listed in `core/imaging.py` (`IMAGE_EXTENSIONS`)
 - **PySide6 (Qt 6)** provides the application shell: windows, menus, panels, dialogs (`skitter.ui`)
 - **moderngl** drives the canvas. It needs OpenGL 3.3 or newer. All tiles in a layer draw in a single instanced call (`skitter.ui.render`)
-- **PyAV** (FFmpeg) encodes animation videos (`core/animation/encode.py`). Note: its bundled x264/x265, like pillow-heif's x265, are GPL; distributing Skitter with them means GPLv3
+- **PyAV** (FFmpeg) encodes animation videos (`core/animation/encode.py`). Note: its bundled x264/x265, like pillow-heif's x265, are GPL; distributing Skitter with them means GPLv3 (see License)
 - **faiss-cpu** (nearest-neighbor search), **numba** (inner loops) and **scipy** (blurs) power tile matching (`skitter.core.tiles`, `skitter.core.matching`)
 
 `skitter.core` must not import Qt. That keeps the algorithms testable without a display and lets them run from scripts.
@@ -378,3 +378,7 @@ pyinstaller skitter.spec
 ```
 
 This makes `dist/Skitter/`, a folder that runs without Python installed (`dist/Skitter/Skitter.exe`). Build on each platform for that platform; PyInstaller doesn't cross-compile. The entry point (`skitter/__main__.py`) calls `multiprocessing.freeze_support()` first: tile reading and rendering use worker processes, which in a frozen build start the executable again.
+
+## License
+
+Skitter is released under the GNU General Public License, version 3 or later (`LICENSE`). The wheels of PyAV and pillow-heif bundle GPL code (x264, x265), and PySide6 is used under the GPL, so a program distributed with them has to be GPL as well. `THIRD_PARTY_NOTICES.md` lists every dependency and its license; `skitter.spec` copies both files into `dist/Skitter/`.

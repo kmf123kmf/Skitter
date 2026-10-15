@@ -7,12 +7,18 @@
 
 from pathlib import Path
 
-src = Path(SPECPATH) / "src"
+root = Path(SPECPATH)
+src = root / "src"
 
 a = Analysis(
     [str(src / "skitter" / "__main__.py")],
     pathex=[str(src)],
-    datas=[(str(src / "skitter" / "resources"), "skitter/resources")],
+    datas=[
+        (str(src / "skitter" / "resources"), "skitter/resources"),
+        # The GPL text and notices travel with every build.
+        (str(root / "LICENSE"), "."),
+        (str(root / "THIRD_PARTY_NOTICES.md"), "."),
+    ],
     # pkg_resources isn't used, and older setuptools' copy fails at startup when frozen.
     excludes=["pkg_resources"],
 )
