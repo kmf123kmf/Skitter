@@ -937,6 +937,11 @@ def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):
     window.session.animation_edited()
     assert "Limited" in animate.form.note("lift")
     assert overflowing_panels(window, qapp) == []
+    animate.choreography_box.setCurrentIndex(animate.choreography_box.findData("drain"))
+    animate.project.phase_choreography("clear").update(core=50.0, spin_up=10.0)
+    window.session.animation_edited()
+    assert animate.form.note("core") and animate.form.note("spin_up")
+    assert overflowing_panels(window, qapp) == []
     animate.show_phase("build")  # builds with long settings
     for build in ("sort", "unscramble"):
         animate.choreography_box.setCurrentIndex(animate.choreography_box.findData(build))

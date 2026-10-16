@@ -8,8 +8,17 @@ from test_animation import grid_scene, pile_scene
 from test_show import tiled_scene
 
 from skitter.core.animation.base import TileFrame
-from skitter.core.animation.clear import BOB, PEEL, BlowAwayChoreography, _blown_time, half_extent
-from skitter.core.animation.compass import COMPASS, heading
+from skitter.core.animation.clear import (
+    BOB,
+    PEEL,
+    BlowAwayChoreography,
+    DrainChoreography,
+    _blown_time,
+    half_extent,
+    spin_up_clock,
+    spin_up_time,
+)
+from skitter.core.animation.compass import COMPASS, clock_angle, heading
 from skitter.core.animation.look import AnimationLook, TableCamera
 
 
@@ -224,3 +233,138 @@ def test_a_longer_duration_blows_more_gently():
     slow = BlowAwayChoreography(duration=8.0).timeline(scene)
     assert slow.wind < quick.wind
     assert any(n.setting == "duration" for n in quick.notes)
+
+
+# Drain
+
+
+def test_spin_up_time_inverts_the_clock():
+    for tau in (0.0, 0.5, 3.0):
+        for t in (0.01, 0.7, 5.0):
+            assert spin_up_time(float(spin_up_clock(t, tau)), tau) == pytest.approx(t, abs=1e-9)
+
+
+@pytest.mark.parametrize("scene", [grid_scene(), pile_scene()], ids=["grid", "pile"])
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {},
+        {"spin_up": 0.0, "falloff": 0.0, "turbulence": 100.0},
+        {"falloff": 3.0, "center_x": 0.0, "center_y": 100.0},
+    ],
+)
+def test_drain_starts_at_the_mosaic_and_is_gone_exactly_at_the_duration(scene, settings):
+    timeline = DrainChoreography(duration=5.0, **settings).timeline(scene)
+    assert timeline.duration == 5.0
+    assert same(timeline.frame(0.0), TileFrame.final(scene))
+    last = (timeline.u0 / timeline.rate).max()  # the flow's time when the last tile goes
+    assert last == pytest.approx(spin_up_clock(5.0, timeline.tau))
+    assert (timeline.frame(4.99).alpha > 0).any()
+    assert (timeline.frame(5.0).alpha == 0).all()
+
+
+def test_drain_turns_the_farthest_tile_exactly_and_either_way():
+    scene = tiled_scene()
+    clockwise = DrainChoreography(turns=2.0, turbulence=0.0).timeline(scene)
+    circled = clockwise.angle(np.zeros(len(scene)))
+    assert circled.max() == pytest.approx(2.0 * math.tau)
+    assert (circled >= 0).all() and circled.argmax() == clockwise.u0.argmax()
+    counter = DrainChoreography(turns=2.0, turbulence=0.0, swirl="counter").timeline(scene)
+    assert np.allclose(counter.angle(np.zeros(len(scene))), -circled)
+    # Clockwise on the picture: each tile's clock angle about the drain grows at first.
+    frame = clockwise.frame(0.3)
+    outside = np.hypot(*(frame.center - clockwise.drain).T) > 4.0 * scene.tile_size[0]
+    before, after = (clock_angle(f.center[outside] - clockwise.drain)
+                     for f in (TileFrame.final(scene), frame))  # fmt: skip
+    turned = (after - before) % math.tau
+    assert outside.sum() > len(scene) / 2 and ((turned > 0) & (turned < math.pi)).all()
+
+
+def test_drain_tiles_only_head_inward_without_turbulence():
+    scene = tiled_scene()
+    timeline = DrainChoreography(turbulence=0.0).timeline(scene)
+    last = np.hypot(*(scene.center - timeline.drain).T)
+    for t in np.linspace(0.05, timeline.duration, 40):
+        frame = timeline.frame(t)
+        distance = np.hypot(*(frame.center - timeline.drain).T)
+        shown = frame.alpha > 0
+        assert (distance[shown] <= last[shown] + 1e-9).all()
+        last = distance
+
+
+def test_drain_tiles_sink_only_in_the_core():
+    scene = tiled_scene()
+    tile = scene.tile_size[0]
+    timeline = DrainChoreography(turbulence=0.0, core=3.0, shrink=80.0, darken=50.0,
+                                 fade=40.0).timeline(scene)  # fmt: skip
+    for t in (0.5, 1.5, 3.0):
+        frame = timeline.frame(t)
+        distance = np.hypot(*(frame.center - timeline.drain).T)
+        shown = frame.alpha > 0
+        outside = shown & (distance >= 3.0 * tile)
+        assert np.allclose(frame.size[outside], scene.size[outside])
+        assert np.allclose(frame.tint[outside, 3], 0.0) and np.allclose(frame.alpha[outside], 1)
+        sinking = shown & (distance < 2.0 * tile)
+        assert sinking.any()
+        assert (frame.size[sinking, 0] < scene.size[sinking, 0]).all()
+        assert (frame.tint[sinking, 3] > 0).all() and (frame.alpha[sinking] < 1).all()
+        # Sinking tiles draw under the rest (a grid has no piles to keep in order).
+        rank = np.empty(len(scene), np.int64)
+        rank[frame.draw_order()] = np.arange(len(scene))
+        assert rank[sinking].max() < rank[outside].min()
+
+
+def test_drain_spin_carries_tiles_round_or_keeps_their_heading():
+    scene = tiled_scene()
+    carried = DrainChoreography(turbulence=0.0, spin=100.0).timeline(scene)
+    frame = carried.frame(1.0)
+    u = carried.u0 - carried.rate * float(spin_up_clock(1.0, carried.tau))
+    shown = frame.alpha > 0
+    turned = carried.angle(np.maximum(u, 0.0))
+    assert np.allclose((frame.rotation - scene.rotation)[shown], turned[shown])
+    still = DrainChoreography(turbulence=0.0, spin=0.0).timeline(scene)
+    assert np.allclose(still.frame(1.0).rotation, scene.rotation)
+
+
+def test_drain_falloff_paces_the_middle_against_the_edges():
+    scene = tiled_scene()
+
+    def gone_halfway(falloff):
+        timeline = DrainChoreography(falloff=falloff, turbulence=0.0, spin_up=0.0).timeline(scene)
+        return np.count_nonzero(timeline.frame(timeline.duration / 2).alpha == 0)
+
+    assert gone_halfway(0.0) < gone_halfway(1.0) < gone_halfway(2.5)
+
+
+def test_drain_spin_up_eases_the_start():
+    scene = tiled_scene()
+    eased = DrainChoreography(spin_up=2.0, turbulence=0.0).timeline(scene)
+    sudden = DrainChoreography(spin_up=0.0, turbulence=0.0).timeline(scene)
+
+    def moved(timeline, t):
+        return np.abs(timeline.frame(t).center - scene.center).max()
+
+    assert moved(eased, 0.1) < 0.2 * moved(sudden, 0.1)
+    assert not any(n.setting == "spin_up" for n in eased.notes)
+    slow = DrainChoreography(spin_up=4.0, duration=5.0).timeline(scene)
+    assert any(n.setting == "spin_up" for n in slow.notes)
+
+
+def test_drain_notes_and_a_core_past_every_tile():
+    scene = tiled_scene()
+    timeline = DrainChoreography().timeline(scene)
+    assert {n.setting for n in timeline.notes} == {"duration", "turns"}
+    wide = DrainChoreography(core=50.0).timeline(scene)
+    assert any(n.setting == "core" and not n.warning for n in wide.notes)
+    frame = wide.frame(0.5)
+    assert (frame.size[frame.alpha > 0, 0] < scene.size[frame.alpha > 0, 0]).all()
+
+
+def test_drain_same_seed_same_flow_and_settings_round_trip():
+    scene = pile_scene()
+    a = DrainChoreography(seed=4).timeline(scene)
+    b = DrainChoreography(seed=4).timeline(scene)
+    assert same(a.frame(1.7), b.frame(1.7))
+    assert not same(a.frame(1.7), DrainChoreography(seed=5).timeline(scene).frame(1.7))
+    choreography = DrainChoreography(swirl="counter", center_x=20.0, falloff=2.0, spin=150.0)
+    assert DrainChoreography.from_values(choreography.values()).values() == choreography.values()

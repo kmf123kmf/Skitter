@@ -35,6 +35,28 @@ frames are exact at any time:
   (perspective), so the table-plane distance decides. The wind blows
   exactly as hard as it takes for the last tile to be gone at the
   duration.
+
+Drain: the tiles swirl down a plughole (a bathtub vortex), also closed form,
+each frame O(N):
+
+- Inflow: a tile's distance r from the drain shrinks as u = r^(p+1) falls
+  steadily, u = u0 - c s (the pull ~ 1/r^p; p is Falloff, 1 a plughole).
+  Each tile is gone when u reaches 0, so the duration gives c directly (no
+  search). s is a spin-up clock, t - T (1 - e^(-t/T)): the water starts
+  still. Turbulence gives each tile its own c (slipping past its
+  neighbours) and a wobble that grows as it nears the drain.
+- Swirl: every path is the same logarithmic spiral (angle ~ ln r), as water
+  circles a plughole faster the nearer it gets; Turns sets how often the
+  farthest tile circles. Inside the core the swirl turns steadily instead
+  (angle ~ u, meeting the spiral smoothly at the core's edge), so tiles
+  near the drain don't whirl faster than a video can show.
+- Sinking: inside the core (a tile starting in it: from where it starts) a
+  tile shrinks, darkens and fades toward the drain, gone there. Tiles turn
+  with the swirl (Spin: 100% carried round, 0% keeping their heading).
+- The flow keeps areas (it only shears), so the picture twists into a
+  spiral as it goes, its rows breaking into staircases of rigid tiles. Sinking tiles draw under the
+  others, the deepest lowest, except that a tile never draws over one lying
+  on it in a pile (`_sink_depths`).
 """
 
 import math
@@ -56,7 +78,13 @@ from skitter.core.animation.look import AnimationLook, scene_extent
 from skitter.core.animation.show import HEIGHT_LIMIT
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing.common import seed_param
-from skitter.core.slicing.params import FloatParam, RangeParam, TileSizeParam
+from skitter.core.slicing.params import (
+    ChoiceParam,
+    FloatParam,
+    RangeParam,
+    Section,
+    TileSizeParam,
+)
 
 BOB = 0.25  # gusts move a tile up and down by up to this share of its height (at 100%)
 DRIFT = 2.0  # gusts drift a tile sideways by up to this many base tiles (at 100%)
@@ -367,5 +395,261 @@ class BlowAwayChoreography(Choreography):
             notes.append(Note("lift", f"Limited to {top / tile:.1f} tiles: higher would "
                                       "come too near the camera (Look: Camera height).",
                               True))  # fmt: skip
+        timeline.notes = tuple(notes)
+        return timeline
+
+
+# Drain
+
+WOBBLE = 0.6  # turbulence moves a tile by up to this many base tiles (at 100%)
+WOBBLE_TURN = math.radians(20.0)  # and turns it by up to this much
+RATE_JITTER = 0.3  # each tile's inflow differs by up to this share (at 100%)
+SWIRLS = (("clockwise", "Clockwise"), ("counter", "Counter-clockwise"))
+
+
+@njit(cache=True, nogil=True)
+def _sink_depths(depth, lower, upper):
+    """In place: each tile at least as deep as every tile lying on it (pairs sorted by
+    the lower tile's level, highest first, so each upper tile is final before the tiles
+    under it). Drawing the deepest first then never puts a tile over one lying on it."""
+    for p in range(len(lower)):
+        i, j = lower[p], upper[p]
+        if depth[j] > depth[i]:
+            depth[i] = depth[j]
+
+
+def spin_up_clock(t, tau: float):
+    """The flow's own time after t seconds, spinning up over about tau seconds:
+    t - tau (1 - e^(-t / tau)) (t itself with no spin-up)."""
+    if tau <= 0.0:
+        return t
+    return t + tau * np.expm1(-np.asarray(t, np.float64) / tau)
+
+
+def spin_up_time(s: float, tau: float) -> float:
+    """The seconds until the flow's own time reaches s (spin_up_clock inverted)."""
+    if tau <= 0.0 or s <= 0.0:
+        return max(s, 0.0)
+    lo, hi = s, s + tau  # the clock lags t by less than tau
+    for _ in range(80):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if spin_up_clock(mid, tau) < s else (lo, mid)
+    return hi
+
+
+def spiral_measure(u, u_core: float, power: float) -> np.ndarray:
+    """How far along the spiral u = r^(p+1) lies (a tile's angle grows with the drop in
+    it): ln u outside the core, linear in u inside it (a steady turn), both over p + 1,
+    meeting smoothly at the core's edge."""
+    v = np.asarray(u, np.float64) / u_core
+    inside = v < 1.0
+    return np.where(inside, v - 1.0, np.log(np.where(inside, 1.0, v))) / (power + 1.0)
+
+
+class DrainTimeline(Timeline):
+    """Tiles swirling down a drain (see the module docstring). Distances are shares of
+    `radius` (the farthest tile center's distance from the drain); u = r^(p+1).
+
+    Per tile: start angle theta0 (radians clockwise from the top), u0, inflow rate
+    (u a second of the flow's time), core (where it starts sinking, a share of the
+    radius), and the wobble's waves. swirl: radians per unit of the spiral's measure
+    (signed: clockwise positive); spin: how much of that tiles turn.
+    """
+
+    def __init__(self, scene: MosaicScene, drain, radius: float, power: float, u_core: float,
+                 theta0, u0, rate, core, swirl: float, spin: float, tau: float, looks,
+                 waves, duration: float):  # fmt: skip
+        self.final = TileFrame.final(scene)
+        self.drain = np.asarray(drain, np.float64)
+        self.radius, self.power, self.u_core = float(radius), float(power), float(u_core)
+        self.theta0, self.u0, self.rate, self.core = theta0, u0, rate, core
+        self.swirl, self.spin, self.tau = float(swirl), float(spin), float(tau)
+        self.shrink, self.darken, self.fade = looks
+        self.radial, self.tangent, self.turn = waves  # (amplitude, omega, phase), each (N,)
+        self.g0 = spiral_measure(u0, self.u_core, self.power)
+        self.levels = scene.levels
+        pairs = scene.overlaps
+        pairs = pairs[np.argsort(-self.levels[pairs[:, 0]], kind="stable")]
+        self.lower = np.ascontiguousarray(pairs[:, 0])
+        self.upper = np.ascontiguousarray(pairs[:, 1])
+        self.duration = float(duration)
+
+    def angle(self, u: np.ndarray) -> np.ndarray:
+        """How far each tile has circled at these u, radians (clockwise positive)."""
+        return self.swirl * (self.g0 - spiral_measure(u, self.u_core, self.power))
+
+    @staticmethod
+    def _wave(wave, t):
+        amplitude, omega, phase = wave
+        return amplitude * (np.sin(omega * t + phase) - np.sin(phase))  # 0 at t = 0
+
+    def frame(self, t: float) -> TileFrame:
+        t = min(max(float(t), 0.0), self.duration)
+        if t <= 0.0:
+            return self.final  # exactly, whatever the rounding of the times
+        b = self.final
+        u = self.u0 - self.rate * float(spin_up_clock(t, self.tau))
+        gone = (u <= 0.0) | (t >= self.duration)
+        u = np.maximum(u, 0.0)
+        r = u ** (1.0 / (self.power + 1.0))
+        turned = self.angle(u)
+        theta = self.theta0 + turned
+        outward = np.stack([np.sin(theta), -np.cos(theta)], axis=1)
+        across = np.stack([np.cos(theta), np.sin(theta)], axis=1)  # clockwise
+        # Turbulence grows as a tile nears the drain (none at the start).
+        near = 1.0 - np.divide(u, self.u0, out=np.zeros_like(u), where=self.u0 > 0)
+        center = (self.drain + (self.radius * r + near * self._wave(self.radial, t))[:, None]
+                  * outward + (near * self._wave(self.tangent, t))[:, None] * across)  # fmt: skip
+        rotation = b.rotation + self.spin * turned + near * self._wave(self.turn, t)
+        # Sinking: from the core's edge (or where it started) down to the drain.
+        depth = 1.0 - np.divide(r, self.core, out=np.zeros_like(r), where=self.core > 0)
+        depth = np.where(gone, 1.0, np.clip(depth, 0.0, 1.0))
+        size = b.size * (1.0 - self.shrink * depth)[:, None]
+        tint = b.tint
+        if self.darken > 0:
+            tint = b.tint.copy()  # toward black
+            tint[:, :3] = 0.0
+            tint[:, 3] = self.darken * depth
+        alpha = np.where(gone, 0.0, 1.0 - self.fade * depth)
+        ordering = depth.copy()
+        _sink_depths(ordering, self.lower, self.upper)
+        order = np.lexsort((self.levels, -ordering))  # the deepest first, then as stacked
+        return TileFrame(center=center, size=size, rotation=rotation, alpha=alpha, tint=tint,
+                         order=order)  # fmt: skip
+
+
+@register_choreography
+class DrainChoreography(Choreography):
+    id = "drain"
+    name = "Drain"
+    phase = "clear"
+    fits_any_layout = True
+    description = (
+        "The mosaic swirls down a plughole: tiles circle ever faster toward the drain, the "
+        "picture twisting into a spiral, and sink out of sight."
+    )
+
+    _drain = Section("Drain")
+    center_x = FloatParam(
+        50.0, "Drain X", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
+        help="Where the drain is, across the picture (0: left edge, 100: right edge).",
+    )  # fmt: skip
+    center_y = FloatParam(
+        50.0, "Drain Y", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
+        help="Where the drain is, down the picture (0: top edge, 100: bottom edge).",
+    )  # fmt: skip
+    duration = FloatParam(
+        5.0, "Duration", min=0.5, max=600.0, step=0.5, decimals=1, suffix=" s",
+        help="From the first stir until the farthest tile has gone down the drain.",
+    )  # fmt: skip
+    spin_up = FloatParam(
+        1.0, "Spin-up", min=0.0, max=10.0, step=0.25, decimals=2, suffix=" s",
+        help="How long the water takes to get going: tiles ease into motion over about "
+             "this long (0: the flow starts at full pace).",
+    )  # fmt: skip
+    _swirl = Section("Swirl")
+    swirl = ChoiceParam(
+        "clockwise", "Swirl", choices=SWIRLS,
+        help="Which way the water circles the drain.",
+    )  # fmt: skip
+    turns = FloatParam(
+        1.5, "Turns", min=0.0, max=10.0, step=0.25, decimals=2,
+        help="How many times the farthest tile circles the drain on its way in; nearer "
+             "tiles circle less (0: straight in).",
+    )  # fmt: skip
+    falloff = FloatParam(
+        1.0, "Falloff", min=0.0, max=3.0, step=0.25, decimals=2,
+        help="How much weaker the pull is far from the drain. 0: every tile heads in at "
+             "the same pace, the edges going nearly as soon as the middle; 1: like a "
+             "plughole; higher: the middle goes quickly and the edges linger.",
+    )  # fmt: skip
+    turbulence = FloatParam(
+        25.0, "Turbulence", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
+        help="How unevenly the water flows: tiles slip past their neighbours and wobble, "
+             "more the nearer they get (0: a perfectly smooth spiral).",
+    )  # fmt: skip
+    spin = FloatParam(
+        100.0, "Spin", min=0.0, max=200.0, step=10.0, decimals=0, suffix="%",
+        help="How much tiles turn as they circle. 100: carried round (each keeps facing "
+             "the drain the same way); 0: they keep their heading; more: they spin.",
+    )  # fmt: skip
+    _sinking = Section("Sinking")
+    core = TileSizeParam(
+        4.0, "Core", min=0.25, max=50.0, step=0.5,
+        help="How near the drain tiles start to sink, in base tiles; inside it the swirl "
+             "turns at a steady pace. Larger: a wider, gentler hole.",
+    )  # fmt: skip
+    shrink = FloatParam(
+        85.0, "Shrink", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
+        help="How much smaller tiles get as they sink to the drain, as if going down.",
+    )  # fmt: skip
+    darken = FloatParam(
+        60.0, "Darken", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
+        help="How dark tiles get as they sink to the drain.",
+    )  # fmt: skip
+    fade = FloatParam(
+        30.0, "Fade", min=0.0, max=100.0, step=5.0, decimals=0, suffix="%",
+        help="How see-through tiles get as they sink to the drain (they're gone once "
+             "they reach it either way).",
+    )  # fmt: skip
+    _end = Section()
+    seed = seed_param()
+
+    def timeline(self, scene: MosaicScene, look: AnimationLook | None = None) -> Timeline:
+        rng = np.random.default_rng(self.seed)
+        n, total = len(scene), float(self.duration)
+        tile = scene.tile_size[0]
+        drain = np.asarray(scene.canvas, np.float64) * (self.center_x / 100.0,
+                                                        self.center_y / 100.0)  # fmt: skip
+        offset = scene.center - drain
+        distance = np.hypot(offset[:, 0], offset[:, 1])
+        radius = max(float(distance.max(initial=0.0)), 1e-9)
+        power = float(self.falloff)
+        r0 = distance / radius
+        u0 = r0 ** (power + 1.0)
+        core_share = min(self.core * tile / radius, 1.0)
+        u_core = core_share ** (power + 1.0)
+
+        # The last tile is gone exactly at the duration: u0 / rate = the flow's time then.
+        turbulence = self.turbulence / 100.0
+        jitter = 1.0 + RATE_JITTER * turbulence * rng.uniform(-1.0, 1.0, n)
+        tau = float(self.spin_up)
+        last = float((u0 / jitter).max(initial=0.0)) or 1.0
+        rate = jitter * last / float(spin_up_clock(total, tau))
+
+        # Turns: the farthest tile (u0 = 1) circles that often on its way to the drain.
+        whole = float(spiral_measure(1.0, u_core, power) - spiral_measure(0.0, u_core, power))
+        sign = 1.0 if self.swirl == "clockwise" else -1.0
+        swirl = sign * math.tau * self.turns / whole
+
+        def wave(amplitude, low, high):  # (amplitude, angular frequency, phase), per tile
+            return (amplitude, math.tau * rng.uniform(low, high, n),
+                    rng.uniform(0.0, math.tau, n))  # fmt: skip
+
+        waves = (
+            wave(WOBBLE * turbulence * tile * rng.uniform(0.3, 1.0, n), 0.4, 1.0),
+            wave(WOBBLE * turbulence * tile * rng.uniform(0.3, 1.0, n), 0.3, 0.8),
+            wave(WOBBLE_TURN * turbulence * rng.uniform(0.3, 1.0, n), 0.5, 1.2),
+        )
+        timeline = DrainTimeline(
+            scene, drain, radius, power, u_core, compass.clock_angle(offset), u0, rate,
+            np.minimum(core_share, r0),  # a tile starting inside the core sinks from there
+            swirl, self.spin / 100.0, tau,
+            (self.shrink / 100.0, self.darken / 100.0, self.fade / 100.0), waves, total,
+        )  # fmt: skip
+
+        notes = []
+        if n:
+            half = spin_up_time(float(np.median(u0 / rate)), tau)
+            notes.append(Note("duration", f"Half the tiles are gone after {seconds(half)}."))
+        if self.turns > 0 and n:
+            circled = float(np.median(np.abs(timeline.angle(np.zeros(n))))) / math.tau
+            notes.append(Note("turns", f"Half the tiles circle {circled:.1f} turns or more."))
+        if self.core * tile > radius + 1e-9:
+            notes.append(Note("core", f"Past the farthest tile ({radius / tile:.1f} tiles "
+                                      "out): every tile sinks all the way in."))  # fmt: skip
+        if tau > total / 2:
+            notes.append(Note("spin_up", "Over half the duration: the swirl is still picking "
+                                         "up when the last tiles go."))  # fmt: skip
         timeline.notes = tuple(notes)
         return timeline
