@@ -4,7 +4,7 @@ A photo mosaic generator with an animated graphical interface.
 
 ## Stack
 
-- **numpy** and **Pillow** handle image processing and mosaic algorithms (`skitter.core`). **pillow-heif** adds HEIC / HEIF photos (iPhone); readable types are listed in `core/imaging.py` (`IMAGE_EXTENSIONS`)
+- **numpy** and **Pillow** handle image processing and mosaic algorithms (`skitter.core`). **pillow-heif** adds HEIC / HEIF photos (iPhone) and **pillow-jxl-plugin** JPEG XL; readable types are listed in `core/imaging.py` (`IMAGE_EXTENSIONS`)
 - **PySide6 (Qt 6)** provides the application shell: windows, menus, panels, dialogs (`skitter.ui`)
 - **moderngl** drives the canvas. It needs OpenGL 3.3 or newer. All tiles in a layer draw in a single instanced call (`skitter.ui.render`)
 - **PyAV** (FFmpeg) encodes animation videos (`core/animation/encode.py`). Note: its bundled x264/x265, like pillow-heif's x265, are GPL; distributing Skitter with them means GPLv3 (see License)

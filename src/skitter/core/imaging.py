@@ -9,22 +9,43 @@ the rest lie outside the picture, as if beyond its border.
 
 Every image is read with Pillow. Importing this module (which importing
 skitter.core does, so worker processes get it too) adds decoders Pillow
-lacks: HEIC / HEIF through pillow-heif. HEIF images decode upright, and
-`draft` picks an embedded thumbnail when one is large enough, like JPEG's
-reduced-scale decoding.
+lacks: HEIC / HEIF through pillow-heif, JPEG XL through pillow-jxl-plugin
+(registered on import). HEIF images decode upright, and `draft` picks an
+embedded thumbnail when one is large enough, like JPEG's reduced-scale
+decoding.
+
+IMAGE_EXTENSIONS lists the raster formats that hold pictures. Pillow opens
+more (EPS needs Ghostscript; WMF/EMF are vector and Windows-only; scientific
+and game-texture formats aren't photos), and those are left out.
 """
 
 from pathlib import Path
 
 import numpy as np
 import pillow_heif
+import pillow_jxl  # noqa: F401  (registers the JPEG XL opener)
 from PIL import Image, ImageOps
 from scipy import ndimage
 
 pillow_heif.register_heif_opener()
 
 IMAGE_EXTENSIONS = {
-    ".jpg", ".jpeg", ".png", ".bmp", ".gif", ".tif", ".tiff", ".webp", ".heic", ".heif",
+    ".jpg", ".jpeg", ".jpe", ".jfif",  # JPEG
+    ".png", ".apng",
+    ".gif",
+    ".bmp", ".dib",
+    ".tif", ".tiff",
+    ".webp",
+    ".heic", ".heif", ".hif",  # HEIF (pillow-heif)
+    ".avif",
+    ".jxl",  # JPEG XL (pillow-jxl-plugin)
+    ".jp2", ".j2k", ".j2c", ".jpc", ".jpf", ".jpx",  # JPEG 2000
+    ".psd",  # Photoshop (the flattened image)
+    ".tga",
+    ".qoi",
+    ".ppm", ".pgm", ".pbm", ".pnm",
+    ".pcx",
+    ".sgi", ".rgb", ".rgba", ".bw",
 }  # fmt: skip
 
 
