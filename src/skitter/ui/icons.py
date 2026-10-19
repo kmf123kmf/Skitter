@@ -2,9 +2,12 @@
 
 Each icon is drawn as vectors on a 24x24 grid and rendered at several sizes
 and screen scales, colored from the application palette (normal and
-disabled), so the set looks consistent on any platform and theme.
+disabled), so the set looks consistent on any platform and theme. Each is
+drawn once per palette and shared (every window asks for the same icons).
 """
 
+import atexit
+import functools
 from collections.abc import Callable
 
 from PySide6.QtCore import QPointF, QRectF, Qt
@@ -25,17 +28,44 @@ Draw = Callable[[QPainter, QColor], None]
 
 _SIZES = (16, 20, 24, 32)
 _SCALES = (1.0, 1.25, 1.5, 2.0)
+_MODES = (
+    (QIcon.Mode.Normal, QPalette.ColorGroup.Active),
+    (QIcon.Mode.Disabled, QPalette.ColorGroup.Disabled),
+)
+_drawn: dict[tuple, QIcon] = {}  # by icon and palette colors
+
+
+def _colors() -> tuple[QColor, ...]:
+    palette = QGuiApplication.palette()
+    return tuple(palette.color(group, QPalette.ColorRole.WindowText) for _, group in _MODES)
+
+
+def _forget_drawn() -> None:
+    """Drop the icons while the application still exists (pixmaps need it)."""
+    _drawn.clear()
+
+
+atexit.register(_forget_drawn)
+
+
+def _shared(make: Callable[[], QIcon]) -> Callable[[], QIcon]:
+    """Draw an icon once for each palette it is asked for in."""
+
+    @functools.wraps(make)
+    def icon() -> QIcon:
+        key = (make.__name__, *(c.rgba() for c in _colors()))
+        if key not in _drawn:
+            if not _drawn:
+                QGuiApplication.instance().aboutToQuit.connect(_forget_drawn)
+            _drawn[key] = make()
+        return _drawn[key]
+
+    return icon
 
 
 def _make_icon(draw: Draw) -> QIcon:
     icon = QIcon()
-    palette = QGuiApplication.palette()
-    modes = (
-        (QIcon.Mode.Normal, QPalette.ColorGroup.Active),
-        (QIcon.Mode.Disabled, QPalette.ColorGroup.Disabled),
-    )
-    for mode, group in modes:
-        color = palette.color(group, QPalette.ColorRole.WindowText)
+    for (mode, _), color in zip(_MODES, _colors(), strict=True):
         for size in _SIZES:
             for scale in _SCALES:
                 px = round(size * scale)
@@ -217,101 +247,126 @@ def _viewfinder(p: QPainter, color: QColor) -> None:
 # Public icons
 
 
+@_shared
 def picture() -> QIcon:
     return _make_icon(_picture)
 
 
+@_shared
 def undo() -> QIcon:
     return _make_icon(_undo)
 
 
+@_shared
 def redo() -> QIcon:
     return _make_icon(_mirrored(_undo))
 
 
+@_shared
 def rotate_left() -> QIcon:
     return _make_icon(_rotate_left)
 
 
+@_shared
 def rotate_right() -> QIcon:
     return _make_icon(_mirrored(_rotate_left))
 
 
+@_shared
 def revert() -> QIcon:
     return _make_icon(_revert)
 
 
+@_shared
 def flip_horizontal() -> QIcon:
     return _make_icon(_flip_horizontal)
 
 
+@_shared
 def flip_vertical() -> QIcon:
     return _make_icon(_flip_vertical)
 
 
+@_shared
 def crop() -> QIcon:
     return _make_icon(_crop)
 
 
+@_shared
 def zoom_in() -> QIcon:
     return _make_icon(_zoom_in)
 
 
+@_shared
 def zoom_out() -> QIcon:
     return _make_icon(_zoom_out)
 
 
+@_shared
 def zoom_fit() -> QIcon:
     return _make_icon(_zoom_fit)
 
 
+@_shared
 def zoom_actual() -> QIcon:
     return _make_icon(_zoom_actual)
 
 
+@_shared
 def play() -> QIcon:
     return _make_icon(_play)
 
 
+@_shared
 def pause() -> QIcon:
     return _make_icon(_pause)
 
 
+@_shared
 def to_start() -> QIcon:
     return _make_icon(_to_start)
 
 
+@_shared
 def to_end() -> QIcon:
     return _make_icon(_mirrored(_to_start))
 
 
+@_shared
 def step_back() -> QIcon:
     return _make_icon(_step_back)
 
 
+@_shared
 def step_forward() -> QIcon:
     return _make_icon(_mirrored(_step_back))
 
 
+@_shared
 def loop() -> QIcon:
     return _make_icon(_loop)
 
 
+@_shared
 def add_key() -> QIcon:
     return _make_icon(_add_key)
 
 
+@_shared
 def delete_key() -> QIcon:
     return _make_icon(_delete_key)
 
 
+@_shared
 def previous_key() -> QIcon:
     return _make_icon(_previous_key)
 
 
+@_shared
 def next_key() -> QIcon:
     return _make_icon(_mirrored(_previous_key))
 
 
+@_shared
 def viewfinder() -> QIcon:
     return _make_icon(_viewfinder)

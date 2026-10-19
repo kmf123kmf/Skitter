@@ -27,6 +27,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
+    "pytest-xdist>=3.6",  # parallel tests: pytest -n auto
     "ruff>=0.5",
     "pyinstaller>=6.10",  # standalone builds: skitter.spec
 ]

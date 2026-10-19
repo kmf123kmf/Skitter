@@ -1172,6 +1172,80 @@ def test_double_click_edits_a_tile(sliced, photos, qapp):
     assert step.session.can_undo_pick
 
 
+def test_right_click_shows_a_tiles_photo_file(sliced, photos, qapp, monkeypatch):
+    import os
+    from types import SimpleNamespace
+
+    from PySide6.QtGui import QContextMenuEvent
+
+    from skitter.ui import reveal
+    from skitter.ui.steps import edit_mode
+
+    shown = []
+    monkeypatch.setattr(reveal, "reveal", shown.append)
+    window = sliced
+    step = matched(window, photos, qapp)
+    result, library = step.session.project.matches, step.session.library
+
+    # A tile of the mosaic: its photo, in any view showing tiles.
+    x, y = map(float, result.regions.center[3])
+    path = library.paths([result.tile[3]])[0]
+    assert step.tile_path_at(x, y) == path
+    assert step.tile_path_at(-5000.0, -5000.0) is None
+    step.display_mode.setCurrentIndex(step.display_mode.findData("source"))
+    assert step.tile_path_at(x, y) is None
+    step.display_mode.setCurrentIndex(0)
+    menu = reveal.file_menu(step, path)
+    (action,) = menu.actions()
+    assert action.text() == reveal.REVEAL_TEXT and action.isEnabled()
+    action.trigger()
+    assert shown == [path]
+
+    # A candidate in the picker: the grid passes on right-clicks over a cell.
+    step.edit.set_editing(True)
+    click_region(step, 3)
+    grid = step.edit.picker.grid
+    grid.resize(280, grid.height())
+    grid._fit_height()
+    other = next(i for i, item in enumerate(grid.items) if not item.current)
+    slot = result.candidates.crops(3, [step.edit._refs[other]])[0][0]
+    assert step.edit.candidate_path(other) == library.paths([slot])[0]
+    assert step.edit.candidate_path(len(grid.items)) is None
+    menus = []  # the files menus were asked for (a real menu would wait for a click)
+
+    def fake_menu(parent, p):
+        menus.append(p)
+        return SimpleNamespace(exec=lambda _: None)
+
+    monkeypatch.setattr(edit_mode, "file_menu", fake_menu)
+    pos = grid._cell(other).center().toPoint()
+    grid.contextMenuEvent(QContextMenuEvent(QContextMenuEvent.Reason.Mouse, pos,
+                                            grid.mapToGlobal(pos)))  # fmt: skip
+    assert menus == [library.paths([slot])[0]]
+
+    # A photo that's gone can't be shown.
+    os.remove(path)
+    (action,) = reveal.file_menu(step, path).actions()
+    assert not action.isEnabled() and "not found" in action.text()
+
+
+def test_reveal_selects_the_file_in_the_file_manager(monkeypatch, tmp_path):
+    import os
+    import sys
+
+    from skitter.ui import reveal
+
+    calls = []
+    monkeypatch.setattr(reveal.subprocess, "Popen", calls.append)
+    path = str(tmp_path / "a b" / "t1.png")
+    monkeypatch.setattr(sys, "platform", "win32")
+    reveal.reveal(path)
+    monkeypatch.setattr(sys, "platform", "darwin")
+    reveal.reveal(path)
+    assert calls == [f'explorer /select,"{os.path.normpath(path)}"',
+                     ["open", "-R", os.path.normpath(path)]]  # fmt: skip
+
+
 def test_matching_again_asks_whether_to_keep_picks(sliced, photos, qapp):
     window = sliced
     step = matched(window, photos, qapp)

@@ -12,7 +12,8 @@ applies to the finished mosaic at once, without matching again.
 Edit mode picks tiles by hand (core/matching/edit.py): click a tile, then
 choose from its remembered candidates in the side panel. Hovering a
 candidate previews it in place; picks can be undone, reverted, and kept
-when matching again.
+when matching again. Right-clicking a tile (or a candidate) offers to show
+its photo file in the file manager.
 """
 
 import numpy as np
@@ -34,6 +35,7 @@ from skitter.ui.render.heat import heat_colors
 from skitter.ui.render.match_preview import PreviewBuilder, PreviewFrame
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import TileTextures
+from skitter.ui.reveal import file_menu
 from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.steps.edit_mode import EditMode
 from skitter.ui.steps.tile_picker import (
@@ -112,6 +114,8 @@ class MatchingStep(StepPage):
         canvas.clicked.connect(self.edit.on_click)
         self.viewer.double_click_zooms = False  # double-click edits the tile instead
         canvas.double_clicked.connect(self.edit.on_double_click)
+        canvas.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        canvas.customContextMenuRequested.connect(self._tile_menu)
         self._refresh()
         self._refresh_export()
 
@@ -593,6 +597,25 @@ class MatchingStep(StepPage):
         details = f"ΔE {error:.1f}{mirrored}{picked}"
         self._hover.setText(elide(self._hover, full) + "\n" + details)
         self._hover.setToolTip(full)
+
+    def tile_path_at(self, x: float, y: float) -> str | None:
+        """The photo file of the tile shown at a point (None: no tile there, or it shows
+        the picture itself)."""
+        scene, library = self._shown, self.session.library
+        if scene is None or library is None or scene.picture or self.source_view:
+            return None
+        result = scene.result
+        index = result.regions.hit_test(x, y)
+        if index < 0 or result.tile[index] < 0:
+            return None
+        return library.paths([result.tile[index]])[0]
+
+    def _tile_menu(self, pos) -> None:
+        canvas = self.viewer.canvas
+        x, y = canvas.camera.screen_to_world(pos.x(), pos.y())
+        path = self.tile_path_at(float(x), float(y))
+        if path is not None:
+            file_menu(self, path).exec(canvas.mapToGlobal(pos))
 
     # The run in progress
 

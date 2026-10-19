@@ -5,12 +5,13 @@ and badges: the tile shown now (accent frame), the matcher's own choice
 (star), and a warning when picking it would break a reuse rule. Hovering a
 cell, or moving to it with the arrow keys, asks for a preview (`hovered`);
 a click, Enter or Space picks it (`activated`); a double-click picks it
-and finishes (`finished`). Escape is passed on (`escaped`).
+and finishes (`finished`). Escape is passed on (`escaped`), and so is a
+right-click on a cell (`context_requested`).
 """
 
 from dataclasses import dataclass
 
-from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QSizePolicy, QToolTip, QWidget
 
@@ -36,6 +37,7 @@ class CandidateGrid(QWidget):
     activated = Signal(int)
     finished = Signal(int)  # double-clicked: pick it and be done
     escaped = Signal()
+    context_requested = Signal(int, QPoint)  # right-clicked candidate, global position
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -199,6 +201,11 @@ class CandidateGrid(QWidget):
             index = self.index_at(event.position())
             if index >= 0:
                 self.finished.emit(index)
+
+    def contextMenuEvent(self, event) -> None:
+        index = self.index_at(QPointF(event.pos()))
+        if index >= 0:
+            self.context_requested.emit(index, event.globalPos())
 
     def event(self, event) -> bool:
         if event.type() == event.Type.ToolTip:

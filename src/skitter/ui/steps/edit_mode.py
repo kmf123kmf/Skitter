@@ -2,8 +2,9 @@
 
 Click a tile (or double-click it, from outside edit mode), then choose
 another photo for it from its remembered candidates in the side panel.
-Hovering a candidate previews it in place; picks can be undone, reverted,
-and kept when matching again (core/matching/edit.py does the picking).
+Hovering a candidate previews it in place; right-clicking it offers to
+show its photo file. Picks can be undone, reverted, and kept when matching
+again (core/matching/edit.py does the picking).
 
 `EditMode` owns the picker panel (tile_picker.py), its shortcuts and the
 selection. It shows the mosaic the tab draws (its `scene_shown`,
@@ -20,6 +21,7 @@ from skitter.core.assembly import TileFiles
 from skitter.core.matching import edit as picks
 from skitter.ui.actions import make_action
 from skitter.ui.render.sprites import make_instances
+from skitter.ui.reveal import file_menu
 from skitter.ui.steps.tile_picker import (
     CropReader,
     TilePicker,
@@ -53,6 +55,7 @@ class EditMode(QObject):
         self.editing = False
         self.selected = -1  # region being edited (-1: none)
         self._refs = np.zeros(0, np.int64)  # the picker's candidates
+        self._slots = np.zeros(0, np.int64)  # each one's library photo
         self._crops: list[np.ndarray] = []  # each one's crop, untinted and unmirrored
         self._crop_of: dict[int, np.ndarray] = {}  # the same by candidate
         self._image_of: dict[int, QImage] = {}  # each one's crop as shown (tinted, mirrored)
@@ -125,6 +128,7 @@ class EditMode(QObject):
         picker.grid.activated.connect(self.pick)
         picker.grid.finished.connect(self.pick_and_finish)
         picker.grid.escaped.connect(self.escape)
+        picker.grid.context_requested.connect(self._candidate_menu)
         picker.show_selection(False)
         return picker
 
@@ -293,6 +297,7 @@ class EditMode(QObject):
                 warning=" ".join(warning), tooltip="<br>".join(lines),
             ))  # fmt: skip
         self._refs, self._crops, self._shifts, self._mirrored = refs, crops, shifts, mirrored
+        self._slots = slots
         self._crop_of = {int(ref): crop for ref, crop in zip(refs, crops, strict=True)}
         self.picker.grid.set_items(items, aspect)
         unread = [i for i, ref in enumerate(refs) if int(ref) not in self._read]
@@ -307,6 +312,17 @@ class EditMode(QObject):
             ])  # fmt: skip
         self.picker.more_button.setEnabled(True)
         self._show_info()
+
+    def candidate_path(self, index: int) -> str | None:
+        """The photo file of the picker's candidate `index` (None: no such candidate)."""
+        if self.selected < 0 or not 0 <= index < len(self._slots):
+            return None
+        return self.session.library.paths([int(self._slots[index])])[0]
+
+    def _candidate_menu(self, index: int, pos) -> None:
+        path = self.candidate_path(index)
+        if path is not None:
+            file_menu(self.picker, path).exec(pos)
 
     def _on_crop(self, token, index: int, rgb: np.ndarray, shown: np.ndarray) -> None:
         if self.selected < 0 or token != (self.selected, self._refs.tobytes()):

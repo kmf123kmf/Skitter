@@ -647,6 +647,9 @@ class TilesStep(StepPage):
 
     def _colors_job_stopped(self) -> None:
         self._colors_job = None
+        library = self.session.library
+        if library is not None and library.closed:
+            return  # shut down: its stop arrived after the library closed
         if self.session.busy != "library":
             self._analyze()  # the library may have changed while it ran
             self._show()

@@ -5,7 +5,7 @@
 - PowerShell: run tools from the venv directly, e.g. `.venv\Scripts\python.exe -m pytest -q`.
 
 ## Verify
-- `.venv\Scripts\python.exe -m pytest -q` (headless; Qt runs offscreen; about 15 s)
+- `.venv\Scripts\python.exe -m pytest -q -n 8` (headless; Qt runs offscreen; in parallel with pytest-xdist, about 35 s; about 85 s without `-n`). Tests run in separate worker processes, so each must set up its own state (no reliance on test order).
 - `.venv\Scripts\ruff.exe check .` and `.venv\Scripts\ruff.exe format --check .`
 - Matching at scale: `.venv\Scripts\python.exe scripts\bench_matching.py`
 
