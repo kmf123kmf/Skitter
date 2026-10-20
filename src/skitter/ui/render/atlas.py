@@ -38,10 +38,10 @@ class Atlas:
         size = self.size[i].astype(np.float64)
         origin = self.origin[i] + rects[:, :2] * size
         span = (rects[:, 2:] - rects[:, :2]) * size
-        return self.page[i].astype(np.float32), _uv(origin, span, PAGE, mirrored)
+        return self.page[i].astype(np.float32), texel_uv(origin, span, PAGE, mirrored)
 
 
-def _uv(origin, size, page_size, mirrored=None) -> np.ndarray:
+def texel_uv(origin, size, page_size, mirrored=None) -> np.ndarray:
     """(u0, v0, u1, v1) of texel rects, half a texel inside so filtering stays in."""
     x0, y0 = origin[:, 0], origin[:, 1]
     x1, y1 = x0 + size[:, 0], y0 + size[:, 1]
@@ -66,7 +66,9 @@ class PackedAtlas:
     def locate(self, index, mirrored=None) -> tuple[np.ndarray, np.ndarray]:
         """Texture layer and (u0, v0, u1, v1) of the given images; mirrored swaps u0 and u1."""
         i = np.asarray(index, dtype=np.int64)
-        uv = _uv(self.origin[i].astype(np.float64), self.size[i], self.pages.shape[1], mirrored)
+        uv = texel_uv(
+            self.origin[i].astype(np.float64), self.size[i], self.pages.shape[1], mirrored
+        )
         return self.page[i].astype(np.float32), uv
 
 
@@ -191,7 +193,7 @@ class GrowingAtlas:
                            self.cell).astype(np.float64)  # fmt: skip
         rects = np.asarray(rects, dtype=np.float64)
         origin = corner + rects[:, :2] * size
-        return page.astype(np.float32), _uv(origin, (rects[:, 2:] - rects[:, :2]) * size,
+        return page.astype(np.float32), texel_uv(origin, (rects[:, 2:] - rects[:, :2]) * size,
                                             PAGE, mirrored)  # fmt: skip
 
     def _place(self, cell: int) -> tuple[int, int, int]:

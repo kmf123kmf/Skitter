@@ -75,6 +75,13 @@ class SpriteLayer:
     picture: (H, W, 4) uint8 image that sprites with a `blend` mix in, at their
     `picture_uv` (the source picture, for blended tiles); None: no blending.
     It may be replaced at any time.
+
+    detail_pages: a second stack of that many RGB pages, detail_side texels
+    square, that sprites whose layer is len(textures) or more show (page layer -
+    len(textures)). It is written a piece at a time (`write_detail`; the GPU
+    memory is taken at the first); unlike `textures` it has no mipmaps, so
+    rewriting a piece costs only its own upload. Views fill it at about one texel per screen pixel
+    (ui/render/zoom_detail.py).
     """
 
     def __init__(
@@ -90,6 +97,8 @@ class SpriteLayer:
         texture_size: tuple[float, float] = (1.0, 1.0),
         texture_from: "SpriteLayer | None" = None,
         picture: np.ndarray | None = None,
+        detail_pages: int = 0,
+        detail_side: int = 4096,
     ):
         if textures is None:
             textures = np.full((1, 1, 1, 4), 255, dtype=np.uint8)
@@ -109,6 +118,14 @@ class SpriteLayer:
         self.visible = True
         self.dirty = True
         self.patches: list[tuple[int, int, int, int, int]] = []  # texels to upload again
+        self.detail_pages = detail_pages
+        self.detail_side = detail_side
+        self.detail_writes: list[tuple[int, int, int, np.ndarray]] = []  # to upload
+
+    @property
+    def first_detail(self) -> int:
+        """The layer index of the first detail page."""
+        return len(self.textures)
 
     def mark_dirty(self) -> None:
         """Flag the instance array for upload on the next frame."""
@@ -127,6 +144,11 @@ class SpriteLayer:
                 ]
             self.patches.append((int(page), int(x), int(y), int(w), int(h)))
 
+    def write_detail(self, page: int, x: int, y: int, image: np.ndarray) -> None:
+        """Write an (h, w, 3) uint8 image at texel (x, y) of detail page `page` on the next
+        frame (sprites showing it should start then too: they are drawn after it)."""
+        self.detail_writes.append((int(page), int(x), int(y), image))
+
 
 def _load_shader(name: str) -> str:
     return files("skitter").joinpath(f"resources/shaders/{name}").read_text()
@@ -143,6 +165,8 @@ class _GpuLayer:
         self.texture.build_mipmaps()
         self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
         self.texture.anisotropy = 8.0
+        self.pages = count
+        self.detail: moderngl.TextureArray | None = None  # made when first written
         self.nearest_mag = False
         self.picture: moderngl.Texture | None = None
         self.picture_source: np.ndarray | None = None  # the array `picture` holds
@@ -174,6 +198,18 @@ class _GpuLayer:
             self.texture.write(data.tobytes(), viewport=(x, y, page, w, h, 1))
         self.texture.build_mipmaps()
 
+    def write_detail(self, layer: SpriteLayer) -> None:
+        if self.detail is None:
+            side = layer.detail_side
+            self.detail = self.ctx.texture_array((side, side, layer.detail_pages), 3)
+            self.detail.repeat_x = self.detail.repeat_y = False
+            mag = moderngl.NEAREST if self.nearest_mag else moderngl.LINEAR
+            self.detail.filter = (moderngl.LINEAR, mag)
+        for page, x, y, image in layer.detail_writes:
+            h, w = image.shape[:2]
+            data = np.ascontiguousarray(image, dtype=np.uint8)
+            self.detail.write(data.tobytes(), viewport=(x, y, page, w, h, 1))
+
     def sync_picture(self, picture: np.ndarray | None) -> moderngl.Texture | None:
         """The layer's picture on the GPU (uploaded again when replaced)."""
         if picture is not self.picture_source:
@@ -194,6 +230,8 @@ class _GpuLayer:
         if nearest != self.nearest_mag:
             mag = moderngl.NEAREST if nearest else moderngl.LINEAR
             self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, mag)
+            if self.detail is not None:
+                self.detail.filter = (moderngl.LINEAR, mag)
             self.nearest_mag = nearest
 
     def render(self, count: int, texture: moderngl.TextureArray) -> None:
@@ -210,6 +248,8 @@ class _GpuLayer:
     def release(self) -> None:
         self._release_buffers()
         self.texture.release()
+        if self.detail is not None:
+            self.detail.release()
         self.sync_picture(None)
 
 
@@ -227,7 +267,9 @@ class SpriteRenderer:
         )
         self.program["u_textures"] = 0
         self.program["u_picture"] = 1
+        self.program["u_detail"] = 2
         self._no_picture = ctx.texture((1, 1), 4, bytes(4))  # bound when a layer has none
+        self._no_detail = ctx.texture_array((1, 1, 1), 3, bytes(3))
         corners = np.array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5], dtype="f4")
         self.quad = ctx.buffer(corners.tobytes())
         self._layers: dict[SpriteLayer, _GpuLayer] = {}
@@ -249,6 +291,9 @@ class SpriteRenderer:
         if layer.patches:
             gpu.write_patches(layer.textures, layer.patches)
             layer.patches.clear()
+        if layer.detail_writes and layer.detail_pages:
+            gpu.write_detail(layer)
+            layer.detail_writes.clear()
         if layer.dirty:
             gpu.write_instances(layer.instances)
             layer.dirty = False
@@ -260,6 +305,7 @@ class SpriteRenderer:
             picture = layer.texture_from.picture
         texture_gpu.set_nearest_mag(nearest_mag)
         (texture_gpu.sync_picture(picture) or self._no_picture).use(1)
+        (texture_gpu.detail or self._no_detail).use(2)
 
         program = self.program
         program["u_outline_px"] = float(layer.outline_px)
@@ -269,6 +315,7 @@ class SpriteRenderer:
         program["u_project"] = int(layer.project_texture)
         program["u_texture_size"] = tuple(float(v) for v in layer.texture_size)
         program["u_linear"] = int(self.linear_output)
+        program["u_detail_from"] = -1.0 if texture_gpu.detail is None else float(texture_gpu.pages)
         gpu.render(len(layer.instances), texture_gpu.texture)
 
     def release(self, layer: SpriteLayer) -> None:

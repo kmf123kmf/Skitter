@@ -2,6 +2,8 @@
 
 uniform sampler2DArray u_textures;
 uniform sampler2D u_picture;  // what sprites with a blend mix in (blended tiles: the picture)
+uniform sampler2DArray u_detail;  // a second stack: layers from u_detail_from on (zoom detail)
+uniform float u_detail_from;      // first layer index in u_detail; negative: none
 uniform float u_zoom;
 
 // Outline mode (u_outline_px > 0) draws each sprite as a region marker: a
@@ -102,7 +104,10 @@ void main() {
                     band(inside_px, u_outline_px + u_edge_px) * u_line_alpha);
         color = mix(color, vec4(v_tint.rgb, 1.0), band(inside_px, u_outline_px) * u_line_alpha);
     } else {
-        color = texture(u_textures, vec3(v_uv, v_layer));
+        if (u_detail_from >= 0.0 && v_layer >= u_detail_from)  // the same for a whole sprite
+            color = texture(u_detail, vec3(v_uv, v_layer - u_detail_from));
+        else
+            color = texture(u_textures, vec3(v_uv, v_layer));
         // Past the texture's edge there is nothing (a piece of the picture hanging
         // over its border). Texture rects of photos lie inside, but a pixel on a
         // sprite's edge may sample a little past its rect (multisampling shades at the

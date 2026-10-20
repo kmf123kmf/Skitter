@@ -3,6 +3,8 @@
 Matching runs in the background (see core/matching). The preview draws the
 session's scene of the result (core/scene.py) with its shared textures:
 thumbnails first, full-size crops once read (ui/render/tile_textures.py).
+Zoomed in, the tiles in view are read again at the screen's resolution, up to
+their photos' own (ui/render/zoom_detail.py).
 While matching runs, the view follows the run instead: target colors, then
 the tiles chosen so far as they improve (ui/render/match_preview.py).
 A heat map shows where the mosaic differs most from the image as seen from
@@ -35,6 +37,7 @@ from skitter.ui.render.heat import heat_colors
 from skitter.ui.render.match_preview import PreviewBuilder, PreviewFrame
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import TileTextures
+from skitter.ui.render.zoom_detail import DETAIL_PAGES, DETAIL_SIDE, ZoomDetail
 from skitter.ui.reveal import file_menu
 from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.steps.edit_mode import EditMode
@@ -68,6 +71,7 @@ class MatchingStep(StepPage):
         self._shown: MosaicScene | None = None
         self._textures: TileTextures | None = None
         self.overlays = EditOverlays(self.viewer.canvas)
+        self.zoom_detail = ZoomDetail(self.viewer.canvas, self)
         self.tile_of: np.ndarray = np.zeros(0, np.int64)  # region -> scene tile (-1: none)
         # The run in progress (shown in place of the mosaic while matching)
         self._run_sketch: SpriteLayer | None = None  # target colors of regions without a tile
@@ -283,8 +287,7 @@ class MatchingStep(StepPage):
             self._shown = scene
             if self._tile_layer is not None:
                 self._tile_layer.picture = self._textures.picture
-                self._tile_layer.instances = self._textures.instances()
-                self._tile_layer.mark_dirty()
+                self._set_tile_instances()
             self.edit.mosaic_edited()
             self.viewer.canvas.update()
         self._show_blend_summary()
@@ -403,8 +406,7 @@ class MatchingStep(StepPage):
         scene = session.scene
         self._shown = scene
         if self._tile_layer is not None:
-            self._tile_layer.instances = self._textures.instances()
-            self._tile_layer.mark_dirty()
+            self._set_tile_instances()
         if self._heat_layer is not None:
             self._heat_layer.instances["tint"][:, :3] = heat_colors(scene.error)
             self._heat_layer.mark_dirty()
@@ -412,6 +414,22 @@ class MatchingStep(StepPage):
         self.edit.mosaic_edited()
         self.viewer.canvas.update()
         self.state_changed.emit()
+
+    def _set_tile_instances(self) -> None:
+        """The tiles changed (picks, blend): their usual textures, sharpened where zoomed in."""
+        self._tile_layer.instances = self._textures.instances()
+        self._tile_layer.mark_dirty()
+        self.zoom_detail.show(self._tile_layer, self._shown, self.session.library)
+
+    def _new_tile_layer(self, index: int) -> SpriteLayer:
+        """A layer of the tiles at index in the canvas's draw order."""
+        layer = SpriteLayer(self._textures.pages, self._textures.instances(),
+                            picture=self._textures.picture,
+                            detail_pages=0 if self._shown.picture else DETAIL_PAGES,
+                            detail_side=DETAIL_SIDE)  # fmt: skip
+        self._tile_layer = self.viewer.canvas.add_layer(layer, index)
+        self.zoom_detail.show(layer, self._shown, self.session.library)
+        return layer
 
     def _on_patched(self, rects) -> None:
         if self._tile_layer is not None:
@@ -493,6 +511,7 @@ class MatchingStep(StepPage):
             if layer is not None:
                 canvas.remove_layer(layer)
         self._tile_layer = self._heat_layer = None
+        self.zoom_detail.show(None, None, None)
         self.overlays.clear()
         if self._textures is not None:
             self._textures.changed.disconnect(self._on_textures_changed)
@@ -516,11 +535,7 @@ class MatchingStep(StepPage):
         self.tile_of[scene.region] = np.arange(len(scene))
         if not len(scene):
             return
-        tiles = self._textures.instances()
-        self._tile_layer = canvas.add_layer(
-            SpriteLayer(self._textures.pages, tiles, picture=self._textures.picture),
-            self.overlays.first,
-        )
+        tiles = self._new_tile_layer(self.overlays.first).instances
 
         heat = make_instances(len(scene))
         for field in ("pos", "size", "rotation"):
@@ -540,9 +555,7 @@ class MatchingStep(StepPage):
         canvas = self.viewer.canvas
         index = canvas.layers.index(self._tile_layer)
         canvas.remove_layer(self._tile_layer)
-        layer = SpriteLayer(self._textures.pages, self._textures.instances(),
-                            picture=self._textures.picture)  # fmt: skip
-        self._tile_layer = canvas.add_layer(layer, index)
+        layer = self._new_tile_layer(index)
         if self.overlays.cover.texture_from is not None:
             self.overlays.cover.texture_from = layer
         self._apply_display()
@@ -659,6 +672,7 @@ class MatchingStep(StepPage):
                     canvas.remove_layer(layer)
             self._tile_layer = self._heat_layer = None
             self._shown = None
+            self.zoom_detail.show(None, None, None)
             self.overlays.clear()
             self._show_stats(None)
             self._hover.setText("—")
@@ -694,3 +708,4 @@ class MatchingStep(StepPage):
     def shutdown(self) -> None:
         self._builder.close()
         self.edit.shutdown()
+        self.zoom_detail.shutdown()
