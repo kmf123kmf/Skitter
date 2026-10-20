@@ -230,3 +230,64 @@ def test_zoom_detail_survives_new_layers_blending_and_full_pages(
     assert step._tile_layer.instances["layer"][tile] >= layer.first_detail
     assert step._tile_layer.instances["blend"].max() > 0
     assert_consistent(step)
+
+
+@pytest.fixture(scope="module")
+def gl():
+    import moderngl
+
+    try:
+        ctx = moderngl.create_standalone_context(require=330)
+    except Exception as exc:  # no OpenGL 3.3 here (headless CI)
+        pytest.skip(f"no GPU context: {exc}")
+    yield ctx
+    ctx.release()
+
+
+def draw(ctx, layer, pixelate: float) -> np.ndarray:
+    """The middle row of a 64 px view of a layer, 8 px per unit: (64, 3) uint8."""
+    from skitter.ui.render.camera import Camera2D
+    from skitter.ui.render.sprites import SpriteRenderer
+
+    fbo = ctx.simple_framebuffer((64, 64))
+    fbo.use()
+    fbo.clear(0.0, 0.0, 0.0, 1.0)
+    camera = Camera2D()
+    camera.viewport[:] = (64, 64)
+    camera.zoom = 8.0
+    renderer = SpriteRenderer(ctx)
+    renderer.set_camera(camera)
+    renderer.render(layer, pixelate)
+    row = np.frombuffer(fbo.read(components=3), np.uint8).reshape(64, 64, 3)[32]
+    renderer.release(layer)
+    fbo.release()
+    return row
+
+
+def halves(width: int) -> np.ndarray:
+    """(1, 1, width, 3) a texture page, black on the left half, white on the right."""
+    page = np.zeros((1, 1, width, 3), np.uint8)
+    page[:, :, width // 2 :] = 255
+    return page
+
+
+def test_texels_turn_square_by_their_own_magnification(gl):
+    from skitter.ui.render.sprites import SpriteLayer, make_instances
+
+    tile = make_instances(1)
+    tile["size"] = (8.0, 8.0)  # 64 px across, at 8 px per unit
+    # 2 texels across: each covers 32 px, so they show as sharp squares...
+    coarse = draw(gl, SpriteLayer(halves(2), tile.copy()), pixelate=4.0)
+    assert set(coarse[:, 0].tolist()) == {0, 255}
+    # ...unless pixelation is off: then they blend into each other.
+    smooth = draw(gl, SpriteLayer(halves(2), tile.copy()), pixelate=0.0)
+    assert len(set(smooth[:, 0].tolist())) > 20
+    # 32 texels across cover 2 px each: filtered smoothly, though a mosaic unit covers 8.
+    fine = draw(gl, SpriteLayer(halves(32), tile.copy()), pixelate=4.0)
+    assert 0 < fine[31, 0] < 255 or 0 < fine[32, 0] < 255
+
+    # Detail pages follow the same rule.
+    detail = SpriteLayer(halves(2) // 2, tile.copy(), detail_pages=1, detail_side=2)
+    detail.write_detail(0, 0, 0, halves(2)[0])
+    detail.instances["layer"] = detail.first_detail
+    assert set(draw(gl, detail, pixelate=4.0)[:, 0].tolist()) == {0, 255}  # not the 127s

@@ -4,6 +4,7 @@ uniform sampler2DArray u_textures;
 uniform sampler2D u_picture;  // what sprites with a blend mix in (blended tiles: the picture)
 uniform sampler2DArray u_detail;  // a second stack: layers from u_detail_from on (zoom detail)
 uniform float u_detail_from;      // first layer index in u_detail; negative: none
+uniform float u_pixelate;  // > 0: texels covering this many device pixels show as squares
 uniform float u_zoom;
 
 // Outline mode (u_outline_px > 0) draws each sprite as a region marker: a
@@ -29,6 +30,18 @@ in vec2 v_picture_uv;
 in float v_blend;
 
 out vec4 f_color;
+
+// A texel of a texture stack. Texels magnified to u_pixelate device pixels or more show
+// as sharp squares (an image editor's pixel view), less magnified ones filtered smoothly.
+// Each texture's own texels decide, so a photo's pixels count, not mosaic units.
+vec4 sample_texels(sampler2DArray textures, vec2 uv, float layer) {
+    vec2 size = vec2(textureSize(textures, 0).xy);
+    vec2 texel = uv * size;
+    vec2 span = fwidth(texel);  // texels per device pixel
+    if (u_pixelate > 0.0 && max(span.x, span.y) * u_pixelate <= 1.0)
+        return textureLod(textures, vec3((floor(texel) + 0.5) / size, layer), 0.0);
+    return texture(textures, vec3(uv, layer));
+}
 
 float band(float dist, float width) {
     return 1.0 - smoothstep(width - 0.5, width + 0.5, dist);
@@ -96,7 +109,7 @@ void main() {
             // Parts of regions hanging past the texture, or over its hidden pixels
             // (alpha under half: outside the picture, as past its border), show a
             // neutral gray.
-            vec4 image = texture(u_textures, vec3(uv, 0.0));
+            vec4 image = sample_texels(u_textures, uv, 0.0);
             fill = beyond || image.a < 0.5 ? vec4(0.24, 0.24, 0.26, 0.92)
                                            : vec4(image.rgb, 1.0);
         }
@@ -105,9 +118,9 @@ void main() {
         color = mix(color, vec4(v_tint.rgb, 1.0), band(inside_px, u_outline_px) * u_line_alpha);
     } else {
         if (u_detail_from >= 0.0 && v_layer >= u_detail_from)  // the same for a whole sprite
-            color = texture(u_detail, vec3(v_uv, v_layer - u_detail_from));
+            color = sample_texels(u_detail, v_uv, v_layer - u_detail_from);
         else
-            color = texture(u_textures, vec3(v_uv, v_layer));
+            color = sample_texels(u_textures, v_uv, v_layer);
         // Past the texture's edge there is nothing (a piece of the picture hanging
         // over its border). Texture rects of photos lie inside, but a pixel on a
         // sprite's edge may sample a little past its rect (multisampling shades at the

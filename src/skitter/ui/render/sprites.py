@@ -167,7 +167,6 @@ class _GpuLayer:
         self.texture.anisotropy = 8.0
         self.pages = count
         self.detail: moderngl.TextureArray | None = None  # made when first written
-        self.nearest_mag = False
         self.picture: moderngl.Texture | None = None
         self.picture_source: np.ndarray | None = None  # the array `picture` holds
 
@@ -203,8 +202,7 @@ class _GpuLayer:
             side = layer.detail_side
             self.detail = self.ctx.texture_array((side, side, layer.detail_pages), 3)
             self.detail.repeat_x = self.detail.repeat_y = False
-            mag = moderngl.NEAREST if self.nearest_mag else moderngl.LINEAR
-            self.detail.filter = (moderngl.LINEAR, mag)
+            self.detail.filter = (moderngl.LINEAR, moderngl.LINEAR)
         for page, x, y, image in layer.detail_writes:
             h, w = image.shape[:2]
             data = np.ascontiguousarray(image, dtype=np.uint8)
@@ -225,14 +223,6 @@ class _GpuLayer:
                 self.picture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
                 self.picture.anisotropy = 8.0
         return self.picture
-
-    def set_nearest_mag(self, nearest: bool) -> None:
-        if nearest != self.nearest_mag:
-            mag = moderngl.NEAREST if nearest else moderngl.LINEAR
-            self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, mag)
-            if self.detail is not None:
-                self.detail.filter = (moderngl.LINEAR, mag)
-            self.nearest_mag = nearest
 
     def render(self, count: int, texture: moderngl.TextureArray) -> None:
         if self.vao is None or count == 0:
@@ -282,8 +272,9 @@ class SpriteRenderer:
         self.program["u_rotation"] = float(camera.rotation)
         self.program["u_viewport"] = tuple(camera.viewport)
 
-    def render(self, layer: SpriteLayer, nearest_mag: bool = False) -> None:
-        """Draw a layer; nearest_mag shows magnified texels as sharp squares."""
+    def render(self, layer: SpriteLayer, pixelate: float = 0.0) -> None:
+        """Draw a layer; texels covering `pixelate` device pixels or more show as sharp
+        squares (0: never)."""
         gpu = self._layers.get(layer)
         if gpu is None:
             gpu = self._layers[layer] = _GpuLayer(self.ctx, self.program, self.quad, layer)
@@ -303,7 +294,6 @@ class SpriteRenderer:
             if texture_gpu is None:  # source not uploaded (not drawn on this canvas)
                 return
             picture = layer.texture_from.picture
-        texture_gpu.set_nearest_mag(nearest_mag)
         (texture_gpu.sync_picture(picture) or self._no_picture).use(1)
         (texture_gpu.detail or self._no_detail).use(2)
 
@@ -315,6 +305,7 @@ class SpriteRenderer:
         program["u_project"] = int(layer.project_texture)
         program["u_texture_size"] = tuple(float(v) for v in layer.texture_size)
         program["u_linear"] = int(self.linear_output)
+        program["u_pixelate"] = float(pixelate)
         program["u_detail_from"] = -1.0 if texture_gpu.detail is None else float(texture_gpu.pages)
         gpu.render(len(layer.instances), texture_gpu.texture)
 

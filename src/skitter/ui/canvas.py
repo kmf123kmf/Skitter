@@ -92,7 +92,8 @@ class MosaicCanvas(QOpenGLWidget):
         self.rotatable = False  # Shift+wheel turns the view (the Animate viewfinder)
         self.fit_mode = False
         self.fit_margin = 0.95
-        # Show texels as sharp squares once each covers this many device pixels.
+        # Show texels as sharp squares once each covers this many device pixels (each
+        # texture's own texels: a tile's photo pixels, not mosaic units).
         self.pixelate_above: float | None = None
 
         self._animations: list[tuple[Animation, float | None]] = []
@@ -285,11 +286,11 @@ class MosaicCanvas(QOpenGLWidget):
             self.renderer.release(layer)
         self._released.clear()
 
-        nearest = self.pixelate_above is not None and self.device_zoom() >= self.pixelate_above
+        pixelate = self.pixelate_above or 0.0
         self.renderer.set_camera(self.camera)
         for layer in self.layers:
             if layer.visible:
-                self.renderer.render(layer, nearest)
+                self.renderer.render(layer, pixelate)
 
     def _run_animations(self, now: float) -> None:
         running, self._animations = self._animations, []
