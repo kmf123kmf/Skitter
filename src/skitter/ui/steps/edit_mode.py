@@ -3,7 +3,7 @@
 Click a tile (or double-click it, from outside edit mode), then choose
 another photo for it from its remembered candidates in the side panel.
 Hovering a candidate previews it in place; right-clicking it offers to
-show its photo file. Picks can be undone, reverted, and kept when matching
+open its photo file or its location. Picks can be undone, reverted, and kept when matching
 again (core/matching/edit.py does the picking).
 
 `EditMode` owns the picker panel (tile_picker.py), its shortcuts and the
@@ -488,11 +488,29 @@ class EditMode(QObject):
         r = self._region_at(x, y)
         self.select(r if self.session.can_pick(r) else -1)
 
+    def _needs_matching(self, region: int) -> bool:
+        """Whether a region shows a tile that matching again would make pickable: the
+        mosaic was opened from a project file, which keeps no candidates."""
+        session, result = self.session, self.session.project.matches
+        return (
+            result is not None
+            and result.candidates is None
+            and not result.picture
+            and session.mosaic_is_valid
+            and session.can_match
+            and not session.busy
+            and 0 <= region < len(result.tile)
+            and result.tile[region] >= 0
+        )
+
     def on_double_click(self, sx: float, sy: float) -> None:
-        """Double-clicking a tile edits it (entering edit mode if needed)."""
+        """Double-clicking a tile edits it (entering edit mode if needed); on a mosaic
+        opened from a project file it offers to match again first."""
         x, y = self.viewer.canvas.camera.screen_to_world(sx, sy)
         r = self._region_at(float(x), float(y))
         if not self.session.can_pick(r):
+            if self._needs_matching(r) and self.step.ask_match_to_edit():
+                self.step.run_matching()
             return
         if not self.editing:
             self.set_editing(True)

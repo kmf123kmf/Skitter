@@ -1172,6 +1172,42 @@ def test_double_click_edits_a_tile(sliced, photos, qapp):
     assert step.session.can_undo_pick
 
 
+def test_double_click_on_a_reopened_mosaic_offers_to_match_again(
+    sliced, photos, qapp, tmp_path, monkeypatch
+):
+    from PySide6.QtWidgets import QMessageBox
+
+    window = sliced
+    step = matched(window, photos, qapp)
+    session = window.session
+    path = tmp_path / "m.skitter"
+    assert window._save_to(path) and window.open_project(path, ask=False)
+    assert session.project.matches.candidates is None  # project files keep none
+    canvas = step.viewer.canvas
+    shown = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda box: shown.append(box.text()))
+    assert not step.ask_match_to_edit() and "Match tiles again" in shown[0]  # closed: no
+    asked = []
+
+    def double_click(r):
+        x, y = session.project.matches.regions.center[r]
+        canvas.double_clicked.emit(*map(float, canvas.camera.world_to_screen(float(x), float(y))))
+
+    step.ask_match_to_edit = lambda: asked.append(True) and False  # Cancel
+    double_click(7)
+    canvas.double_clicked.emit(-5000.0, -5000.0)  # off the mosaic: no question
+    assert asked == [True] and not session.busy and not step.edit.editing
+
+    step.ask_match_to_edit = lambda: True  # Match Tiles
+    double_click(7)
+    assert session.busy == "matching"
+    session.wait_for_job()
+    qapp.processEvents()
+    assert session.project.matches.candidates is not None
+    double_click(7)
+    assert step.edit.editing and step.edit.selected == 7
+
+
 def test_right_click_shows_a_tiles_photo_file(sliced, photos, qapp, monkeypatch):
     import os
     from types import SimpleNamespace
@@ -1181,8 +1217,9 @@ def test_right_click_shows_a_tiles_photo_file(sliced, photos, qapp, monkeypatch)
     from skitter.ui import reveal
     from skitter.ui.steps import edit_mode
 
-    shown = []
-    monkeypatch.setattr(reveal, "reveal", shown.append)
+    done = []
+    monkeypatch.setattr(reveal, "open_file", lambda p: done.append(("open", p)))
+    monkeypatch.setattr(reveal, "reveal", lambda p: done.append(("reveal", p)))
     window = sliced
     step = matched(window, photos, qapp)
     result, library = step.session.project.matches, step.session.library
@@ -1196,10 +1233,12 @@ def test_right_click_shows_a_tiles_photo_file(sliced, photos, qapp, monkeypatch)
     assert step.tile_path_at(x, y) is None
     step.display_mode.setCurrentIndex(0)
     menu = reveal.file_menu(step, path)
-    (action,) = menu.actions()
-    assert action.text() == reveal.REVEAL_TEXT and action.isEnabled()
-    action.trigger()
-    assert shown == [path]
+    actions = menu.actions()
+    assert [a.text() for a in actions] == [reveal.OPEN_TEXT, reveal.REVEAL_TEXT]
+    assert all(a.isEnabled() for a in actions)
+    for action in actions:
+        action.trigger()
+    assert done == [("open", path), ("reveal", path)]
 
     # A candidate in the picker: the grid passes on right-clicks over a cell.
     step.edit.set_editing(True)
@@ -1223,7 +1262,7 @@ def test_right_click_shows_a_tiles_photo_file(sliced, photos, qapp, monkeypatch)
                                             grid.mapToGlobal(pos)))  # fmt: skip
     assert menus == [library.paths([slot])[0]]
 
-    # A photo that's gone can't be shown.
+    # A photo that's gone can't be opened or shown.
     os.remove(path)
     (action,) = reveal.file_menu(step, path).actions()
     assert not action.isEnabled() and "not found" in action.text()

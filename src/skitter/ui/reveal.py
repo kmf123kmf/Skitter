@@ -1,7 +1,8 @@
-"""Showing a file in the system's file manager (Explorer, Finder, or a folder window).
+"""Opening a photo file, or showing it in the system's file manager (Explorer,
+Finder, or a folder window).
 
 `file_menu` is the right-click menu of anything that stands for a photo file:
-it offers to show the file, or says the file is missing.
+it offers to open the file or show where it is, or says the file is missing.
 """
 
 import os
@@ -12,12 +13,13 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QMenu, QWidget
 
-if sys.platform == "win32":
-    REVEAL_TEXT = "Show in Explorer"
-elif sys.platform == "darwin":
-    REVEAL_TEXT = "Show in Finder"
-else:
-    REVEAL_TEXT = "Show in Folder"
+OPEN_TEXT = "Open Image"
+REVEAL_TEXT = "Open Image Location"
+
+
+def open_file(path: str) -> None:
+    """Open the file with the system's default app for it."""
+    QDesktopServices.openUrl(QUrl.fromLocalFile(os.path.normpath(path)))
 
 
 def reveal(path: str) -> None:
@@ -32,10 +34,12 @@ def reveal(path: str) -> None:
 
 
 def file_menu(parent: QWidget, path: str) -> QMenu:
-    """A menu to show a photo file in the file manager (disabled if the file is gone)."""
+    """A menu to open a photo file or show it in the file manager (just a note when the
+    file is gone)."""
     menu = QMenu(parent)
     if os.path.isfile(path):
+        menu.addAction(OPEN_TEXT, lambda: open_file(path))
         menu.addAction(REVEAL_TEXT, lambda: reveal(path))
     else:
-        menu.addAction(f"{REVEAL_TEXT} (file not found)").setEnabled(False)
+        menu.addAction("Image file not found").setEnabled(False)
     return menu

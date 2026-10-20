@@ -12,8 +12,8 @@ applies to the finished mosaic at once, without matching again.
 Edit mode picks tiles by hand (core/matching/edit.py): click a tile, then
 choose from its remembered candidates in the side panel. Hovering a
 candidate previews it in place; picks can be undone, reverted, and kept
-when matching again. Right-clicking a tile (or a candidate) offers to show
-its photo file in the file manager.
+when matching again. Right-clicking a tile (or a candidate) offers to open
+its photo file, or its location in the file manager.
 """
 
 import numpy as np
@@ -335,6 +335,24 @@ class MatchingStep(StepPage):
         box.exec()
         clicked = box.clickedButton()
         return KEEP if clicked is keep else DISCARD if clicked is discard else None
+
+    def ask_match_to_edit(self) -> bool:
+        """Match again to pick tiles by hand (a mosaic opened from a project file keeps
+        no candidates)? True: match now."""
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowTitle("Edit Tiles")
+        box.setText("Match tiles again to pick tiles by hand.")
+        box.setInformativeText(
+            "This mosaic was opened from a project file, which doesn't keep the candidates "
+            "each tile is chosen from. Matching again finds them; tiles picked by hand so "
+            "far can be kept."
+        )
+        match = box.addButton("Match Tiles", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton(QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(match)
+        box.exec()
+        return box.clickedButton() is match
 
     def is_complete(self) -> bool:
         """A valid mosaic exists: it may be out of date (settings changed since it was
