@@ -68,3 +68,6 @@ def test_a_leg_turns_with_its_tile_and_lasts_by_its_zoom():
     )
     assert flow.tile_share(1.0) == pytest.approx(1.0)
     assert flow.tile_share(0.0) == pytest.approx(flow.z0 / flow.z1)
+    for share in (0.1, 0.35, 1.0):
+        assert flow.tile_share(flow.u_at_share(share)) == pytest.approx(share)
+    assert flow.u_at_share(1e-6) == 0.0  # already larger at the start

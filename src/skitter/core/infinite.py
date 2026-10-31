@@ -96,10 +96,9 @@ from skitter.core.tiles.render import render_crops_or_thumbs
 MOSAIC = ("start", "tile_aspect", "columns", "slicer")  # InfiniteSettings by group
 MATCHING = ("tint", "tint_strength", "max_uses", "min_spacing", "mirror")
 DIVE = ("dive_seconds", "dive_style", "fade_seconds")
-AUTO = ("motion", "flow_seconds", "flow_path", "dwell_seconds", "next_tile", "variety",
-        "approach_seconds", "approach_tiles",
-        "pause_seconds", "highlight", "loop", "loop_dives", "loop_fit", "loop_tint",
-        "look_ahead")  # fmt: skip
+AUTO = ("motion", "flow_seconds", "flow_path", "flow_mosaic", "dwell_seconds", "next_tile",
+        "variety", "approach_seconds", "approach_tiles", "pause_seconds", "highlight", "loop",
+        "loop_dives", "loop_fit", "loop_tint", "look_ahead")  # fmt: skip
 LIVE = DIVE + AUTO  # settings a running session follows as they change (pacing only)
 SOURCE_PX_PER_TILE = 16  # least picture pixels across a base tile (4 per cell: full detail)
 MAX_SOURCE_PX = 4096  # longest side a level's picture is read at
@@ -191,6 +190,13 @@ class InfiniteSettings(Configurable):
         help="Continuously: Straight in moves toward the tile while zooming all the way; "
              "Center first brings it to the middle early, then zooms straight in. Either way "
              "the view stays on the mosaic and only waits to center a tile near its edge.",
+    )  # fmt: skip
+    flow_mosaic = FloatParam(
+        35.0, "Mosaic appears at", min=5.0, max=100.0, step=5.0, decimals=0,
+        suffix="% of the view", under="motion", when=lambda s: s.motion == "flow",
+        help="Continuously: how much of the view the tile fills by the time its photo has "
+             "turned into its own mosaic, shown inside it as the view heads on in. Lower "
+             "shows the next mosaic sooner; 100%: as the tile fills the view.",
     )  # fmt: skip
     dwell_seconds = FloatParam(
         3.0, "Dwell", min=0.0, max=600.0, step=0.5, decimals=1, suffix=" s",

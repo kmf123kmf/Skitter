@@ -97,6 +97,13 @@ class FlowPath:
         allowed = (1 - k) / self.reach  # share of the way to the tile the center may go
         return float(np.clip(1 - (1 - allowed) / k, 0.0, 1.0))
 
+    def u_at_share(self, share: float) -> float:
+        """Where along the leg the tile fills this share of the view (0 if it already
+        does at the start)."""
+        if self.z0 >= self.z1:
+            return 0.0
+        return float(np.clip(1 - math.log(share) / math.log(self.z0 / self.z1), 0.0, 1.0))
+
     def tile_share(self, u: float) -> float:
         """How much of the view the tile fills at u (its zoom over the end's): 1 at the end."""
         u = float(np.clip(u, 0.0, 1.0))

@@ -49,12 +49,16 @@ even while a session runs: they only pace it.
 With Auto-dive moves set to Continuously, it never stops (`_start_flow`):
 the view zooms evenly from each mosaic onto a tile picked as the mosaic
 appears (core/dive_path.py's FlowPath: one leg per mosaic), while that
-tile's photo is read and its mosaic made in the background (`_flow_match`).
-As the tile grows its photo fades in over it; when it fills the view the
-mosaic takes over exactly as a dive's does (`_flow_arrive`), the photo fades
-into it as the zoom goes on, and the next leg starts. A mosaic not made in
-time slows the zoom to a stop where its photo would start to show, until it
-is. Loops are made in steps only (for now).
+tile's photo is read and its mosaic made in the background (`_flow_match`),
+its layers built and staged to the GPU ahead (`_flow_prepare`,
+`_build_layer`). As the tile grows its photo fades in over it, then into
+its own mosaic, drawn inside it (its tiles placed on the tile, `_moved`),
+done when the tile fills Mosaic appears at of the view. When the tile
+fills the view that mosaic takes over in its own world, looking just the
+same (`_flow_arrive`); the last one goes into that world too, under it,
+and fades out. A mosaic not made in time slows the zoom to a stop where
+its photo would start to show, until it is. Loops are made in steps only
+(for now).
 
 With Loop on, auto-dive comes back to where it started (core/infinite.py's
 Loop): the first tile it dives into is home; from the bottom of the range
@@ -127,12 +131,14 @@ PIXELATE_ABOVE = 4.0  # texels this large show as squares (not while diving: til
 LIBRARY_TAB = 1  # the panel's tabs: Settings, Library
 LIBRARY_LOCKED = "A session searches the photos it started with: stop it to change them."
 START_TIP = "Start a session from a random photo of the library."
-# Continuous auto-dive: the next tile's photo fades in over its tile while the tile grows
-# from PHOTO_IN_SHARE[0] to [1] of the view; after arriving, it fades into its mosaic while
-# the view zooms PHOTO_OUT_ZOOM times in. A leg slows to a stop (over EASE_SECONDS) where
-# the photo would start fading in, if the next mosaic isn't made by then.
-PHOTO_IN_SHARE = (0.2, 0.45)
-PHOTO_OUT_ZOOM = 2.2
+# Continuous auto-dive. As the tile it heads for grows, the tile's photo fades in over it,
+# then fades into its own mosaic, drawn inside it: each over FADE_ZOOM of zoom, done when
+# the tile fills Mosaic appears at of the view. After the switch, the last mosaic (around
+# and under the new one: its gaps, the view's margins) fades out over LAST_OUT_ZOOM. A leg
+# slows to a stop (over EASE_SECONDS) where the photo would start to show if the next
+# mosaic isn't made by then.
+FADE_ZOOM = 1.8
+LAST_OUT_ZOOM = 1.6
 EASE_SECONDS = 1.0
 PHOTO_DISPLAY = 2.0  # a photo is shown at up to this many times the view's pixels
 MAX_FRAME_STEP = 0.1  # seconds the zoom moves on in one frame, at most
@@ -199,22 +205,38 @@ class _Flow:
         self.level, self.index, self.tile, self.path = level, index, tile, path
         self.u = 0.0  # progress along the path
         self.speed = 1.0  # eased down to 0 (and up again) while the next level is not made
+        self.hold = 1.0  # where it waits if the next level isn't ready (see _flow_advance)
         self.next: Level | None = None  # the tile's mosaic, once made
         self.picture: np.ndarray | None = None  # the tile's photo, as shown (display size)
         self.seconds = 0.0  # how long making it took
         self.waiting = False  # its making waits for the search index (a random mosaic's start)
-        self.incoming: SpriteLayer | None = None  # the photo, fading in over the tile
-        # Made ahead so the switch stalls no frame: the photo's layer (staged once the
-        # mosaic is made), the next level's textures (full-size crops read meanwhile) and,
-        # once those are in, its tile layer (built in the background, then staged).
+        # Made ahead, and staged, so nothing stalls a frame: the photo's layer, the next
+        # level's textures, its tile layer from their thumbnails (shown inside the tile:
+        # its tiles are small there) and, once its full-size crops are in, from those.
         self.photo: SpriteLayer | None = None
         self.textures: TileTextures | None = None
-        self.layer: SpriteLayer | None = None
-        self.layer_job: Job | None = None
-        # Where the photo starts fading in: the leg holds there if the mosaic isn't made.
-        k1 = path.z0 / path.z1
-        hold = 1.0 - math.log(PHOTO_IN_SHARE[0]) / math.log(k1) if k1 < 1 else 0.0
-        self.hold = min(max(hold, 0.0), 1.0)
+        self.layer: SpriteLayer | None = None  # the one shown inside the tile
+        self.full: SpriteLayer | None = None  # full-size, until it takes layer's place
+        self.placed = False  # layer is on the canvas, inside the tile
+
+
+def _fade(x: float) -> float:
+    """0 to 1, eased, for x from 0 to 1 (clamped)."""
+    return float(ease_in_out_cubic(min(max(x, 0.0), 1.0)))
+
+
+def _moved(instances: np.ndarray, origin, to, scale: float, turn: float) -> np.ndarray:
+    """Sprite instances moved from one world to another: what was at origin goes to `to`,
+    scaled and turned (radians) about it."""
+    moved = instances.copy()
+    c, s = math.cos(turn), math.sin(turn)
+    offset = (instances["pos"].astype(np.float64) - origin) * scale
+    moved["pos"] = np.asarray(to) + np.stack(
+        [c * offset[:, 0] - s * offset[:, 1], s * offset[:, 0] + c * offset[:, 1]], axis=1
+    )
+    moved["size"] = instances["size"] * scale
+    moved["rotation"] = instances["rotation"] + turn
+    return moved
 
 
 class InfiniteWindow(QWidget):
@@ -255,6 +277,9 @@ class InfiniteWindow(QWidget):
         self._flow: _Flow | None = None  # continuous auto-dive's leg under way
         self._flow_token: object | None = None  # its animation
         self._flow_last: float | None = None  # the animation's time at the previous frame
+        self._last_layer: SpriteLayer | None = None  # the last level's, fading after a switch
+        self._tile_swap: SpriteLayer | None = None  # full-size tiles, staging, to swap in
+        self._layer_jobs: list[Job] = []  # building tile layers in the background
         self._approaching = False  # auto-dive's view moving in on a tile
         self._swap_waiting = False  # full-size tiles came in meanwhile: swap them in after
         self._rng = np.random.default_rng()
@@ -636,12 +661,14 @@ class InfiniteWindow(QWidget):
     def _new_tile_layer(self, layer: SpriteLayer | None = None) -> None:
         """The level's tiles below the photo, from the best textures there are (layer:
         made from them already)."""
+        index = 0
         if self.tile_layer is not None:
+            index = self.canvas.layers.index(self.tile_layer)
             self.canvas.remove_layer(self.tile_layer)
         if layer is None:
             layer = SpriteLayer(self.textures.pages, self.textures.instances(),
                                 detail_pages=DETAIL_PAGES, detail_side=DETAIL_SIDE)  # fmt: skip
-        self.tile_layer = self.canvas.add_layer(layer, 0)
+        self.tile_layer = self.canvas.add_layer(layer, index)
         self.zoom_detail.show(layer, self.level.scene, self.infinite.library)
 
     def _on_textures_changed(self) -> None:
@@ -649,6 +676,8 @@ class InfiniteWindow(QWidget):
         auto-dive zooms in, once it rests: uploading them stalls a frame)."""
         if self._approaching:
             self._swap_waiting = True
+        elif self._flow_token is not None:  # moving on: built aside and staged, then swapped
+            self._build_layer(self.textures, None)
         elif self.tile_layer is not None and self.dive is None:
             self._new_tile_layer()
 
@@ -918,7 +947,8 @@ class InfiniteWindow(QWidget):
         self._refresh()
 
     def _stop_flow(self) -> None:
-        """Stop where the view is: the next mosaic's making stops, its photo goes."""
+        """Stop where the view is: the next mosaic's making stops, what was made ahead for
+        it goes, the last level's leftovers too."""
         flow, self._flow, self._flow_token = self._flow, None, None
         if flow is None:
             return
@@ -926,10 +956,16 @@ class InfiniteWindow(QWidget):
             self._job.cancel()
             self._job.wait()
             self._job = None
-        if flow.incoming is not None:
-            self.canvas.remove_layer(flow.incoming)
+        for job in self._layer_jobs:
+            job.cancel()
         self._flow_discard(flow)
-        if self.photo_layer is not None:  # the last photo, maybe still fading
+        if self._last_layer is not None:
+            self.canvas.remove_layer(self._last_layer)
+            self._last_layer = None
+        if self._tile_swap is not None:  # full-size tiles staged: in now, as they'd be at rest
+            swap, self._tile_swap = self._tile_swap, None
+            self._new_tile_layer(swap)
+        if self.photo_layer is not None:  # a step dive's photo, faded
             self.photo_layer.visible = False
         if self.level is not None:
             self.canvas.pixelate_above = PIXELATE_ABOVE
@@ -937,15 +973,17 @@ class InfiniteWindow(QWidget):
 
     def _flow_discard(self, flow: _Flow) -> None:
         """Let go of what a leg made ahead for its next level, not to be shown now."""
-        for layer in (flow.photo, flow.layer):
-            if layer is not None and layer is not flow.incoming:
+        for layer in (flow.photo, flow.layer, flow.full):
+            if layer is None:
+                continue
+            if layer in self.canvas.layers:
+                self.canvas.remove_layer(layer)
+            else:
                 self.canvas.unstage(layer)
-        if flow.layer_job is not None:
-            flow.layer_job.cancel()
         if flow.textures is not None:
             flow.textures.changed.disconnect(self._flow_textures_ready)
             flow.textures.close()
-        flow.photo = flow.layer = flow.textures = None
+        flow.photo = flow.layer = flow.full = flow.textures = None
 
     def _flow_leg(self, level: Level) -> None:
         """A leg through level, from the view as it is onto a tile picked now."""
@@ -966,7 +1004,8 @@ class InfiniteWindow(QWidget):
             self._flow_match()
 
     def _flow_match(self) -> None:
-        """Make the leg's next level in the background: the tile's photo, then its mosaic."""
+        """Make the leg's next level in the background: the tile's photo, its mosaic and
+        that mosaic's thumbnails, packed."""
         flow, infinite = self._flow, self.infinite
         flow.waiting = False
         tile = flow.tile
@@ -993,7 +1032,8 @@ class InfiniteWindow(QWidget):
         self._start_job(work, "flow", "Auto-dive: making the next mosaic…", done)
 
     def _flow_prepare(self, flow: _Flow, atlas) -> None:
-        """The next level is made: get what showing it takes up to the GPU meanwhile."""
+        """The next level is made: its photo's layer and its textures (reading full-size
+        crops), its tile layer from the thumbnails (built in the background), all staged."""
         scene, i = flow.level.scene, flow.index
         photo = make_instances(1)
         photo["pos"], photo["size"] = scene.center[i], scene.size[i]
@@ -1003,39 +1043,62 @@ class InfiniteWindow(QWidget):
         flow.textures = TileTextures(flow.next.scene, self.infinite.library, self,
                                      pool=self._pool, atlas=atlas)  # fmt: skip
         flow.textures.changed.connect(self._flow_textures_ready)
+        self._build_layer(flow.textures, flow)
 
     def _flow_textures_ready(self) -> None:
-        """The next level's full-size crops are in: build its tile layer in the background
-        (its pages are copied out to RGBA there), then stage it."""
+        """The next level's full-size crops are in: build its tile layer from them too."""
         flow = self._flow
-        if flow is None or flow.textures is None or flow.layer_job is not None:
-            return
-        textures = flow.textures
+        if flow is not None and flow.textures is not None:
+            self._build_layer(flow.textures, flow)
+
+    def _build_layer(self, textures: TileTextures, flow: _Flow | None) -> None:
+        """Build a tile layer from the textures' pages as they are, in the background (the
+        pages are copied out to RGBA there), then stage it: for the leg's next level (the
+        first: shown inside the tile; full-size ones swap in) or the shown one (flow
+        None, or the leg moved on meanwhile: it swaps in once staged)."""
         pages, instances = textures.pages, textures.instances()
 
         def work(progress, cancelled):
             return SpriteLayer(pages, instances, detail_pages=DETAIL_PAGES,
                                detail_side=DETAIL_SIDE)  # fmt: skip
 
-        def built(layer) -> None:
-            if self._flow is flow and flow.textures is textures and textures.pages is pages:
-                flow.layer = layer
-                self.canvas.stage(layer)
+        def built(layer: SpriteLayer) -> None:
+            if textures.pages is not pages:  # newer pages: their own layer follows
+                return
+            if flow is not None and self._flow is flow and flow.textures is textures:
+                if flow.layer is None:
+                    flow.layer = layer
+                else:
+                    flow.full = layer
+            elif self.textures is textures and self._flow_token is not None:
+                self._tile_swap = layer
+            else:
+                return
+            self.canvas.stage(layer)
 
-        job = flow.layer_job = Job(work)
+        job = Job(work)
         job.finished.connect(built)
-        job.stopped.connect(lambda: QTimer.singleShot(0, self, job.forget))  # it captures us
+
+        def stopped() -> None:
+            if job in self._layer_jobs:
+                self._layer_jobs.remove(job)
+            QTimer.singleShot(0, self, job.forget)  # its slots capture this window
+
+        job.stopped.connect(stopped)
+        self._layer_jobs.append(job)
         job.start()
 
     def _flow_advance(self, dt: float) -> None:
-        """Move the leg on by dt seconds: slowing to a stop where the photo is needed if
-        its mosaic isn't made yet; on to the next leg once the tile fills the view."""
+        """Move the leg on by dt seconds: slowing to a stop where the photo is to show if
+        the next level isn't ready yet; on to the next leg once the tile fills the view."""
         flow = self._flow
         if flow is None:
             return
         rate = flow_rate(int(self.settings.columns), float(self.settings.flow_seconds))
         per_second = 1.0 / max(flow.path.span / rate if rate > 0 else 0.0, MIN_SECONDS)
-        ready = flow.next is not None
+        first, _ = self._flow_shares()
+        flow.hold = flow.path.u_at_share(first)
+        ready = flow.photo is not None and flow.layer is not None
         target = 1.0
         if not ready:  # stop at the hold: brake once the distance it takes is left
             braking = 0.5 * flow.speed * flow.speed * EASE_SECONDS * per_second
@@ -1055,60 +1118,128 @@ class InfiniteWindow(QWidget):
             return
         self._flow_frame()
 
+    def _flow_shares(self) -> tuple[float, float]:
+        """The tile's shares of the view where its photo starts to fade in, and where its
+        mosaic has taken over (Mosaic appears at)."""
+        last = float(self.settings.flow_mosaic) / 100
+        return last / FADE_ZOOM**2, last
+
     def _flow_frame(self) -> None:
-        """Show the leg at its progress: the view, and the photos fading."""
+        """Show the leg at its progress: the view; the last level fading; the tile's photo
+        fading in, then into its mosaic, inside it; full-size tiles staged, swapped in."""
         flow, canvas = self._flow, self.canvas
         path, u = flow.path, flow.u
         view = path.at(u)
         canvas.camera.rotation = view.rotation
         canvas.set_view(view.center, view.zoom)
         canvas.update()
-        # The photo of the last tile fades into this mosaic as the view zooms in.
-        outgoing = self.photo_layer
-        if outgoing is not None and outgoing.visible:
-            gone = math.log(max(view.zoom / path.z0, 1.0)) / math.log(PHOTO_OUT_ZOOM)
-            alpha = 1.0 - float(ease_in_out_cubic(min(gone, 1.0)))
-            outgoing.instances["alpha"] = alpha
-            outgoing.mark_dirty()
-            if alpha <= 0.0:
-                canvas.remove_layer(outgoing)
-                self.photo_layer = None
-        # The tile's photo fades in over it as it grows.
-        share = path.tile_share(u)
-        lo, hi = (math.log(v) for v in PHOTO_IN_SHARE)
-        shown = float(ease_in_out_cubic(min(max((math.log(share) - lo) / (hi - lo), 0.0), 1.0)))
-        if shown > 0 and flow.photo is not None:
-            if flow.incoming is None:
-                flow.incoming = canvas.add_layer(flow.photo)  # staged: no upload now
-            flow.incoming.instances["alpha"] = shown
-            flow.incoming.mark_dirty()
+        last = self._last_layer
+        if last is not None:
+            gone = math.log(max(view.zoom / path.z0, 1.0)) / math.log(LAST_OUT_ZOOM)
+            last.instances["alpha"] = 1.0 - _fade(gone)
+            last.mark_dirty()
+            if gone >= 1.0:
+                canvas.remove_layer(last)
+                self._last_layer = None
+        swap = self._tile_swap
+        if swap is not None and canvas.staged(swap):
+            self._tile_swap = None
+            self._new_tile_layer(swap)
+        if flow.full is not None and canvas.staged(flow.full):
+            self._flow_full_in(flow)
+        if flow.photo is None or flow.layer is None:
+            return
+        first, done = self._flow_shares()
+        share = math.log(path.tile_share(u))
+        step = math.log(FADE_ZOOM)
+        photo_in = _fade((share - math.log(first)) / step)
+        mosaic_in = _fade((share - math.log(first) - step) / step)
+        if photo_in <= 0:
+            return
+        if not flow.placed:
+            self._flow_place(flow)
+        flow.layer.instances["alpha"] = photo_in  # its tiles over the tile's edges with it
+        flow.layer.mark_dirty()
+        flow.photo.instances["alpha"] = photo_in * (1.0 - mosaic_in)
+        flow.photo.mark_dirty()
+
+    def _flow_place(self, flow: _Flow) -> None:
+        """Put the next level's tiles inside the tile (in this level's world), just above
+        this level's, and the photo over everything."""
+        scene, i, canvas = flow.level.scene, flow.index, self.canvas
+        ctx = flow.next.ctx
+        scale = float(scene.size[i][0]) / float(ctx.width)
+        layer = flow.layer
+        layer.instances = _moved(layer.instances, (ctx.width / 2, ctx.height / 2),
+                                 scene.center[i], scale, float(scene.rotation[i]))  # fmt: skip
+        layer.instances["alpha"] = 0.0
+        layer.mark_dirty()
+        canvas.add_layer(layer, canvas.layers.index(self.tile_layer) + 1)
+        canvas.add_layer(flow.photo)
+        flow.placed = True
+
+    def _flow_full_in(self, flow: _Flow) -> None:
+        """Full-size tiles for the next level, staged: they take the thumbnails' place (in
+        the tile, as those are placed, if they show)."""
+        full, old = flow.full, flow.layer
+        flow.full = None
+        if flow.placed:
+            for field in ("pos", "size", "rotation", "alpha"):
+                full.instances[field] = old.instances[field]
+            full.mark_dirty()
+            index = self.canvas.layers.index(old)
+            self.canvas.remove_layer(old)
+            self.canvas.add_layer(full, index)
+        else:
+            self.canvas.unstage(old)
+        flow.layer = full
 
     def _flow_arrive(self, over: float) -> None:
-        """The tile fills the view: its mosaic takes over (the photo covers its canvas as
-        it covered the tile, so nothing changes on screen) and the next leg starts, over
-        seconds into it."""
+        """The tile fills the view: its level takes over, in its own world. Its tiles, shown
+        inside the tile, are now where they belong, which looks the same; this level's go
+        into that world (under them, fading out); the next leg starts, over seconds into
+        it."""
         flow = self._flow
-        if flow.incoming is None:  # a leg too short to fade it in: show it now
+        if not flow.placed or flow.photo.instances["alpha"][0] > 0:  # a leg too short
             flow.u = 1.0
-            self._flow_frame()
-        level, photo = flow.next, flow.incoming
-        if self.photo_layer is not None:
-            self.canvas.remove_layer(self.photo_layer)
-        width, height = float(level.ctx.width), float(level.ctx.height)
-        instances = photo.instances
-        instances["pos"], instances["size"] = (width / 2, height / 2), (width, height)
-        instances["rotation"], instances["alpha"] = 0.0, 1.0
-        photo.mark_dirty()
-        self.photo_layer, flow.incoming, flow.photo = photo, None, None
-        textures, layer = flow.textures, flow.layer
-        flow.textures = flow.layer = None
+            self._flow_frame()  # its mosaic all in
+        level, canvas = flow.next, self.canvas
+        scene, i = flow.level.scene, flow.index
+        ctx = level.ctx
+        center, scale = (ctx.width / 2, ctx.height / 2), float(ctx.width) / float(scene.size[i][0])
+        turn = float(scene.rotation[i])
+        canvas.remove_layer(flow.photo)
+        if self._last_layer is not None:
+            canvas.remove_layer(self._last_layer)
+        # This level's tiles go into the next one's world, around and under its tiles.
+        self.zoom_detail.show(None, None, None)
+        last = self.tile_layer
+        last.instances = _moved(last.instances, scene.center[i], center, scale, -turn)
+        last.mark_dirty()
+        self._last_layer = last
+        if self.textures is not None:
+            self.textures.changed.disconnect(self._on_textures_changed)
+            self.textures.close()
+        if self._tile_swap is not None:  # this level's full-size tiles: too late now
+            canvas.unstage(self._tile_swap)
+            self._tile_swap = None
+        # The next level's, where they belong.
+        layer, textures = flow.layer, flow.textures
         textures.changed.disconnect(self._flow_textures_ready)
-        if layer is not None:  # built from its full-size pages
-            self._show_level(level, textures, layer)  # made ahead, staged
-        else:  # its full-size crops aren't in yet: they swap in when they are
-            self._show_level(level, textures)
-        self.canvas.camera.rotation = 0.0  # upright, as the tile was on screen
-        self.canvas.pixelate_above = None
+        native = textures.instances()
+        for field in ("pos", "size", "rotation"):
+            layer.instances[field] = native[field]
+        layer.instances["alpha"] = native["alpha"]
+        layer.mark_dirty()
+        self.level, self.textures, self.tile_layer = level, textures, layer
+        textures.changed.connect(self._on_textures_changed)
+        if flow.full is not None:  # its full-size tiles, staging: swapped in once up
+            self._tile_swap = flow.full
+        flow.photo = flow.layer = flow.full = flow.textures = None
+        canvas.fit_to(0, 0, float(ctx.width), float(ctx.height))  # the view: as the tile was
+        canvas.camera.rotation = 0.0  # upright, as the tile was on screen
+        canvas.pixelate_above = None
+        self.zoom_detail.show(layer, level.scene, self.infinite.library)
         self.level_label.setText(f"Level {level.number}: {len(level.scene):,} tiles, made in "
                                  f"{flow.seconds:.2f} s")  # fmt: skip
         self._flow_leg(level)
