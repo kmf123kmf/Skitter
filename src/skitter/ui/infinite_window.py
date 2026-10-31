@@ -1,9 +1,18 @@
 """The Infinite Mosaic window: dive into any tile, and its photo becomes the next mosaic.
 
 The side panel holds the settings (core/infinite.py's InfiniteSettings and
-the chosen slicer's own) and Start. Starting fixes them for the session:
-a random library photo shows, the first level is matched (it also builds
-the search index, the long part), and the photo dissolves into its mosaic.
+the chosen slicer's own) and Start. Starting fixes them for the session and
+shows its start (Start with):
+
+- Random photo: a library photo shows, the first level is matched (it also
+  builds the search index, the long part), and the photo dissolves into its
+  mosaic.
+- Random mosaic: the view fills at once with random photos in the layout
+  (`InfiniteSession.random_mosaic`), while the search index is built in the
+  background (`prepare`). A dive made before it is ready plays as usual and
+  its matching waits for it (the photo holds meanwhile).
+
+New Start shows another start of the same kind, with the same settings.
 Pan and zoom as usual; double-click a tile to dive into it:
 
 - At once, the tile's photo is read at its own resolution and laid over
@@ -135,7 +144,10 @@ class InfiniteWindow(QWidget):
         self.photo_layer: SpriteLayer | None = None
         self.dive: _Dive | None = None
         self._job: Job | None = None
+        self._job_kind = ""  # "first" (a random photo's level), "prepare" or "dive"
         self._job_started = 0.0
+        self._queued: np.ndarray | None = None  # a dive's picture, matched once prepared
+        self._prepared = False  # the search index is built (a random mosaic's session)
         self._pool: ProcessPoolExecutor | None = None
         self._locked = False  # pan and zoom off (diving, fading)
         self._fade_token: object | None = None
@@ -197,6 +209,11 @@ class InfiniteWindow(QWidget):
         self.start_button = QPushButton("Start")
         self.start_button.setToolTip(START_TIP)
         self.start_button.clicked.connect(self.toggle_session)
+        self.new_start_button = QPushButton("New Start")
+        self.new_start_button.setToolTip(
+            "Start again from another random photo or mosaic, with the same settings."
+        )
+        self.new_start_button.clicked.connect(self.new_start)
         self.status = QLabel()
         self.status.setWordWrap(True)
         self.progress = progress_bar()
@@ -211,8 +228,12 @@ class InfiniteWindow(QWidget):
         ))  # fmt: skip
         group = QGroupBox("Session")
         layout = QVBoxLayout(group)
-        for widget in (self.start_button, self.status, self.progress, self.sub_status,
-                       self.sub_progress, self.level_label, help_text):  # fmt: skip
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.start_button)
+        buttons.addWidget(self.new_start_button)
+        layout.addLayout(buttons)
+        for widget in (self.status, self.progress, self.sub_status, self.sub_progress,
+                       self.level_label, help_text):  # fmt: skip
             layout.addWidget(widget)
         return group
 
@@ -231,8 +252,14 @@ class InfiniteWindow(QWidget):
 
     @property
     def busy(self) -> bool:
-        """Matching, diving or fading: no new dive yet."""
-        return self._job is not None or self.dive is not None or self._fade_token is not None
+        """Matching a level, diving or fading: no new dive yet (preparing allows one)."""
+        matching = self._job is not None and self._job_kind != "prepare"
+        return matching or self.dive is not None or self._fade_token is not None
+
+    @property
+    def can_start_anew(self) -> bool:
+        """New Start: running and not busy (a random mosaic may be preparing)."""
+        return self.running and not self.busy and self._queued is None
 
     def toggle_session(self) -> None:
         if self.running:
@@ -241,7 +268,7 @@ class InfiniteWindow(QWidget):
             self.start()
 
     def start(self) -> None:
-        """A new session with the current settings, from a random photo."""
+        """A new session with the current settings, from its start (Start with)."""
         app = self.app_session
         library = app.library if app.library is not None else app.open_library()
         if not len(library):
@@ -254,12 +281,40 @@ class InfiniteWindow(QWidget):
         self._pool = ProcessPoolExecutor(os.cpu_count())
         for _ in range(os.cpu_count() or 1):  # start the workers while the first level matches
             self._pool.submit(int)
+        self._prepared = False
+        self.new_start()
+
+    def new_start(self) -> None:
+        """Show the session's start: another random photo or mosaic."""
+        if not self.can_start_anew:
+            return
+        if self.settings.start == "mosaic":
+            self._start_mosaic()
+        else:
+            self._start_photo()
+        self._refresh()
+
+    def _start_photo(self) -> None:
+        self._clear_level()
+        self.level = None
         picture = self.infinite.picture(self.infinite.random_tile())
         width, height = CANVAS_WIDTH, CANVAS_WIDTH * picture.shape[0] / picture.shape[1]
         self._show_photo(picture, (width / 2, height / 2), (width, height), 0.0, 1.0)
         self.canvas.fit_to(0, 0, width, height)
-        self._match(picture, "Preparing tiles (the first level takes longest)…")
-        self._refresh()
+        self._match(picture, "first", "Preparing tiles (the first level takes longest)…")
+
+    def _start_mosaic(self) -> None:
+        if self.photo_layer is not None:
+            self.canvas.remove_layer(self.photo_layer)
+            self.photo_layer = None
+        width, height = self.canvas.width(), self.canvas.height()
+        level = self.infinite.random_mosaic(width / height if width > 0 and height > 0 else 1.5)
+        self._show_level(level)
+        self.level_label.setText(f"Random mosaic: {len(level.scene):,} tiles")
+        if not self._prepared and self._job is None:
+            self._prepare()
+        elif self._prepared:
+            self.status.setText("Ready.")
 
     def stop(self) -> None:
         """End the session: stop its work and clear the view."""
@@ -269,6 +324,7 @@ class InfiniteWindow(QWidget):
             self._job = None
         self.dive = None
         self._fade_token = None
+        self._queued = None
         self._locked = False
         self._clear_level()
         if self.photo_layer is not None:
@@ -282,33 +338,53 @@ class InfiniteWindow(QWidget):
         self.level_label.setText("")
         self._refresh()
 
-    def _match(self, picture: np.ndarray, message: str) -> None:
+    def _match(self, picture: np.ndarray, kind: str, message: str) -> None:
+        """Match a level in the background: kind "first" (a random photo: every core, it
+        may build the index) or "dive" (during the animation: fewer search threads)."""
         infinite = self.infinite
-        # The first level (index building) has every core; later ones match during a dive.
-        threads = None if self.level is None else DIVE_THREADS
+        threads = None if kind == "first" else DIVE_THREADS
 
         def work(progress, cancelled):
             return infinite.level(picture, progress, cancelled, self.detail_reported.emit,
                                   threads)  # fmt: skip
 
+        self._start_job(work, kind, message, self._on_matched)
+
+    def _prepare(self) -> None:
+        """Build the search index in the background (a random mosaic shows meanwhile)."""
+        infinite = self.infinite
+
+        def work(progress, cancelled):
+            infinite.prepare(progress, cancelled, self.detail_reported.emit)
+
+        self._start_job(work, "prepare", "Preparing tiles: dives match once ready…",
+                        self._on_prepared)  # fmt: skip
+
+    def _start_job(self, work, kind: str, message: str, on_done) -> None:
         job = Job(work, (MatchCancelled, SlicingCancelled), self)
         job.progress.connect(self._on_progress)
-        job.finished.connect(self._on_matched)
+        job.finished.connect(on_done)
         job.failed.connect(self._on_failed)
-        self._job, self._job_started = job, time.perf_counter()
+        self._job, self._job_kind, self._job_started = job, kind, time.perf_counter()
         self.status.setText(message)
         show_progress(self.progress, -1)
         job.start()
         self._refresh()
 
+    @property
+    def _followed(self) -> bool:
+        """The running job takes long enough to show its progress (not a dive's)."""
+        return self._job is not None and self._job_kind != "dive"
+
     def _on_progress(self, message: str, fraction: float) -> None:
-        if self.level is None:  # only the first level takes long enough to follow
-            self.status.setText(message)
+        if self._followed:
+            if self._job_kind == "first":
+                self.status.setText(message)
             show_progress(self.progress, fraction)
         self._show_sub(False)
 
     def _on_detail(self, message: str, fraction: float) -> None:
-        if self._job is None or self.level is not None:
+        if not self._followed:
             return
         self.sub_status.setText(message)
         show_progress(self.sub_progress, min(max(fraction, 0.0), 1.0))
@@ -317,6 +393,14 @@ class InfiniteWindow(QWidget):
     def _show_sub(self, shown: bool) -> None:
         self.sub_status.setVisible(shown)
         self.sub_progress.setVisible(shown)
+
+    def _on_prepared(self, _result) -> None:
+        self._job, self._prepared = None, True
+        self.status.setText("Ready." if self.dive is None else "Matching the next level…")
+        queued, self._queued = self._queued, None
+        if queued is not None:
+            self._match(queued, "dive", "Matching the next level…")
+        self._refresh()
 
     def _on_matched(self, level: Level) -> None:
         self._job = None
@@ -361,21 +445,25 @@ class InfiniteWindow(QWidget):
         """Move to a level: the photo covers its canvas as it covered the tile (or the
         view, at the start), the view refits to it, and it fades into the mosaic."""
         self.dive = None
-        self._clear_level()
-        self.level = level
         width, height = float(level.ctx.width), float(level.ctx.height)
         photo = self.photo_layer.instances
         photo["pos"], photo["size"], photo["rotation"] = (width / 2, height / 2), (width, height), 0
         self.photo_layer.mark_dirty()
-        self.canvas.fit_to(0, 0, width, height)
-        self.canvas.pixelate_above = PIXELATE_ABOVE
-        self.textures = TileTextures(level.scene, self.infinite.library, self, pool=self._pool)
-        self.textures.changed.connect(self._on_textures_changed)
-        self._new_tile_layer()
+        self._show_level(level)
         self.status.setText("Ready.")
         show_progress(self.progress, 1.0)
         self._show_sub(False)
         self._fade_photo()
+
+    def _show_level(self, level: Level) -> None:
+        """Show a level's tiles (under the photo, if any), fitted to the view."""
+        self._clear_level()
+        self.level = level
+        self.canvas.fit_to(0, 0, float(level.ctx.width), float(level.ctx.height))
+        self.canvas.pixelate_above = PIXELATE_ABOVE
+        self.textures = TileTextures(level.scene, self.infinite.library, self, pool=self._pool)
+        self.textures.changed.connect(self._on_textures_changed)
+        self._new_tile_layer()
 
     def _new_tile_layer(self) -> None:
         """The level's tiles below the photo, from the best textures there are."""
@@ -446,7 +534,11 @@ class InfiniteWindow(QWidget):
         self.dive = _Dive(index, self.tile_layer, self.canvas, end_zoom)
         self._show_photo(picture, tiles["pos"][index], size, tiles["rotation"][index], 0.0)
         self._locked = True
-        self._match(picture, "Matching the next level…")
+        if self._job is not None:  # preparing (a random mosaic's start): match once ready
+            self._queued = picture
+            self.status.setText("Preparing tiles: this dive matches once they are ready…")
+        else:
+            self._match(picture, "dive", "Matching the next level…")
         dive, duration = self.dive, float(self.settings.dive_seconds)
 
         def step(t: float) -> bool:
@@ -459,7 +551,7 @@ class InfiniteWindow(QWidget):
             dive.done = True
             if dive.matched is not None:
                 self._arrive(dive.matched)
-            else:
+            elif self._queued is None:  # else still preparing (and saying so)
                 self.status.setText("Matching the next level…")
             return False
 
@@ -492,12 +584,14 @@ class InfiniteWindow(QWidget):
     def _refresh(self) -> None:
         running = self.running
         self.start_button.setText("Stop" if running else "Start")
+        self.new_start_button.setVisible(running)
+        self.new_start_button.setEnabled(self.can_start_anew)
         self.start_button.setToolTip("End this session." if running else START_TIP)
         for form in (*self.forms.values(), self.slicer_form):
             form.setEnabled(not running)
         self.settings_note.setVisible(running)
-        self.progress.setVisible(self._job is not None and self.level is None)
-        if self._job is None:
+        self.progress.setVisible(self._followed)
+        if not self._followed:
             self._show_sub(False)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:

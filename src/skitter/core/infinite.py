@@ -2,7 +2,10 @@
 
 A session keeps its settings (`InfiniteSettings`: tile shape, columns,
 slicer, a few matching rules) from start to end. It starts from a random
-library photo; each level is a picture sliced and matched; diving into a
+library photo (matched as the first level), or from a random mosaic: random
+photos in the layout, over a canvas of the view's shape (`random_mosaic`,
+level 0, matching nothing; `prepare` builds the search index meanwhile).
+Each level is a picture sliced and matched; diving into a
 tile makes that tile's photo, as the tile shows it (its crop, mirrored,
 untinted), the next level's picture (`InfiniteSession.picture`). Every
 picture has the base tile's shape, so every level's canvas does too, and a
@@ -38,6 +41,7 @@ from skitter.core.matching.method import Reporter
 from skitter.core.matching.mosaic import MosaicMethod
 from skitter.core.matching.result import MatchResult, Progress
 from skitter.core.matching.run import MatchRun
+from skitter.core.matching.targets import FULL_DETAIL, level_weights
 from skitter.core.scene import MosaicScene
 from skitter.core.slicing import (
     TILE_ASPECTS,
@@ -53,10 +57,11 @@ from skitter.core.slicing.params import (
     FloatParam,
     IntParam,
 )
+from skitter.core.tiles.crops import aspect_classes
 from skitter.core.tiles.library import TileLibrary
 from skitter.core.tiles.render import render_crops_or_thumbs
 
-MOSAIC = ("tile_aspect", "columns", "slicer")  # InfiniteSettings by group
+MOSAIC = ("start", "tile_aspect", "columns", "slicer")  # InfiniteSettings by group
 MATCHING = ("tint", "tint_strength", "max_uses", "min_spacing", "mirror")
 DIVE = ("dive_seconds", "fade_seconds")
 SOURCE_PX_PER_TILE = 16  # least picture pixels across a base tile (4 per cell: full detail)
@@ -68,6 +73,12 @@ class InfiniteSettings(Configurable):
     """What every level of a session is made with (fixed while the session runs). The
     window shows them in three groups: MOSAIC, MATCHING and DIVE."""
 
+    start = ChoiceParam(
+        "photo", "Start with", choices=[("photo", "Random photo"), ("mosaic", "Random mosaic")],
+        help="Random photo: a library photo, matched as the first mosaic (the first level "
+             "takes longest). Random mosaic: the view filled with random photos in the "
+             "layout, at once; dive into one to begin.",
+    )  # fmt: skip
     tile_aspect = ChoiceParam(
         1.0, "Tile shape", choices=list(TILE_ASPECTS),
         help="Shape of every tile, and so of every mosaic: a tile you dive into becomes "
@@ -149,15 +160,30 @@ class Level:
     timings: dict = field(default_factory=dict)  # seconds per step
 
 
+def centered_crops(widths, heights, aspects) -> np.ndarray:
+    """(N, 4) the largest centered crop of each widths x heights photo with its aspect
+    (w / h), as fractions of the photo (the whole photo when its size is unknown)."""
+    widths, heights = np.asarray(widths, np.float64), np.asarray(heights, np.float64)
+    aspects = np.broadcast_to(np.asarray(aspects, np.float64), widths.shape)
+    known = (widths > 0) & (heights > 0)
+    photo = np.where(known, widths / np.where(known, heights, 1.0), aspects)
+    wide = photo > aspects
+    across = np.where(wide, aspects / photo, 1.0)
+    down = np.where(wide, 1.0, photo / aspects)
+    return np.stack([(1 - across) / 2, (1 - down) / 2, (1 + across) / 2, (1 + down) / 2], axis=1)
+
+
 def centered_crop(width: int, height: int, aspect: float) -> tuple[float, float, float, float]:
-    """The largest centered crop of a width x height photo with this aspect (w / h), as
-    fractions of the photo."""
-    photo = width / height if width > 0 and height > 0 else aspect
-    if photo > aspect:
-        share = aspect / photo
-        return ((1 - share) / 2, 0.0, (1 + share) / 2, 1.0)
-    share = photo / aspect
-    return (0.0, (1 - share) / 2, 1.0, (1 + share) / 2)
+    """centered_crops of one photo."""
+    return tuple(float(v) for v in centered_crops([width], [height], [aspect])[0])
+
+
+def blank_picture(aspect: float, width: int) -> np.ndarray:
+    """(H, W, 4) an opaque black picture of this shape: a canvas to slice with nothing
+    to follow."""
+    picture = np.zeros((max(1, round(width / aspect)), width, 4), np.uint8)
+    picture[..., 3] = 255
+    return picture
 
 
 def picture_size(native_width: float, aspect: float, columns: int) -> tuple[int, int]:
@@ -207,6 +233,50 @@ class InfiniteSession:
         crop = centered_crop(int(library.width[slot]), int(library.height[slot]),
                              self.layout.tile_aspect)  # fmt: skip
         return TileView(slot, crop)
+
+    def random_mosaic(self, aspect: float) -> Level:
+        """Level 0: random photos (each cropped to its region's shape) in the session's
+        layout, over a canvas of this shape (w / h: the view's, which it fills). Nothing is
+        matched, so it is instant."""
+        ctx = SliceContext(blank_picture(aspect, 256), self.layout)
+        regions = self.plan.evaluate(ctx)[-1].regions
+        n, library = len(regions), self.library
+        ids = library.ids
+        if not len(ids):
+            raise ValueError("the library has no photos in use")
+        slots = self.rng.choice(ids, n, replace=len(ids) < n).astype(np.int64)
+        rect = centered_crops(library.width[slots], library.height[slots],
+                              regions.size[:, 0] / regions.size[:, 1])  # fmt: skip
+        zeros = np.zeros((n, 3), np.float32)
+        result = MatchResult(
+            regions=regions, tile=slots, rect=rect.astype(np.float32),
+            mirrored=np.zeros(n, bool), cost=np.full(n, np.nan, np.float32),
+            tile_mean=zeros, tint_target=zeros, tint=0.0, quality=None, regret=[],
+        )  # fmt: skip
+        return Level(0, ctx.picture, ctx, result, MosaicScene.from_result(result, ctx))
+
+    def prepare(
+        self,
+        progress: Progress = lambda message, fraction: None,
+        cancelled=lambda: False,
+        detail: Progress | None = None,
+    ) -> None:
+        """Build what matching a level needs and the first level would otherwise build:
+        candidates and search indexes, for the shapes of the layout's regions (a start
+        that matches nothing, the random mosaic, runs it meanwhile)."""
+        report = Reporter(progress, cancelled, detail, None)
+        report.step("Slicing", 0.0)
+        width = self.layout.columns * SOURCE_PX_PER_TILE
+        ctx = SliceContext(blank_picture(self.layout.tile_aspect, width), self.layout)
+        regions = self.plan.evaluate(ctx, cancelled=cancelled)[-1].regions
+        classes, _ = aspect_classes(regions.size[:, 0] / regions.size[:, 1])
+        weights = level_weights(self.method.weights(), FULL_DETAIL)
+        for aspect in classes:
+            report.step(f"Indexing tiles for {aspect:.3g}:1 regions", None)
+            key, cands = self.matcher.candidates(aspect, self.method, report.detail)
+            if len(cands):
+                self.matcher.index(key, cands, self.method, report.detail, weights)
+        report.step("Ready", 1.0)
 
     def picture(self, tile: TileView) -> np.ndarray:
         """(H, W, 4) uint8: the photo as the tile shows it (untinted), at about its own
@@ -267,6 +337,8 @@ __all__ = [
     "InfiniteSettings",
     "Level",
     "TileView",
+    "blank_picture",
     "centered_crop",
+    "centered_crops",
     "picture_size",
 ]

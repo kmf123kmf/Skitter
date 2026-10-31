@@ -12,6 +12,7 @@ from skitter.core.infinite import (
     InfiniteSettings,
     TileView,
     centered_crop,
+    centered_crops,
     picture_size,
 )
 from skitter.core.tiles.library import TileLibrary
@@ -106,6 +107,45 @@ def test_a_session_dives_from_level_to_level(library, monkeypatch):
     second = session.level(mirrored)
     assert second.number == 2 and len(second.scene) == len(second.result.regions)
     assert len(calibrations) == first  # search efforts calibrated on the first level only
+
+
+def test_centered_crops_of_many_photos_at_once():
+    rects = centered_crops([200, 100, 0], [100, 200, 0], [1.0, 1.0, 2.0])
+    np.testing.assert_allclose(rects, [[0.25, 0, 0.75, 1], [0, 0.25, 1, 0.75], [0, 0, 1, 1]])
+
+
+def test_a_random_mosaic_fills_a_canvas_of_the_views_shape(library, monkeypatch):
+    from skitter.core.matching import matcher as matcher_module
+
+    settings = InfiniteSettings(columns=10, tile_aspect=4 / 3, start="mosaic")
+    session = InfiniteSession(library, settings, seed=6)
+    level = session.random_mosaic(16 / 9)
+    assert level.number == 0 and session.levels == 0  # dives number from 1
+    assert level.ctx.width / level.ctx.height == pytest.approx(16 / 9, rel=0.01)
+    scene = level.scene
+    assert len(scene) == len(level.result.regions) > 10 * 5
+    assert np.isin(scene.slot, library.ids).all()
+    assert np.allclose(scene.tint_shift, 0)  # photos as they are
+    # Each crop has its tile's shape.
+    photo = np.stack([library.width[scene.slot], library.height[scene.slot]], axis=1)
+    span = (scene.rect[:, 2:] - scene.rect[:, :2]) * photo
+    np.testing.assert_allclose(span[:, 0] / span[:, 1], 4 / 3, rtol=0.02)
+    other = session.random_mosaic(16 / 9)  # a new start: other photos
+    assert not np.array_equal(other.scene.slot, scene.slot)
+
+    # Preparing builds the index, so the first level only searches.
+    built = []
+    index_type = matcher_module.SearchIndex
+
+    def counted(*args, **kwargs):
+        built.append(1)
+        return index_type(*args, **kwargs)
+
+    monkeypatch.setattr(matcher_module, "SearchIndex", counted)
+    session.prepare()
+    assert built == [1]
+    session.level(session.picture(TileView(int(scene.slot[0]), tuple(scene.rect[0]))))
+    assert built == [1]
 
 
 def test_levels_can_search_with_fewer_threads(library):
@@ -245,7 +285,7 @@ def test_a_dive_waits_for_matching_on_the_photo(window, qapp):
     job_started = []
     original = win._match
 
-    def held(picture, message):  # the match "takes longer than the dive"
+    def held(picture, kind, message):  # the match "takes longer than the dive"
         job_started.append(picture)
 
     win._match = held
@@ -254,9 +294,58 @@ def test_a_dive_waits_for_matching_on_the_photo(window, qapp):
     run_animations(win.canvas, 2.0)
     assert win.dive is not None and win.dive.done and win.level is level
     assert win.photo_layer.instances["alpha"][0] == 1  # holding on the photo
-    win._match(job_started[0], "Matching the next level…")
+    win._match(job_started[0], "dive", "Matching the next level…")
     wait_for_level(win, qapp)
     assert win.level.number == 2 and win.dive is None
+
+
+def test_a_random_mosaic_start_fills_the_view_and_dives_once_prepared(window, qapp):
+    win = window
+    win.settings.update(start="mosaic")
+    win.set_settings(win.settings)
+    win.start_button.click()
+    # The mosaic shows at once, filling the view; the index builds meanwhile.
+    level = win.level
+    assert level is not None and level.number == 0 and win.photo_layer is None
+    view = win.canvas.width() / win.canvas.height()
+    assert level.ctx.width / level.ctx.height == pytest.approx(view, rel=0.01)
+    assert win._job_kind == "prepare" and not win.busy and win.progress.isVisibleTo(win)
+    assert "Random mosaic" in win.level_label.text()
+    assert win.new_start_button.isVisibleTo(win) and win.new_start_button.isEnabled()
+
+    # A dive while preparing plays, and its matching waits until the index is ready.
+    i = len(level.scene) // 2
+    sx, sy = win.canvas.camera.world_to_screen(*level.scene.center[i])
+    win._on_double_click(float(sx), float(sy))
+    assert win.dive is not None and win._queued is not None
+    assert not win.new_start_button.isEnabled()
+    run_animations(win.canvas, 1.0)
+    assert win.dive.done and win.level is level  # holding on the photo
+    wait_for_level(win, qapp)  # prepared: the queued dive starts matching
+    assert win._prepared and win._queued is None and win._job_kind == "dive"
+    wait_for_level(win, qapp)
+    assert win.level.number == 1 and win.dive is None
+    run_animations(win.canvas, 1.0)
+
+    # New Start: another random mosaic, at once (nothing to prepare again).
+    assert win.new_start_button.isEnabled()
+    win.new_start_button.click()
+    assert win.level.number == 0 and win._job is None and win.status.text() == "Ready."
+    first = win.level.scene.slot.copy()
+    win.new_start_button.click()
+    assert not np.array_equal(win.level.scene.slot, first)
+
+
+def test_new_start_shows_another_random_photo(window, qapp):
+    win = window
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    first = win.level
+    win.new_start_button.click()
+    assert win.level is None and win.photo_layer.instances["alpha"][0] == 1
+    wait_for_level(win, qapp)
+    assert win.level is not first and win.level.number == 2  # the session counts on
 
 
 def test_settings_persist_between_windows(window, qapp):
