@@ -22,7 +22,6 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
-    QSizePolicy,
     QToolButton,
     QVBoxLayout,
 )
@@ -34,7 +33,7 @@ from skitter.ui import icons
 from skitter.ui.jobs import Job, JobCancelled
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import thumb_crop
-from skitter.ui.style import muted
+from skitter.ui.style import fixed_width, muted
 from skitter.ui.widgets.candidate_grid import CandidateGrid
 
 PICKER_PX = 192  # longest side of candidate crops read for the picker (and the preview)
@@ -143,16 +142,6 @@ def elide(label: QLabel, text: str, width: int | None = None, bold: bool = False
     font.setBold(bold)
     width = max(width if width is not None else label.contentsRect().width(), 40)
     return QFontMetrics(font).elidedText(text, Qt.TextElideMode.ElideMiddle, width)
-
-
-def fixed_width(label: QLabel, lines: int = 0) -> QLabel:
-    """A label whose text never widens the panel (and, given lines, never changes its height)."""
-    label.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
-    label.setMinimumWidth(1)
-    if lines:
-        label.setFixedHeight(lines * QFontMetrics(label.font()).lineSpacing() + 2)
-        label.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
-    return label
 
 
 # Canvas overlays

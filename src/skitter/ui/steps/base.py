@@ -103,8 +103,9 @@ def view_and_panel(view: QWidget, panel: QWidget, key: str) -> QSplitter:
         width = int(preferences.settings().value(name, 0))
     except (TypeError, ValueError):
         width = 0
-    if width > 0:
-        splitter.setSizes([100_000, width])  # the view absorbs the difference
+    # The view absorbs the difference; the panel starts at its narrowest (not at its size
+    # hint, which counts wrapping labels as one long line).
+    splitter.setSizes([100_000, width if width > 0 else panel.minimumSizeHint().width()])
     splitter.splitterMoved.connect(
         lambda *_: preferences.settings().setValue(name, splitter.sizes()[1])
     )

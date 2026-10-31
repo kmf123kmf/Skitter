@@ -52,3 +52,20 @@ def background_slicing(monkeypatch):
     from skitter.ui.session import Session
 
     monkeypatch.setattr(Session, "slice_in_background", True)
+
+
+@pytest.fixture
+def windows_font(qapp):
+    """The font as on Windows (Segoe UI 9 pt), for a window to measure widths as users
+    see them: offscreen Qt otherwise falls back to a much wider font. (Set it on the
+    window, not the app: the app's font would stay changed for later tests.)"""
+    import os
+
+    from PySide6.QtGui import QFont, QFontDatabase
+
+    path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "segoeui.ttf")
+    font = QFontDatabase.addApplicationFont(path) if os.path.exists(path) else -1
+    if font < 0:
+        pytest.skip("needs the Windows UI font (Segoe UI)")
+    yield QFont("Segoe UI", 9)
+    QFontDatabase.removeApplicationFont(font)

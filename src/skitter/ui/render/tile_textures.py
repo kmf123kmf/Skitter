@@ -265,8 +265,9 @@ class PictureTextures(QObject):
         pass
 
     def close(self) -> None:
-        """Done with these textures: let them go once nothing refers to them."""
-        QTimer.singleShot(0, lambda: self.setParent(None))
+        """Done with these textures: let them go once nothing refers to them (dropped if
+        they are deleted first, with their window)."""
+        QTimer.singleShot(0, self, lambda: self.setParent(None))
 
     def set_scene(self, scene: MosaicScene, library=None) -> None:
         self.scene = scene
@@ -349,8 +350,9 @@ class TileTextures(QObject):
 
     def _release_if_idle(self) -> None:
         if self._closing and self._job is None and not self._crop_jobs:
-            # Not here and now: this may run in a slot of these textures or their job.
-            QTimer.singleShot(0, lambda: self.setParent(None))
+            # Not here and now: this may run in a slot of these textures or their job. With
+            # self as context: dropped if they are deleted first (their window closed).
+            QTimer.singleShot(0, self, lambda: self.setParent(None))
 
     def wait(self, timeout: float | None = None) -> None:
         """Block until full detail (and crops for picks) are loaded, delivering signals."""

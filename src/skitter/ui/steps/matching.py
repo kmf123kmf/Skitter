@@ -45,9 +45,8 @@ from skitter.ui.steps.tile_picker import (
     EditOverlays,
     elide,
     file_name,
-    fixed_width,
 )
-from skitter.ui.style import WARNING_STYLE, muted, progress_bar, show_progress
+from skitter.ui.style import WARNING_STYLE, fixed_width, muted, progress_bar, show_progress
 from skitter.ui.widgets.image_viewer import ImageViewer
 from skitter.ui.widgets.param_form import ParamForm
 

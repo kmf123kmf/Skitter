@@ -53,7 +53,7 @@ from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import TileTextures
 from skitter.ui.steps.base import StepPage, side_panel
 from skitter.ui.steps.camera_keys import CameraKeys
-from skitter.ui.style import muted
+from skitter.ui.style import TAB_STYLE, muted
 from skitter.ui.widgets.param_form import ParamForm
 from skitter.ui.widgets.transport import TransportBar
 
@@ -61,11 +61,6 @@ MARGIN = 0.05  # view margin around the mosaic, share of its size
 FRAME_DIM = 0.6  # opacity of the shade outside the export frame
 FAR = 1e7  # mosaic units: "everywhere" for the shade
 FRAME_SETTINGS = ("resolution", "width", "height", "framing", "margin")  # what the video shows
-# The style draws a chosen tab much like the others: mark it plainly.
-TAB_STYLE = (
-    "QTabBar::tab { padding: 4px 6px; border-bottom: 2px solid transparent; }"
-    "QTabBar::tab:selected { font-weight: bold; border-bottom: 2px solid palette(highlight); }"
-)
 
 
 class AnimateStep(StepPage):

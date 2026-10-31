@@ -19,8 +19,8 @@ Pan and zoom as usual; double-click a tile to dive into it:
   the tile (the photo layer), and the next level starts matching in the
   background (`InfiniteSession.level`).
 - Over the dive, the tile straightens and loses its tint while the view
-  zooms until it fills it, and every other tile flies outward, out of view
-  (`_dive_frame`).
+  zooms until it fills it, and every other tile leaves the view as the
+  Tiles leave by setting has it (core/dive_styles.py; `_dive_frame`).
 - Once both are done the window moves to the new level: the photo now
   covers the new canvas exactly as it covered the tile, so the view is
   refitted with nothing changing on screen (`_arrive`), and the photo fades
@@ -33,6 +33,11 @@ once and full-size crops when read (TileTextures, through a process pool
 kept running for the session); zooming in sharpens them (ZoomDetail).
 Pan and zoom are locked during a dive and the fade. F11 toggles full
 screen (the panel hides).
+
+The panel has the Session controls on top and two tabs below: Settings and
+Library (ui/library_panel.py's LibraryPanel, the same as on the main
+window's Tiles tab, on the app session's library). While a session runs the
+library can't be changed: its search index holds the photos it started with.
 
 Auto-dive (the Auto-Dive button, A) dives on its own until stopped (the
 button, A, Esc, or a click or the wheel on the mosaic): each mosaic shows
@@ -64,11 +69,14 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QStackedWidget,
+    QTabBar,
     QVBoxLayout,
     QWidget,
 )
 
-from skitter.core.easing import ease_in_out_cubic, ease_out_cubic
+from skitter.core.dive_styles import DiveStyle, DiveTiles, dive_seed, pick_style
+from skitter.core.easing import ease_in_out_cubic
 from skitter.core.infinite import (
     AUTO,
     DIVE,
@@ -82,6 +90,7 @@ from skitter.core.infinite import (
     Loop,
     Lure,
     TileView,
+    pick_weights,
 )
 from skitter.core.matching.mosaic import MosaicMethod
 from skitter.core.matching.result import MatchCancelled
@@ -90,18 +99,20 @@ from skitter.core.slicing.layout import CANVAS_WIDTH
 from skitter.ui import preferences
 from skitter.ui.canvas import MosaicCanvas
 from skitter.ui.jobs import Job
+from skitter.ui.library_panel import LibraryPanel
 from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import TileTextures
 from skitter.ui.render.zoom_detail import DETAIL_PAGES, DETAIL_SIDE, ZoomDetail
-from skitter.ui.steps.base import side_panel
-from skitter.ui.style import muted, progress_bar, show_progress
+from skitter.ui.steps.base import side_panel, view_and_panel
+from skitter.ui.style import TAB_STYLE, muted, progress_bar, show_progress
 from skitter.ui.widgets.param_form import ParamForm
 
 SETTINGS_KEY = "infinite/settings"  # preferences: the last session's settings (JSON)
 PLAN_KEY = "infinite/plan"  # and its slicers' settings
-FLY_OUT = 3.0  # how far the other tiles fly, in their distances from the dived-into tile
 PHOTO_IN = 0.2  # share of the dive over which the photo fades in over its tile
 PIXELATE_ABOVE = 4.0  # texels this large show as squares (not while diving: tiles blow up)
+LIBRARY_TAB = 1  # the panel's tabs: Settings, Library
+LIBRARY_LOCKED = "A session searches the photos it started with: stop it to change them."
 START_TIP = "Start a session from a random photo of the library."
 HIGHLIGHT_COLOR = (1.0, 1.0, 1.0)  # the outline of the tile auto-dive heads for
 HIGHLIGHT_PX = 3.0
@@ -139,16 +150,22 @@ def save_settings(settings: InfiniteSettings, plan: SlicingPlan) -> None:
 class _Dive:
     """What a dive into tile `index` starts from."""
 
-    def __init__(self, index: int, layer: SpriteLayer, canvas: MosaicCanvas, end_zoom: float):
+    def __init__(self, index: int, layer: SpriteLayer, canvas: MosaicCanvas, end_zoom: float,
+                 style: DiveStyle, seed: int):  # fmt: skip
         tiles = layer.instances
         self.index = index
         self.pos = tiles["pos"].astype(np.float64)
         self.center = self.pos[index].copy()
         self.rotation = float(tiles["rotation"][index])
         self.offset = tiles["offset"][index].copy()
+        self.size = tiles["size"][index].copy()
         cam = canvas.camera
         self.zoom0, self.zoom1 = float(cam.zoom), float(end_zoom)
         self.screen0 = (self.center - cam.center) * cam.zoom  # the tile's offset on screen
+        self.style = style  # how the other tiles leave
+        self.tiles = DiveTiles(self.pos, tiles["size"], tiles["rotation"], tiles["alpha"], index,
+                               cam.viewport / self.zoom0, cam.viewport / self.zoom1, seed,
+                               cam.turn((0.0, 1.0)))  # fmt: skip
         self.matched: Level | None = None  # the next level, once matched
         self.done = False  # the animation has finished
 
@@ -182,7 +199,6 @@ class InfiniteWindow(QWidget):
         # Jobs have no parent (it would keep each, and its inputs, for the window's life):
         # the last two are kept here, so each goes once a later one has started.
         self._recent_jobs: list[Job] = []
-        self._prepared = False  # the search index is built (a random mosaic's session)
         self._pool: ProcessPoolExecutor | None = None
         self._locked = False  # pan and zoom off (diving, fading)
         self._fade_token: object | None = None
@@ -201,14 +217,34 @@ class InfiniteWindow(QWidget):
         self.zoom_detail = ZoomDetail(self.canvas, self)
         self.detail_reported.connect(self._on_detail)
 
-        self.panel = side_panel(
-            self._build_session_group(), *self._build_settings_groups()
-        )  # fmt: skip
+        # The panel: Session on top, then the Settings and Library tabs.
+        self.library = LibraryPanel(session, lambda: float(self.settings.tile_aspect))
+        # A tab bar over a stack, as Animate's phases: a QTabWidget whose bar has a style
+        # sheet keeps its pages from following the window's font.
+        self.tab_bar = QTabBar()
+        self.tab_bar.setExpanding(True)
+        self.tab_bar.setDocumentMode(True)
+        self.tab_bar.setStyleSheet(TAB_STYLE)
+        self.pages = QStackedWidget()
+        settings = side_panel(*self._build_settings_groups(), resizable=True)
+        library = side_panel(self.library, resizable=True)
+        for title, page in (("Settings", settings), ("Library", library)):
+            self.tab_bar.addTab(title)
+            self.pages.addWidget(page)
+        self.tab_bar.currentChanged.connect(self._on_tab)
+        self.panel = QWidget()
+        column = QVBoxLayout(self.panel)
+        column.setContentsMargins(0, 0, 0, 0)
+        column.addWidget(self._build_session_group())
+        column.addWidget(self.tab_bar)
+        column.addWidget(self.pages, stretch=1)
+        self.splitter = view_and_panel(self.canvas, self.panel, "infinite")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
-        layout.addWidget(self.canvas, stretch=1)
-        layout.addWidget(self.panel)
+        layout.addWidget(self.splitter)
+        session.library_changed.connect(self._refresh)
+        session.busy_changed.connect(self._refresh)
         QShortcut(QKeySequence("F11"), self, self.toggle_full_screen)
         QShortcut(QKeySequence("Esc"), self, self._on_escape)
         QShortcut(QKeySequence("A"), self, self.toggle_auto)
@@ -251,6 +287,7 @@ class InfiniteWindow(QWidget):
         """Edit these settings from now on (the next session starts with them)."""
         self.settings = settings
         self._target_forms()
+        self.library.refresh_stats()  # its tile shape
 
     def _build_session_group(self) -> QGroupBox:
         self.start_button = QPushButton("Start")
@@ -294,6 +331,8 @@ class InfiniteWindow(QWidget):
             save_settings(self.settings, self.plan)
         if name == "loop" and not self.settings.loop:
             self._drop_loop()
+        if name == "tile_aspect":
+            self.library.refresh_stats()
         if name == "slicer":
             self.slicer_form.set_target(self.plan.slicers[self.settings.slicer])
         else:  # settings in one form may show or hide others in another (`when`)
@@ -329,7 +368,8 @@ class InfiniteWindow(QWidget):
         app = self.app_session
         library = app.library if app.library is not None else app.open_library()
         if not len(library):
-            self.status.setText("The tile library has no photos: add some on the Tiles tab.")
+            self.status.setText("The tile library has no photos: add some on the Library tab.")
+            self.tab_bar.setCurrentIndex(LIBRARY_TAB)
             return
         save_settings(self.settings, self.plan)
         base = next((m for m in app.project.match_methods.values()
@@ -338,7 +378,6 @@ class InfiniteWindow(QWidget):
         self._pool = ProcessPoolExecutor(os.cpu_count())
         for _ in range(os.cpu_count() or 1):  # start the workers while the first level matches
             self._pool.submit(int)
-        self._prepared = False
         self.new_start()
 
     def new_start(self) -> None:
@@ -370,10 +409,8 @@ class InfiniteWindow(QWidget):
         level = self.infinite.random_mosaic(width / height if width > 0 and height > 0 else 1.5)
         self._show_level(level)
         self.level_label.setText(f"Random mosaic: {len(level.scene):,} tiles")
-        if not self._prepared and self._job is None:
+        if self._job is None:  # once prepared, only its variety is new (the rest is cached)
             self._prepare()
-        elif self._prepared:
-            self.status.setText("Ready.")
         self._auto_next()
 
     def stop(self) -> None:
@@ -415,10 +452,10 @@ class InfiniteWindow(QWidget):
 
     def _prepare(self) -> None:
         """Build the search index in the background (a random mosaic shows meanwhile)."""
-        infinite = self.infinite
+        infinite, start = self.infinite, self.level  # the random mosaic: its variety too
 
         def work(progress, cancelled):
-            infinite.prepare(progress, cancelled, self.detail_reported.emit)
+            infinite.prepare(progress, cancelled, self.detail_reported.emit, start)
 
         self._start_job(work, "prepare", "Preparing tiles: dives match once ready…",
                         self._on_prepared)  # fmt: skip
@@ -461,12 +498,14 @@ class InfiniteWindow(QWidget):
         self.sub_progress.setVisible(shown)
 
     def _on_prepared(self, _result) -> None:
-        self._job, self._prepared = None, True
+        self._job = None
         self.status.setText("Ready." if self.dive is None else "Matching the next level…")
         queued, self._queued = self._queued, None
         if queued is not None:
             picture, lure, tile = queued
             self._match(picture, "dive", "Matching the next level…", lure, tile)
+        elif self.level is not None and self.level.variety is None and self.dive is None:
+            self._prepare()  # New Start meanwhile: the mosaic shown now needs its variety
         self._refresh()
 
     def _on_matched(self, level: Level) -> None:
@@ -620,7 +659,9 @@ class InfiniteWindow(QWidget):
         tiles = self.tile_layer.instances
         size = tiles["size"][index].astype(np.float64)
         _, end_zoom = self.canvas.camera.fit_params(0, 0, *size, margin=self.canvas.fit_margin)
-        self.dive = _Dive(index, self.tile_layer, self.canvas, end_zoom)
+        seed = dive_seed(index, tile.slot, len(tiles))
+        style = pick_style(str(self.settings.dive_style), seed)
+        self.dive = _Dive(index, self.tile_layer, self.canvas, end_zoom, style, seed)
         self._show_photo(picture, tiles["pos"][index], size, tiles["rotation"][index], 0.0)
         self._locked = True
         if next_level is not None:
@@ -651,14 +692,20 @@ class InfiniteWindow(QWidget):
 
     def _dive_frame(self, e: float) -> None:
         """The dive at e (0 to 1): the tile straightens, untints and fills the view while
-        the other tiles fly outward."""
+        the other tiles leave the view (Tiles leave by: the dive's style)."""
         dive, canvas = self.dive, self.canvas
         m = float(ease_in_out_cubic(e))
         tiles = self.tile_layer.instances
-        fly = FLY_OUT * float(ease_out_cubic(e))
-        tiles["pos"] = dive.pos + (dive.pos - dive.center) * fly
+        frame = dive.style.frame(dive.tiles, e)
+        tiles["pos"], tiles["size"] = frame.pos, frame.size
+        tiles["rotation"], tiles["alpha"] = frame.rotation, frame.alpha
+        if frame.shade is not None:
+            tiles["tint"][:, :3] = 0.0
+            tiles["tint"][:, 3] = frame.shade
+            tiles["tint"][dive.index] = 0.0
         i = dive.index
-        tiles["pos"][i] = dive.center
+        tiles["pos"][i], tiles["size"][i] = dive.center, dive.size
+        tiles["alpha"][i] = dive.tiles.alpha[i]
         tiles["rotation"][i] = dive.rotation * (1 - m)
         tiles["offset"][i] = dive.offset * (1 - m)
         self.tile_layer.mark_dirty()
@@ -706,11 +753,12 @@ class InfiniteWindow(QWidget):
         self._look_ahead()
         dwell = float(self.settings.dwell_seconds)
         self.status.setText(f"Auto-dive: next dive in {dwell:g} s." if dwell else "Auto-dive.")
-        QTimer.singleShot(round(dwell * 1000), lambda: self._approach(token))
+        QTimer.singleShot(round(dwell * 1000), self, lambda: self._approach(token))
 
     def pick_tile(self) -> int:
         """Auto-dive's next tile: at random among the tiles in view (Next tile: anywhere,
-        or among the tenth nearest the middle), leaving out those mostly hidden."""
+        or among the tenth nearest the middle), leaving out those mostly hidden, varied
+        ones likelier (Favor varied tiles: see core/infinite.py's Looks)."""
         scene, cam = self.level.scene, self.canvas.camera
         pos = scene.center
         half = cam.viewport / (2 * cam.zoom)
@@ -725,7 +773,10 @@ class InfiniteWindow(QWidget):
         if self.settings.next_tile == "middle" and len(pool) > 1:
             distance = np.linalg.norm(pos[pool] - cam.center, axis=1)
             pool = pool[np.argsort(distance)[: max(1, len(pool) // 10)]]
-        return int(self._rng.choice(pool))
+        variety = self.level.variety
+        weights = pick_weights(None if variety is None else variety[pool],
+                               float(self.settings.variety) / 100)  # fmt: skip
+        return int(self._rng.choice(pool, p=weights))
 
     def _approach(self, token: object) -> None:
         """Move to a tile and zoom in on it (to Zoom in to tiles across, over Zoom-in
@@ -733,7 +784,7 @@ class InfiniteWindow(QWidget):
         if token is not self._auto_token or self.busy or self.level is None:
             return
         if self._job is not None and self._job_kind == "ahead":  # wait for it
-            QTimer.singleShot(100, lambda: self._approach(token))
+            QTimer.singleShot(100, self, lambda: self._approach(token))
             return
         index = self._next_tile()
         settings, canvas = self.settings, self.canvas
@@ -764,7 +815,7 @@ class InfiniteWindow(QWidget):
                 return True
             self._end_approach()
             pause = round(float(settings.pause_seconds) * 1000)
-            QTimer.singleShot(pause, lambda: self._auto_dive(token, index))
+            QTimer.singleShot(pause, self, lambda: self._auto_dive(token, index))
             return False
 
         canvas.add_animation(step)
@@ -913,9 +964,16 @@ class InfiniteWindow(QWidget):
 
     # Window
 
+    def _on_tab(self, index: int) -> None:
+        self.pages.setCurrentIndex(index)
+        if index == LIBRARY_TAB:
+            self.library.open_library()
+
     def _refresh(self) -> None:
         running = self.running
         self.start_button.setText("Stop" if running else "Start")
+        self.start_button.setEnabled(running or self.app_session.busy != "library")
+        self.library.set_locked(LIBRARY_LOCKED if running else None)
         self.new_start_button.setVisible(running)
         self.new_start_button.setEnabled(self.can_start_anew)
         self.start_button.setToolTip("End this session." if running else START_TIP)

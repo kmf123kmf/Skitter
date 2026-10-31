@@ -8,8 +8,10 @@ level 0, matching nothing; `prepare` builds the search index meanwhile).
 Each level is a picture sliced and matched; diving into a
 tile makes that tile's photo, as the tile shows it (its crop, mirrored,
 untinted), the next level's picture (`InfiniteSession.picture`). Every
-picture has the base tile's shape, so every level's canvas does too, and a
-tile seen up close becomes its own mosaic seamlessly.
+picture has the shape of the tile it is of (the base tile's, or a slicer's
+turned one: Photo Pile's landscape photos in a portrait layout), so every
+level's canvas does too, and a tile seen up close becomes its own mosaic
+seamlessly.
 
 Levels must be quick, so they are matched without what a single mosaic
 spends extra time on (`InfiniteSession.level`): no refinement or adaptive
@@ -58,6 +60,7 @@ from dataclasses import dataclass, field
 import faiss
 import numpy as np
 
+from skitter.core import dive_styles
 from skitter.core.matching.candidates import Pins
 from skitter.core.matching.index import rerank
 from skitter.core.matching.matcher import Matcher
@@ -83,19 +86,22 @@ from skitter.core.slicing.params import (
     RangeParam,
 )
 from skitter.core.tiles.crops import aspect_classes
-from skitter.core.tiles.descriptors import MEAN
+from skitter.core.tiles.descriptors import DIM, LEVEL2, MEAN, TEXTURE, tile_descriptors
 from skitter.core.tiles.library import TileLibrary
 from skitter.core.tiles.render import render_crops_or_thumbs
 
 MOSAIC = ("start", "tile_aspect", "columns", "slicer")  # InfiniteSettings by group
 MATCHING = ("tint", "tint_strength", "max_uses", "min_spacing", "mirror")
-DIVE = ("dive_seconds", "fade_seconds")
-AUTO = ("dwell_seconds", "next_tile", "approach_seconds", "approach_tiles", "pause_seconds",
-        "highlight", "loop", "loop_dives", "loop_fit", "loop_tint", "look_ahead")  # fmt: skip
+DIVE = ("dive_seconds", "dive_style", "fade_seconds")
+AUTO = ("dwell_seconds", "next_tile", "variety", "approach_seconds", "approach_tiles",
+        "pause_seconds", "highlight", "loop", "loop_dives", "loop_fit", "loop_tint",
+        "look_ahead")  # fmt: skip
 LIVE = DIVE + AUTO  # settings a running session follows as they change (pacing only)
 SOURCE_PX_PER_TILE = 16  # least picture pixels across a base tile (4 per cell: full detail)
 MAX_SOURCE_PX = 4096  # longest side a level's picture is read at
 DIVE_THREADS = max(2, (os.cpu_count() or 4) // 4)  # search threads while the UI animates
+LOOK_SAMPLE = 4096  # library photos a session's typical look is taken from (`Looks`)
+VARIETY_POWER = 4.0  # Favor varied tiles at 100%: picks weighted by variety to this power
 
 
 class InfiniteSettings(Configurable):
@@ -147,7 +153,15 @@ class InfiniteSettings(Configurable):
     dive_seconds = FloatParam(
         1.5, "Dive time", min=0.3, max=10.0, step=0.1, decimals=1, suffix=" s",
         help="How long a dive takes: the tile straightens and fills the view while the "
-             "others fly out of it.",
+             "others leave the view.",
+    )  # fmt: skip
+    dive_style = ChoiceParam(
+        "fly_out", "Tiles leave by", choices=dive_styles.CHOICES,
+        help="How the other tiles clear the view during a dive. Fly out: straight away "
+             "from the tile. Vortex: swirling around it. Ripple: shrinking away, nearest "
+             "first. Fade away: dissolving where they lie. Fall away: dropping off the "
+             "bottom. Card flip: turning edge-on in a wave. Wind: blown off one side. "
+             "Random: a different one each dive (a loop replays the same ones).",
     )  # fmt: skip
     fade_seconds = FloatParam(
         0.6, "Fade time", min=0.0, max=5.0, step=0.1, decimals=1, suffix=" s",
@@ -164,6 +178,13 @@ class InfiniteSettings(Configurable):
         choices=[("anywhere", "Anywhere in view"), ("middle", "Near the middle")],
         help="Auto-dive: where the next tile is picked, at random among the tiles in view "
              "(those mostly hidden under others left out).",
+    )  # fmt: skip
+    variety = FloatParam(
+        70.0, "Favor varied tiles", min=0.0, max=100.0, step=10.0, decimals=0, suffix="%",
+        help="Auto-dive: how strongly the pick favors tiles with something in them (light "
+             "and dark, detail) and of the library's usual brightness and color. Without it "
+             "a dive into a dark or plain tile tends to lead to more of the same, mosaic "
+             "after mosaic. 0: every tile in view is as likely.",
     )  # fmt: skip
     approach_seconds = FloatParam(
         2.0, "Zoom-in time", min=0.0, max=60.0, step=0.5, decimals=1, suffix=" s",
@@ -247,7 +268,7 @@ class Level:
     """One mosaic of the session."""
 
     number: int  # 1 for the session's first
-    picture: np.ndarray  # (H, W, 4) uint8, the base tile's shape
+    picture: np.ndarray  # (H, W, 4) uint8, the shape of the tile it is of
     ctx: SliceContext
     result: MatchResult
     scene: MosaicScene
@@ -255,6 +276,74 @@ class Level:
     source: "TileView | None" = None  # the tile it is the mosaic of (None: not a tile's)
     home: int = -1  # scene index of the lure's tile, placed (see Lure; -1: none)
     home_fit: float = float("nan")  # its error there over the spot's best's (1: the best)
+    variety: np.ndarray | None = None  # (n,) each tile's, scene order (see Looks.variety)
+
+
+@dataclass(frozen=True)
+class Looks:
+    """What a library's photos usually look like, as tiles: the reference auto-dive's
+    picks are weighed against (`variety`).
+
+    Each crop is summed up by its average OKLab color and its liveliness: the spread of
+    lightness across its 4 x 4 cells (contrast) with the spread within them (detail)."""
+
+    mean: np.ndarray  # (3,) the median photo's average color
+    spread: np.ndarray  # (3,) how far averages usually are from it, per channel
+    lively: float  # the median liveliness
+
+    @staticmethod
+    def of(desc: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """(N, 3) average colors and (N,) liveliness of crops' descriptors."""
+        desc = np.asarray(desc, np.float64)
+        lightness = desc[:, LEVEL2][:, 0::3]  # the cells' lightness, less the average
+        contrast = np.sqrt(np.mean(lightness**2, axis=1))
+        detail = desc[:, TEXTURE].mean(axis=1)
+        return desc[:, MEAN], np.hypot(contrast, detail)
+
+    @classmethod
+    def sample(cls, library: TileLibrary, aspect: float, rng, count: int = LOOK_SAMPLE):
+        """The looks of up to count random library photos, centered crops of this shape."""
+        ids = library.ids
+        slots = np.sort(rng.choice(ids, min(count, len(ids)), replace=False))
+        rects = centered_crops(library.width[slots], library.height[slots], aspect)
+        mean, lively = cls.of(describe_crops(library, slots, rects))
+        q1, median, q3 = np.percentile(mean, [25, 50, 75], axis=0)
+        spread = np.maximum((q3 - q1) / 1.35, 1e-3)  # a robust standard deviation
+        return cls(median, spread, max(float(np.median(lively)), 1e-6))
+
+    def variety(self, desc: np.ndarray) -> np.ndarray:
+        """(N,) in [0, 1] for crops' descriptors: 1 for a crop at least as lively as the
+        median photo and of about its color; toward 0 for flat ones, or ones far darker,
+        brighter or more colored than photos usually are."""
+        mean, lively = self.of(desc)
+        livelier = np.clip(lively / self.lively, 0.0, 1.0)
+        off = (mean - self.mean) / self.spread
+        usual = np.exp(-0.5 * np.sum(off**2, axis=1) / len(self.mean))
+        return livelier * usual
+
+
+def describe_crops(library: TileLibrary, slots, rects) -> np.ndarray:
+    """(N, DIM) descriptors of crops (rects: fractions) of library photos, from their
+    thumbnails: only those photos' are read."""
+    slots = np.asarray(slots, np.int64)
+    rects = np.asarray(rects, np.float32).reshape(-1, 4)
+    if not len(slots):
+        return np.zeros((0, DIM), np.float32)
+    photos, which = np.unique(slots, return_inverse=True)
+    order = np.argsort(which, kind="stable")  # grouped by photo, as tile_descriptors wants
+    desc = np.empty((len(slots), DIM), np.float32)
+    desc[order] = tile_descriptors(library.thumbs[photos], library.thumb_size[photos],
+                                   which[order], rects[order])  # fmt: skip
+    return desc
+
+
+def pick_weights(variety: np.ndarray | None, strength: float) -> np.ndarray | None:
+    """Probabilities of picking tiles of this variety (Favor varied tiles: strength 0 to
+    1), or None for every tile alike."""
+    if variety is None or strength <= 0 or not len(variety):
+        return None
+    weights = np.maximum(np.asarray(variety, np.float64), 1e-6) ** (VARIETY_POWER * strength)
+    return weights / weights.sum()
 
 
 def centered_crops(widths, heights, aspects) -> np.ndarray:
@@ -319,6 +408,19 @@ class InfiniteSession:
         self.efforts: dict = {}  # calibrated search efforts, kept for every later level
         self.rng = np.random.default_rng(seed)
         self.levels = 0  # levels made so far
+        self._looks: Looks | None = None
+
+    @property
+    def looks(self) -> Looks:
+        """The library's usual looks (sampled once, at the tile shape)."""
+        if self._looks is None:
+            self._looks = Looks.sample(self.library, self.layout.tile_aspect,
+                                       np.random.default_rng(0))  # fmt: skip
+        return self._looks
+
+    def variety(self, scene: MosaicScene) -> np.ndarray:
+        """(n,) each tile's variety (Looks.variety), in scene order."""
+        return self.looks.variety(describe_crops(self.library, scene.slot, scene.rect))
 
     def random_tile(self) -> TileView:
         """A random photo of the library, cropped to the tile shape: the first picture."""
@@ -352,17 +454,20 @@ class InfiniteSession:
         )  # fmt: skip
         scene = MosaicScene.from_result(result, ctx)
         scene.visible_share  # noqa: B018 (auto-dive asks; at the start, not mid-animation)
-        return Level(0, ctx.picture, ctx, result, scene)
+        return Level(0, ctx.picture, ctx, result, scene)  # its variety: in `prepare`
 
     def prepare(
         self,
         progress: Progress = lambda message, fraction: None,
         cancelled=lambda: False,
         detail: Progress | None = None,
+        start: Level | None = None,
     ) -> None:
         """Build what matching a level needs and the first level would otherwise build:
         candidates and search indexes, for the shapes of the layout's regions (a start
-        that matches nothing, the random mosaic, runs it meanwhile)."""
+        that matches nothing, the random mosaic, runs it meanwhile), and the library's
+        usual looks. start: a level to give its variety (the random mosaic's: reading
+        its thumbnails would stall the UI thread)."""
         report = Reporter(progress, cancelled, detail, None)
         report.step("Slicing", 0.0)
         width = self.layout.columns * SOURCE_PX_PER_TILE
@@ -375,15 +480,25 @@ class InfiniteSession:
             key, cands = self.matcher.candidates(aspect, self.method, report.detail)
             if len(cands):
                 self.matcher.index(key, cands, self.method, report.detail, weights)
+        report.step("Sampling the library's looks", None)
+        if start is not None:
+            start.variety = self.variety(start.scene)
+        else:
+            self.looks  # noqa: B018 (sampled here, in the background)
         report.step("Ready", 1.0)
 
     def picture(self, tile: TileView, path: str | None = None) -> np.ndarray:
-        """(H, W, 4) uint8: the photo as the tile shows it (untinted), at about its own
-        resolution (see picture_size). Its thumbnail stands in if the file can't be read.
-        path: the photo's (given, it may run off the library's thread: no database)."""
+        """(H, W, 4) uint8: the photo as the tile shows it (untinted), in its crop's shape,
+        at about its own resolution (see picture_size). Its thumbnail stands in if the file
+        can't be read. path: the photo's (given, it may run off the library's thread: no
+        database)."""
         library, slot = self.library, tile.slot
-        span = (tile.rect[2] - tile.rect[0]) * float(library.width[slot])
-        size = picture_size(span, self.layout.tile_aspect, self.layout.columns)
+        x0, y0, x1, y1 = tile.rect
+        span = (x1 - x0) * float(library.width[slot])
+        tall = (y1 - y0) * float(library.height[slot])
+        # The crop's own shape: a turned tile's is not the base tile's (unknown size: that).
+        aspect = span / tall if span > 0 and tall > 0 else self.layout.tile_aspect
+        size = picture_size(span, aspect, self.layout.columns)
         images, _ = render_crops_or_thumbs(
             library.paths([slot]) if path is None else [path], np.array([tile.rect]),
             np.array([size]),
@@ -441,7 +556,8 @@ class InfiniteSession:
             mean = result.tile_mean[region]
             scene.tint_shift[home] = lure.tint * (scene.target_color[home] - mean)
             scene.tile_color[home] = mean + scene.tint_shift[home]
-        return Level(number, picture, ctx, result, scene, timings, source, home, fit)
+        variety = self.variety(scene)  # auto-dive's weights: here, not on the UI thread
+        return Level(number, picture, ctx, result, scene, timings, source, home, fit, variety)
 
     def look_ahead(
         self,

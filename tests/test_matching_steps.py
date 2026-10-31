@@ -68,8 +68,8 @@ def matching_step(window):
 
 def build_library(window, photos):
     step = tiles_step(window)
-    step.add_folder(photos)
-    step.update_library()
+    step.library.add_folder(photos)
+    step.library.update_library()
     assert window.session.busy == "library"
     window.session.wait_for_job()
     return step
@@ -82,18 +82,18 @@ def test_tiles_step_builds_library_in_background(sliced, photos):
     assert window.tabs.currentWidget() is step
     # Matching may follow without a library (some methods need none), not while it updates.
     assert step.is_complete() and window.next_button.isEnabled()
-    step.add_folder(photos)
-    step.update_library()
+    step.library.add_folder(photos)
+    step.library.update_library()
     assert not step.is_complete() and not window.next_button.isEnabled()
     window.session.wait_for_job()
     assert window.session.busy is None
     assert step.is_complete() and window.next_button.isEnabled()
-    assert step._tiles.text() == "40" and step.folders.topLevelItemCount() == 1
-    assert "Added 40" in step.status.text()
+    assert step.library._tiles.text() == "40" and step.library.folders.topLevelItemCount() == 1
+    assert "Added 40" in step.library.status.text()
     assert window.tabs.isTabEnabled(3)
 
-    step.folders.setCurrentItem(step.folders.topLevelItem(0))
-    assert step.forget_folder(confirm=False)
+    step.library.folders.setCurrentItem(step.library.folders.topLevelItem(0))
+    assert step.library.forget_folder(confirm=False)
     assert window.session.library.roots == [] and len(window.session.library) == 0
 
 
@@ -109,14 +109,14 @@ def test_tiles_step_folder_tree_leaves_folders_out_and_relinks(sliced, tmp_path,
             color = tuple(int(c) for c in rng.integers(0, 256, 3))
             Image.new("RGB", (60, 60), color).save(photos / folder / f"{i}.png")
     step = tiles_step(window)
-    step.add_folder(photos)
-    new = step.folders.topLevelItem(0)
-    assert new.text(1) == "not read yet" and "Update Library" in step.status.text()
+    step.library.add_folder(photos)
+    new = step.library.folders.topLevelItem(0)
+    assert new.text(1) == "not read yet" and "Update Library" in step.library.status.text()
     new.setExpanded(True)  # its subfolders on disk, before anything is read
     assert [(new.child(i).text(0), new.child(i).text(1)) for i in range(new.childCount())] == [
         ("Birds", "not read yet"), ("cats", "not read yet")]  # fmt: skip
     build_library(window, photos)
-    tree = step.folders
+    tree = step.library.folders
     root = tree.topLevelItem(0)
     assert root.text(1) == "30" and root.checkState(0) == Qt.CheckState.Checked
     root.setExpanded(True)
@@ -129,7 +129,7 @@ def test_tiles_step_folder_tree_leaves_folders_out_and_relinks(sliced, tmp_path,
 
     root.child(0).setCheckState(0, Qt.CheckState.Unchecked)  # leave Birds out
     qapp.processEvents()
-    assert len(session.library) == 18 and step._tiles.text() == "18 in use of 30"
+    assert len(session.library) == 18 and step.library._tiles.text() == "18 in use of 30"
     root = tree.topLevelItem(0)  # the tree was rebuilt, still open
     assert root.isExpanded() and root.checkState(0) == Qt.CheckState.PartiallyChecked
     assert root.text(1) == "18 of 30" and root.child(0).checkState(0) == Qt.CheckState.Unchecked
@@ -138,19 +138,19 @@ def test_tiles_step_folder_tree_leaves_folders_out_and_relinks(sliced, tmp_path,
 
     # The folder moves: its root goes offline, keeps its photos, and can be located.
     photos.rename(tmp_path / "moved")
-    step.update_library()
+    step.library.update_library()
     session.wait_for_job()
-    assert tree.topLevelItem(0).text(1) == "offline" and "offline" in step.status.text()
+    assert tree.topLevelItem(0).text(1) == "offline" and "offline" in step.library.status.text()
     assert len(session.library) == 18 and session.mosaic_is_valid
     tree.setCurrentItem(tree.topLevelItem(0))
-    assert step.locate_folder(tmp_path / "moved")
+    assert step.library.locate_folder(tmp_path / "moved")
     assert session.library.roots == [(tmp_path / "moved").resolve()]
     assert tree.topLevelItem(0).text(1) == "18 of 30" and session.mosaic_is_valid
 
     # Forgetting it drops its photos: the mosaic that shows them needs matching again.
     assert session.mosaic_uses_folder(tmp_path / "moved") == len(session.project.regions)
     tree.setCurrentItem(tree.topLevelItem(0))
-    assert step.forget_folder(confirm=False)
+    assert step.library.forget_folder(confirm=False)
     assert tree.topLevelItemCount() == 0 and not session.mosaic_is_valid
     assert not matching_step(window).is_complete()
 
@@ -164,12 +164,12 @@ def test_tiles_step_lists_subfolders_not_read(sliced, tmp_path, qapp):
         (photos / folder).mkdir(parents=True)
         Image.new("RGB", (60, 60), (200, 40, 40)).save(photos / folder / "a.png")
     step = tiles_step(window)
-    step.add_folder(photos)
+    step.library.add_folder(photos)
     session.set_folder_included(photos / "2014", False)  # before its first read
-    step.update_library()
+    step.library.update_library()
     session.wait_for_job()
     assert len(session.library) == 2
-    root = step.folders.topLevelItem(0)
+    root = step.library.folders.topLevelItem(0)
     root.setExpanded(True)
     rows = [(root.child(i).text(0), root.child(i).text(1), root.child(i).checkState(0))
             for i in range(root.childCount())]  # fmt: skip
@@ -178,7 +178,7 @@ def test_tiles_step_lists_subfolders_not_read(sliced, tmp_path, qapp):
                     ("2015", "1", Qt.CheckState.Checked)]  # fmt: skip
     root.child(1).setCheckState(0, Qt.CheckState.Checked)  # ticked: read on the next update
     qapp.processEvents()
-    step.update_library()
+    step.library.update_library()
     session.wait_for_job()
     assert len(session.library) == 3
 
@@ -206,7 +206,7 @@ def test_tiles_step_panel_and_folder_list_resize_and_views_never_flash(sliced, p
     assert int(preferences.settings().value("tiles/panel_width")) == splitter.sizes()[1]
 
     # The folder list's grip sets its height (and remembers it).
-    grip, tree = step.folders_grip, step.folders
+    grip, tree = step.library.folders_grip, step.library.folders
     before = tree.height()
     QTest.mousePress(grip, Qt.MouseButton.LeftButton, pos=QPoint(10, 4))
     QTest.mouseMove(grip, QPoint(10, 124))
@@ -219,7 +219,7 @@ def test_tiles_step_panel_and_folder_list_resize_and_views_never_flash(sliced, p
     Image.new("RGB", (60, 60), (10, 200, 30)).save(photos / "new.png")
     shown = []
     window.session.library_changed.connect(lambda: shown.append(step._shown))
-    step.update_library()
+    step.library.update_library()
     window.session.wait_for_job()
     qapp.processEvents()
     assert step._colors_job is not None or step._colors_version == window.session.library.state
@@ -236,8 +236,9 @@ def test_tiles_step_shows_what_the_library_can_paint(sliced, photos):
     step = build_library(window, photos)
     step.wait_for_colors(10)
     assert step._colors is not None and len(step._colors) == 40
-    assert step._photo_size.text().startswith("60 px")
-    assert "portrait" in step._shapes.text() and step._detail.text() == "60 px tiles"
+    library = step.library
+    assert library._photo_size.text().startswith("60 px")
+    assert "portrait" in library._shapes.text() and library._detail.text() == "60 px tiles"
 
     # Color map: a swatch for every displayable cell, a tile in the cells tiles reach.
     assert step._shown[0] == COLOR_MAP and len(step._layers) == 2
@@ -892,23 +893,6 @@ def overflowing_panels(window, qapp) -> list[str]:
             if need > have:
                 too_wide.append(f"{type(step).__name__}: needs {need} px, has {have}")
     return too_wide
-
-
-@pytest.fixture
-def windows_font(qapp):
-    """The font as on Windows (Segoe UI 9 pt), for a window to measure widths as users
-    see them: offscreen Qt otherwise falls back to a much wider font. (Set it on the
-    window, not the app: the app's font would stay changed for later tests.)"""
-    import os
-
-    from PySide6.QtGui import QFont, QFontDatabase
-
-    path = os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "segoeui.ttf")
-    font = QFontDatabase.addApplicationFont(path) if os.path.exists(path) else -1
-    if font < 0:
-        pytest.skip("needs the Windows UI font (Segoe UI)")
-    yield QFont("Segoe UI", 9)
-    QFontDatabase.removeApplicationFont(font)
 
 
 def test_every_side_panel_fits_its_width(windows_font, sliced, photos, qapp):

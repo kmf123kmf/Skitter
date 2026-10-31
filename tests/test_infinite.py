@@ -1,5 +1,6 @@
 """Infinite Mosaic: sessions of levels (core/infinite.py) and its window (headless)."""
 
+import threading
 import time
 
 import numpy as np
@@ -19,6 +20,7 @@ from skitter.core.infinite import (
     centered_crops,
     picture_size,
 )
+from skitter.core.slicing import SlicingPlan
 from skitter.core.tiles.library import TileLibrary
 
 
@@ -60,6 +62,89 @@ def test_pictures_have_enough_pixels_per_tile_and_no_more_than_the_cap():
     assert picture_size(100, 1.0, 40) == (40 * SOURCE_PX_PER_TILE,) * 2  # enlarged
     w, h = picture_size(10_000, 2 / 3, 40)  # capped on its longest side (the height)
     assert h == 4096 and w == pytest.approx(4096 * 2 / 3, abs=1)
+
+
+def crop_descriptors(lightness, cells=None, detail=0.0, color=(0.0, 0.0)):
+    """A crop's descriptor: its average lightness and color, its 4 x 4 cells' lightness
+    (default: all alike) and the spread within them."""
+    from skitter.core.tiles.descriptors import DIM, LEVEL2, MEAN, TEXTURE
+
+    desc = np.zeros(DIM, np.float32)
+    desc[MEAN] = (lightness, *color)
+    if cells is not None:
+        level2 = desc[LEVEL2].reshape(16, 3)
+        level2[:, 0] = np.asarray(cells, np.float32) - np.mean(cells)
+        desc[LEVEL2] = level2.ravel()
+    desc[TEXTURE] = detail
+    return desc
+
+
+def test_variety_favors_lively_tiles_of_the_usual_brightness_and_color():
+    from skitter.core.infinite import Looks, pick_weights
+
+    looks = Looks(np.array([0.6, 0.0, 0.0]), np.array([0.12, 0.03, 0.03]), 0.1)
+    lively = np.tile([0.4, 0.8], 8)  # half the cells dark, half light: contrast 0.2
+    desc = np.stack([
+        crop_descriptors(0.6, lively, 0.05),  # usual brightness, lively
+        crop_descriptors(0.05),  # black, flat
+        crop_descriptors(0.97),  # white, flat
+        crop_descriptors(0.6),  # usual brightness, flat
+        crop_descriptors(0.08, np.tile([0.0, 0.16], 8), 0.02),  # dark, a little detail
+        crop_descriptors(0.6, lively, 0.05, color=(0.2, 0.0)),  # a strong color cast
+    ])  # fmt: skip
+    variety = looks.variety(desc)
+    assert variety[0] == pytest.approx(1.0)
+    assert np.all(variety[1:] < 0.2) and np.all(variety >= 0)
+    assert variety[4] > variety[1]  # some detail beats none
+
+    assert pick_weights(variety, 0.0) is None  # every tile alike
+    assert pick_weights(None, 0.7) is None  # no variety known (a level without it)
+    weights = pick_weights(variety, 0.7)
+    assert weights.sum() == pytest.approx(1.0) and weights.argmax() == 0
+    assert weights[0] > 0.9  # the lively tile is far likelier than the five others together
+    assert np.all(np.diff(pick_weights(np.array([0.2, 0.5, 1.0]), 1.0)) > 0)
+
+
+def test_levels_know_their_tiles_variety(library):
+    from skitter.core.infinite import describe_crops
+    from skitter.core.tiles.descriptors import tile_descriptors
+
+    session = InfiniteSession(library, InfiniteSettings(columns=6, max_uses=0), seed=2)
+    looks = session.looks
+    assert looks.lively > 0 and np.all(looks.spread > 0)
+    level = session.level(session.picture(session.random_tile()))
+    scene = level.scene
+    assert level.variety.shape == (len(scene),)
+    assert np.all((level.variety >= 0) & (level.variety <= 1))
+    # Reading only the scene's photos describes them as reading them all would.
+    order = np.argsort(scene.slot, kind="stable")
+    full = np.empty((len(scene), 67), np.float32)
+    full[order] = tile_descriptors(library.thumbs, library.thumb_size, scene.slot[order],
+                                   scene.rect[order])  # fmt: skip
+    np.testing.assert_allclose(describe_crops(library, scene.slot, scene.rect), full, atol=1e-6)
+    start = session.random_mosaic(1.5)  # instant: its variety comes with prepare
+    assert start.variety is None
+    session.prepare(start=start)
+    assert start.variety.shape == (len(start.scene),)
+
+
+def test_a_turned_tile_becomes_a_picture_and_level_of_its_own_shape(library):
+    """Photo Pile turns some photos a quarter turn: in a portrait layout they are landscape,
+    and so are their pictures and levels (not squeezed into the base tile's shape)."""
+    plan = SlicingPlan()
+    plan.slicers["pile"].update(portrait=0.5, rotation=0.0)
+    settings = InfiniteSettings(tile_aspect=2 / 3, columns=6, slicer="pile", max_uses=0)
+    session = InfiniteSession(library, settings, plan, seed=3)
+    level = session.level(session.picture(session.random_tile()))
+    scene = level.scene
+    shapes = scene.size[:, 0] / scene.size[:, 1]
+    for aspect in (3 / 2, 2 / 3):  # a turned photo, and one as laid out
+        i = int(np.flatnonzero(np.isclose(shapes, aspect, rtol=0.02))[0])
+        tile = TileView(int(scene.slot[i]), tuple(float(v) for v in scene.rect[i]))
+        picture = session.picture(tile)
+        assert picture.shape[1] / picture.shape[0] == pytest.approx(aspect, rel=0.02)
+        dived = session.level(picture, source=tile)
+        assert dived.ctx.width / dived.ctx.height == pytest.approx(aspect, rel=0.02)
 
 
 def test_settings_match_without_the_slow_extras():
@@ -260,6 +345,38 @@ def window(qapp, photos, tmp_path):
     win.deleteLater()
 
 
+def test_closing_the_window_drops_what_it_queued(qapp, photos, tmp_path):
+    """Closing deletes the window (as the app opens it) before calls it queued run: the
+    level's textures letting go of it, auto-dive's next step. They must be dropped, not
+    run on deleted objects."""
+    from PySide6.QtCore import QEvent
+
+    from skitter.ui.infinite_window import InfiniteWindow
+    from skitter.ui.session import Session
+
+    session = Session()
+    library = session.open_library(tmp_path / "cache")
+    library.set_roots([photos])
+    library.update(workers=0)
+    win = InfiniteWindow(session)
+    win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+    win.settings.update(columns=6, max_uses=0, fade_seconds=0.1, dwell_seconds=0.05)
+    win.set_settings(win.settings)
+    win.show()
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    win.textures.wait()
+    run_animations(win.canvas, 1.0)
+    win.auto_button.click()  # a dwell under way: auto-dive's next step is queued
+    win.close()  # stops: the textures' release is queued too
+    QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete.value)  # deleted first
+    deadline = time.perf_counter() + 0.3
+    while time.perf_counter() < deadline:  # the dwell's timer comes due
+        qapp.processEvents()
+    session.shutdown()
+    library.close()
+
+
 def wait_for_level(window, qapp) -> None:
     job = window._job
     if job is not None:
@@ -323,6 +440,115 @@ def test_window_starts_dives_and_stops(window, qapp):
     assert win.forms["mosaic"].isEnabled() and win.start_button.text() == "Start"
 
 
+def test_the_library_tab_is_the_main_apps_and_locks_while_a_session_runs(window, qapp,
+                                                                         tmp_path):  # fmt: skip
+    from PySide6.QtCore import Qt
+
+    from skitter.ui.infinite_window import LIBRARY_TAB
+    from skitter.ui.library_panel import LibraryPanel
+
+    win, session = window, window.app_session
+    panel = win.library
+    other = LibraryPanel(session, lambda: 1.0)  # as the main window's Tiles tab has
+    win.tab_bar.setCurrentIndex(LIBRARY_TAB)
+    assert panel.folders.topLevelItemCount() == other.folders.topLevelItemCount() == 1
+    assert panel._tiles.text() == other._tiles.text() == f"{len(session.library):,}"
+
+    # An edit in one shows in the other: they are one library.
+    more = tmp_path / "more"
+    more.mkdir()
+    assert panel.add_folder(more)
+    assert other.folders.topLevelItemCount() == 2
+    other.folders.setCurrentItem(other.folders.topLevelItem(1))
+    assert other.forget_folder(confirm=False)
+    assert panel.folders.topLevelItemCount() == 1
+
+    # A running session searches the photos it started with: the library is locked.
+    win.start_button.click()
+    assert panel.locked and not panel.lock_note.isHidden()
+    root = panel.folders.topLevelItem(0)
+    assert not root.flags() & Qt.ItemFlag.ItemIsUserCheckable
+    assert not panel.add_button.isEnabled() and not panel.update_button.isEnabled()
+    assert not panel.add_folder(more) and len(session.library.roots) == 1
+    assert not other.locked  # only the window whose session runs
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    win.start_button.click()  # stopped: it can be changed again
+    assert not panel.locked and panel.lock_note.isHidden()
+    assert panel.folders.topLevelItem(0).flags() & Qt.ItemFlag.ItemIsUserCheckable
+
+    # While the library updates, no session starts.
+    release = threading.Event()
+    update = session.library.update
+    session.library.update = lambda **kw: (release.wait(10), update(**kw))[1]
+    assert panel.update_library()
+    assert session.busy == "library" and not win.start_button.isEnabled()
+    release.set()
+    session.wait_for_job()
+    qapp.processEvents()
+    assert win.start_button.isEnabled()
+    del session.library.update
+    other.deleteLater()
+
+
+def test_the_infinite_panel_fits_its_width(windows_font, window, qapp):
+    """Side panels never scroll sideways (see AGENTS.md): both tabs, locked or not. (The
+    font is installed before the window is made: one set later doesn't reach the panel.)"""
+
+    def overflowing() -> list[str]:
+        too_wide = []
+        for index in range(win.tab_bar.count()):
+            win.tab_bar.setCurrentIndex(index)
+            qapp.processEvents()
+            page = win.pages.widget(index)
+            need, have = page.widget().minimumSizeHint().width(), page.viewport().width()
+            if need > have:
+                too_wide.append(f"{win.tab_bar.tabText(index)}: needs {need} px, has {have}")
+        session = win.panel.layout().itemAt(0).widget()
+        if session.minimumSizeHint().width() > win.panel.width():
+            too_wide.append("Session")
+        return too_wide
+
+    win = window
+    win.setFont(windows_font)
+    qapp.processEvents()
+    assert overflowing() == []
+    win.start_button.click()  # running: the lock note, Stop, New Start, Auto-Dive
+    wait_for_level(win, qapp)
+    assert win.library.locked and overflowing() == []
+
+
+def test_every_dive_style_moves_the_others_and_keeps_the_tile(window, qapp):
+    from skitter.core.dive_styles import STYLES
+
+    win = window
+    win.settings.update(dive_style="random")
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    scene = win.level.scene
+    i = len(scene) // 2
+    win.dive_into(i)
+    assert win.dive.style.id in STYLES
+    others = np.arange(len(scene)) != i
+    for style in STYLES.values():
+        win.dive.style = style
+        win._dive_frame(0.0)
+        tiles = win.tile_layer.instances
+        np.testing.assert_allclose(tiles["pos"], scene.center, atol=1e-3)  # no jump
+        win._dive_frame(0.6)
+        np.testing.assert_allclose(tiles["pos"][i], scene.center[i], atol=1e-3)
+        np.testing.assert_allclose(tiles["size"][i], scene.size[i], atol=1e-3)
+        assert tiles["alpha"][i] == 1.0 and tiles["tint"][i][3] == 0.0
+        moved = np.linalg.norm(tiles["pos"] - scene.center, axis=1) > 1e-3
+        resized = np.abs(tiles["size"] - scene.size).max(axis=1) > 1e-3
+        changed = moved | resized | (tiles["alpha"] < 1)
+        assert np.any(changed[others]), style.id
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 2.0)
+    assert win.level.number == 2
+
+
 def test_a_dive_waits_for_matching_on_the_photo(window, qapp):
     win = window
     win.start_button.click()
@@ -371,18 +597,24 @@ def test_a_random_mosaic_start_fills_the_view_and_dives_once_prepared(window, qa
     run_animations(win.canvas, 1.0)
     assert win.dive.done and win.level is level  # holding on the photo
     wait_for_level(win, qapp)  # prepared: the queued dive starts matching
-    assert win._prepared and win._queued is None and win._job_kind == "dive"
+    assert level.variety is not None  # prepared, the start's tiles weighed too
+    assert win._queued is None and win._job_kind == "dive"
     wait_for_level(win, qapp)
     assert win.level.number == 1 and win.dive is None
     run_animations(win.canvas, 1.0)
 
-    # New Start: another random mosaic, at once (nothing to prepare again).
+    # New Start: another random mosaic, at once; only its tiles' variety is prepared (the
+    # index is kept), even when New Start is pressed again meanwhile.
     assert win.new_start_button.isEnabled()
     win.new_start_button.click()
-    assert win.level.number == 0 and win._job is None and win.status.text() == "Ready."
+    assert win.level.number == 0 and win._job_kind == "prepare" and win.level.variety is None
     first = win.level.scene.slot.copy()
     win.new_start_button.click()
     assert not np.array_equal(win.level.scene.slot, first)
+    for _ in range(2):
+        wait_for_level(win, qapp)
+    assert win.level.variety is not None and win._job is None
+    assert win.status.text() == "Ready."
 
 
 def test_new_start_shows_another_random_photo(window, qapp):
