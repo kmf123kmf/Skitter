@@ -23,6 +23,7 @@ def main(argv: list[str] | None = None) -> int:
 
     window = MainWindow()
     window.show()
+    window.session.open_library_in_background()  # ready, usually, before it's needed
     # Everything made so far (modules, Qt, numba, faiss...) lives as long as the app: keep
     # it out of the collector's full passes, which otherwise scan it all on the UI thread
     # (measured: 51 ms, a visible stutter mid-animation; 9 ms after freezing).

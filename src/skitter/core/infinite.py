@@ -594,6 +594,7 @@ class InfiniteSession:
         timings.update(report.timings)
         scene = MosaicScene.from_result(result, ctx)
         scene.visible_share  # noqa: B018 (auto-dive asks: here, not on the UI thread)
+        scene.overlaps  # noqa: B018 (and continuous auto-dive: what lies on its tile)
         number = 0
         if count:
             self.levels += 1

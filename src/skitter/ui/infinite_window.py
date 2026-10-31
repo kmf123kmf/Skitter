@@ -121,12 +121,14 @@ from skitter.ui.render.sprites import SpriteLayer, make_instances
 from skitter.ui.render.tile_textures import TileTextures, thumbnail_atlas
 from skitter.ui.render.zoom_detail import DETAIL_PAGES, DETAIL_SIDE, ZoomDetail
 from skitter.ui.steps.base import side_panel, view_and_panel
+from skitter.ui.steps.tile_picker import upper_closure
 from skitter.ui.style import TAB_STYLE, muted, progress_bar, show_progress
 from skitter.ui.widgets.param_form import ParamForm
 
 SETTINGS_KEY = "infinite/settings"  # preferences: the last session's settings (JSON)
 PLAN_KEY = "infinite/plan"  # and its slicers' settings
 PHOTO_IN = 0.2  # share of the dive over which the photo fades in over its tile
+WHOLE = 0.98  # a tile showing this much of itself lies on top (auto-dive prefers those)
 PIXELATE_ABOVE = 4.0  # texels this large show as squares (not while diving: tiles blow up)
 LIBRARY_TAB = 1  # the panel's tabs: Settings, Library
 LIBRARY_LOCKED = "A session searches the photos it started with: stop it to change them."
@@ -134,7 +136,8 @@ START_TIP = "Start a session from a random photo of the library."
 # Continuous auto-dive. As the tile it heads for grows, the tile's photo fades in over it,
 # then fades into its own mosaic, drawn inside it: each over FADE_ZOOM of zoom, done when
 # the tile fills Mosaic appears at of the view. After the switch, the last mosaic (around
-# and under the new one: its gaps, the view's margins) fades out over LAST_OUT_ZOOM. A leg
+# and under the new one: its gaps, the view's margins) fades out over LAST_OUT_ZOOM, ending
+# once the new one covers the view. A leg
 # slows to a stop (over EASE_SECONDS) where the photo would start to show if the next
 # mosaic isn't made by then.
 FADE_ZOOM = 1.8
@@ -218,6 +221,10 @@ class _Flow:
         self.layer: SpriteLayer | None = None  # the one shown inside the tile
         self.full: SpriteLayer | None = None  # full-size, until it takes layer's place
         self.placed = False  # layer is on the canvas, inside the tile
+        # This level's tiles lying on the tile (a pile's): they fade away as its photo
+        # fades in, so it doesn't rise through them.
+        self.over = upper_closure(level.scene, index)[1:]
+        self.inside: np.ndarray | None = None  # the next level's tiles within its canvas
 
 
 def _fade(x: float) -> float:
@@ -272,12 +279,14 @@ class InfiniteWindow(QWidget):
         self._locked = False  # pan and zoom off (diving, fading)
         self._fade_token: object | None = None
         self.auto = False  # auto-dive is on
+        self._start_when_open = False  # Start was pressed while the library opened
         self._auto_token: object | None = None  # the auto-dive step under way
         self._highlight: SpriteLayer | None = None  # the outline of auto-dive's next tile
         self._flow: _Flow | None = None  # continuous auto-dive's leg under way
         self._flow_token: object | None = None  # its animation
         self._flow_last: float | None = None  # the animation's time at the previous frame
         self._last_layer: SpriteLayer | None = None  # the last level's, fading after a switch
+        self._last_alpha: np.ndarray | None = None  # its tiles' opacity as the switch left it
         self._tile_swap: SpriteLayer | None = None  # full-size tiles, staging, to swap in
         self._layer_jobs: list[Job] = []  # building tile layers in the background
         self._approaching = False  # auto-dive's view moving in on a tile
@@ -318,7 +327,7 @@ class InfiniteWindow(QWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self.splitter)
-        session.library_changed.connect(self._refresh)
+        session.library_changed.connect(self._on_library_changed)
         session.busy_changed.connect(self._refresh)
         QShortcut(QKeySequence("F11"), self, self.toggle_full_screen)
         QShortcut(QKeySequence("Esc"), self, self._on_escape)
@@ -443,9 +452,17 @@ class InfiniteWindow(QWidget):
             self.start()
 
     def start(self) -> None:
-        """A new session with the current settings, from its start (Start with)."""
+        """A new session with the current settings, from its start (Start with). With the
+        library not open yet, once it is (it opens in the background)."""
         app = self.app_session
-        library = app.library if app.library is not None else app.open_library()
+        library = app.library
+        if library is None:
+            app.open_library_in_background()
+            self._start_when_open = True
+            self.status.setText("Opening the library: the session starts once it's open…")
+            self._refresh()
+            return
+        self._start_when_open = False
         if not len(library):
             self.status.setText("The tile library has no photos: add some on the Library tab.")
             self.tab_bar.setCurrentIndex(LIBRARY_TAB)
@@ -852,14 +869,16 @@ class InfiniteWindow(QWidget):
 
     def pick_tile(self) -> int:
         """Auto-dive's next tile: at random among the tiles in view (Next tile: anywhere,
-        or among the tenth nearest the middle), leaving out those mostly hidden, varied
-        ones likelier (Favor varied tiles: see core/infinite.py's Looks)."""
+        or among the tenth nearest the middle) that lie on top (a pile's: nothing on them;
+        else those mostly shown), varied ones likelier (Favor varied tiles: see
+        core/infinite.py's Looks)."""
         scene, cam = self.level.scene, self.canvas.camera
         pos = scene.center
         half = cam.viewport / (2 * cam.zoom)
         in_view = np.all(np.abs(pos - cam.center) <= half, axis=1)
-        shown = scene.visible_share >= 0.5
-        for candidates in (in_view & shown, in_view, shown):
+        share = scene.visible_share
+        whole, shown = share >= WHOLE, share >= 0.5
+        for candidates in (in_view & whole, in_view & shown, in_view, shown):
             pool = np.flatnonzero(candidates)
             if len(pool):
                 break
@@ -958,6 +977,9 @@ class InfiniteWindow(QWidget):
             self._job = None
         for job in self._layer_jobs:
             job.cancel()
+        if len(flow.over) and self.tile_layer is not None and flow.level is self.level:
+            self.tile_layer.instances["alpha"][flow.over] = 1.0  # back on the tile
+            self.tile_layer.mark_dirty()
         self._flow_discard(flow)
         if self._last_layer is not None:
             self.canvas.remove_layer(self._last_layer)
@@ -1134,9 +1156,13 @@ class InfiniteWindow(QWidget):
         canvas.set_view(view.center, view.zoom)
         canvas.update()
         last = self._last_layer
-        if last is not None:
-            gone = math.log(max(view.zoom / path.z0, 1.0)) / math.log(LAST_OUT_ZOOM)
-            last.instances["alpha"] = 1.0 - _fade(gone)
+        if last is not None:  # until this level covers the view (its margins), at least
+            canvas_size = np.array([self.level.ctx.width, self.level.ctx.height], np.float64)
+            cover = float(np.max(canvas.camera.viewport / (canvas_size * path.z0)))
+            zoomed = math.log(max(view.zoom / path.z0, 1.0))
+            fading = max(math.log(max(cover, 1.0)) - math.log(LAST_OUT_ZOOM), 0.0)
+            gone = (zoomed - fading) / math.log(LAST_OUT_ZOOM)
+            last.instances["alpha"] = self._last_alpha * (1.0 - _fade(gone))
             last.mark_dirty()
             if gone >= 1.0:
                 canvas.remove_layer(last)
@@ -1158,10 +1184,16 @@ class InfiniteWindow(QWidget):
             return
         if not flow.placed:
             self._flow_place(flow)
-        flow.layer.instances["alpha"] = photo_in  # its tiles over the tile's edges with it
+        # Its tiles show once the photo covers the tile (those over its edges fade in with
+        # them: nothing covers those): never through the photo as it fades in.
+        inside = 1.0 if photo_in >= 1.0 else 0.0
+        flow.layer.instances["alpha"] = np.where(flow.inside, inside, mosaic_in)
         flow.layer.mark_dirty()
         flow.photo.instances["alpha"] = photo_in * (1.0 - mosaic_in)
         flow.photo.mark_dirty()
+        if len(flow.over):  # what lies on the tile lifts away as its photo comes
+            self.tile_layer.instances["alpha"][flow.over] = 1.0 - photo_in
+            self.tile_layer.mark_dirty()
 
     def _flow_place(self, flow: _Flow) -> None:
         """Put the next level's tiles inside the tile (in this level's world), just above
@@ -1169,6 +1201,10 @@ class InfiniteWindow(QWidget):
         scene, i, canvas = flow.level.scene, flow.index, self.canvas
         ctx = flow.next.ctx
         scale = float(scene.size[i][0]) / float(ctx.width)
+        corners = flow.next.scene.corners
+        lo, hi = corners.min(axis=1), corners.max(axis=1)
+        flow.inside = np.all(lo >= -1e-6, axis=1) & (hi[:, 0] <= ctx.width + 1e-6) & (
+            hi[:, 1] <= ctx.height + 1e-6)  # fmt: skip
         layer = flow.layer
         layer.instances = _moved(layer.instances, (ctx.width / 2, ctx.height / 2),
                                  scene.center[i], scale, float(scene.rotation[i]))  # fmt: skip
@@ -1216,7 +1252,7 @@ class InfiniteWindow(QWidget):
         last = self.tile_layer
         last.instances = _moved(last.instances, scene.center[i], center, scale, -turn)
         last.mark_dirty()
-        self._last_layer = last
+        self._last_layer, self._last_alpha = last, last.instances["alpha"].copy()
         if self.textures is not None:
             self.textures.changed.disconnect(self._on_textures_changed)
             self.textures.close()
@@ -1381,6 +1417,16 @@ class InfiniteWindow(QWidget):
 
     # Window
 
+    def _on_library_changed(self) -> None:
+        app = self.app_session
+        if self._start_when_open and not app.library_opening:
+            self._start_when_open = False
+            if app.library is not None:
+                self.start()
+            else:  # it couldn't be opened (the Library tab says why)
+                self.status.setText(app.library_error or "The library could not be opened.")
+        self._refresh()
+
     def _on_tab(self, index: int) -> None:
         self.pages.setCurrentIndex(index)
         if index == LIBRARY_TAB:
@@ -1389,7 +1435,8 @@ class InfiniteWindow(QWidget):
     def _refresh(self) -> None:
         running = self.running
         self.start_button.setText("Stop" if running else "Start")
-        self.start_button.setEnabled(running or self.app_session.busy != "library")
+        self.start_button.setEnabled(running or (self.app_session.busy != "library"
+                                                 and not self._start_when_open))  # fmt: skip
         self.library.set_locked(LIBRARY_LOCKED if running else None)
         self.new_start_button.setVisible(running)
         self.new_start_button.setEnabled(self.can_start_anew)

@@ -57,6 +57,8 @@ DISPLAY_MODES = (
     (SAMPLE, "Sample of tiles"),
 )
 SOURCE_MODES = (PAINTED, ERROR)
+EMPTY = "Add folders of photos to use as tiles,\nthen press Update."  # the view, no tiles yet
+OPENING = "Opening the library…"  # the view while it opens (in the background)
 
 
 def _square_crops(width, height) -> np.ndarray:
@@ -85,7 +87,7 @@ class TilesStep(StepPage):
         self._colors_failed: tuple | None = None  # library state whose analysis failed
         self._map: ColorMap | None = None
         self._coverage: Coverage | None = None
-        self._empty = QLabel("Add folders of photos to use as tiles,\nthen press Update.")
+        self._empty = QLabel(EMPTY)
         self._empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._empty.setStyleSheet(f"{MUTED_STYLE} font-size: 14pt;")
         self._view = QStackedWidget()
@@ -254,6 +256,7 @@ class TilesStep(StepPage):
     def _show(self) -> None:
         """Show the chosen view (or the tile sample until colors are analyzed)."""
         library = self.session.library
+        self._empty.setText(OPENING if self.session.library_opening else EMPTY)
         ids = library.ids if library is not None else np.zeros(0, np.int64)
         has_source = self.session.project.source_final is not None
         model = self.display_mode.model()

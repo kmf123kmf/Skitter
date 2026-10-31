@@ -214,6 +214,44 @@ def test_forgetting_a_folder_drops_its_photos_and_slots_stay_unique(tmp_path):
     lib.close()
 
 
+def test_opening_reads_every_row_whatever_the_chunks_and_gaps(tmp_path, monkeypatch):
+    """Opening reads rows a chunk of slots at a time, as hex and joined paths: what it reads
+    is what the rows hold, across chunks, with gaps (forgotten photos' slots), and the
+    folder tree with a folder left out and one put back inside it."""
+    import sqlite3
+
+    from skitter.core.tiles import library as library_module
+
+    lib, photos = folder_library(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    save(other / "x.png", (30, 50))
+    lib.add_root(other)
+    lib.update(workers=0)
+    lib.forget(other)  # a gap among the slots
+    save(photos / "b" / "late.png", (64, 16))
+    lib.update(workers=0)
+    lib.set_included(photos / "b", False)
+    lib.set_included(photos / "b" / "late.png", True)  # a file's rule: no folder's
+    lib.close()
+    monkeypatch.setattr(library_module, "READ_SLOTS", 3)  # many chunks
+    lib = TileLibrary(tmp_path / "cache")
+    db = sqlite3.connect(tmp_path / "cache" / "library.sqlite")
+    rows = db.execute("SELECT slot, path, width, height, tw, th, status FROM tiles").fetchall()
+    db.close()
+    assert len(rows) == 6 and not lib._row[max(r[0] for r in rows) - 1 :].all()
+    for slot, path, w, h, tw, th, status in rows:
+        assert lib.paths([slot]) == [path] and lib._row[slot]
+        assert (lib.width[slot], lib.height[slot], *lib.thumb_size[slot], lib.status[slot]) == (
+            w, h, tw, th, status)  # fmt: skip
+    assert int(lib._row.sum()) == len(rows) and set(lib.ids) <= {r[0] for r in rows}
+    root, b = lib.folder_info(photos), lib.folder_info(photos / "b")
+    assert (root.photos, root.used, root.known) == (6, 2, 6) and root.state == "partial"
+    assert (b.photos, b.used, b.included) == (4, 0, False) and not lib.folder_info(other).known
+    assert sorted(os.path.basename(c) for c in root.children) == ["a", "b"]
+    lib.close()
+
+
 def test_library_grows_thumbnail_store(tmp_path):
     photos = tmp_path / "photos"
     photos.mkdir()

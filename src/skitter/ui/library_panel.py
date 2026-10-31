@@ -213,9 +213,10 @@ class LibraryPanel(QWidget):
     # Actions
 
     def open_library(self) -> None:
-        """Open the library if the session has none open yet."""
+        """Open the library in the background if the session has none open (or opening)
+        yet: a large one takes seconds. The panel says so meanwhile."""
         if self.session.library is None:  # not `not`: an empty library is falsy
-            self.session.open_library()
+            self.session.open_library_in_background()
 
     def set_locked(self, reason: str | None) -> None:
         """Keep the library from being changed here, saying why (None: allow it again)."""
@@ -239,7 +240,8 @@ class LibraryPanel(QWidget):
     def add_folder(self, folder) -> bool:
         if self.locked:
             return False
-        self.open_library()
+        if self.session.library is None:  # needed now (one opening is waited for)
+            self.session.open_library()
         self.session.add_library_folder(folder)
         return True
 
@@ -311,7 +313,8 @@ class LibraryPanel(QWidget):
         library = session.library
         busy = session.busy
         updating = busy == "library"
-        editable = not busy and not self.locked
+        opening = session.library_opening
+        editable = not busy and not self.locked and not opening
         self._fill_folders()
         self.folders.setEnabled(library is not None and not updating)
         has_folders = library is not None and bool(library.roots)
@@ -319,7 +322,10 @@ class LibraryPanel(QWidget):
         self._update_folder_buttons()
         self.update_button.setEnabled(has_folders and editable)
         self.cancel_button.setEnabled(updating)
-        self.progress.setVisible(updating)
+        self.progress.setVisible(updating or opening)
+        if opening:
+            self.progress.setRange(0, 0)  # how long it takes isn't known
+            self.status.setText("Opening the library…")
 
         if library is None:
             for label in (self._tiles, self._failed, self._missing, self._disk, self._location):
@@ -336,7 +342,7 @@ class LibraryPanel(QWidget):
         self.refresh_stats()
 
         report, error = session.library_report, session.library_error
-        if not updating:
+        if not updating and not opening:
             if error:
                 self.status.setText(f"Update failed: {error}")
             elif report is not None:

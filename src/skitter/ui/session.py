@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from skitter.core.animation import PHASES, plan_phases
 from skitter.core.animation.video import check_video, plan_video, sync_size
@@ -158,6 +158,8 @@ class Session(QObject):
         self._slicing_run = 0  # numbers runs: only the latest one's result is kept
 
         self.library: TileLibrary | None = None
+        # (job, result) of the library opening in the background (open_library_in_background)
+        self._opening: tuple[Job, dict] | None = None
         self.matcher: Matcher | None = None
         self.library_report: UpdateReport | None = None
         self.library_error: str | None = None
@@ -525,6 +527,10 @@ class Session(QObject):
 
     def shutdown(self, timeout: float = 10) -> None:
         """Stop all background work (the app is closing)."""
+        if self._opening is not None:  # a library opening: let it finish, then close it
+            library = self._take_opening(None)
+            if library is not None:
+                library.close()
         self.cancel_job()
         slicing = self._slicing_job
         if slicing is not None:
@@ -555,15 +561,82 @@ class Session(QObject):
 
     # Tile library
 
+    @property
+    def library_opening(self) -> bool:
+        """The library is opening in the background (open_library_in_background)."""
+        return self._opening is not None
+
+    def open_library_in_background(self) -> None:
+        """Open the per-user library (as open_library) off the UI thread, unless one is open
+        or opening: a large one takes a moment (measured 2026-10-31: 1.5 s for 696,000
+        photos in 256,000 folders; see TileLibrary._reload). Meanwhile `library` stays
+        None and `library_opening` True; library_changed is emitted as it starts and once
+        it's open (or failed: library_error)."""
+        if self.library is not None or self._opening is not None:
+            return
+        folder = default_library_folder()
+        result: dict = {}
+
+        def work(progress, cancelled):
+            result["library"] = TileLibrary(folder)
+            return result["library"]
+
+        job = Job(work)
+        self._opening = job, result
+        job.finished.connect(lambda library: self._opened(job, library))
+        job.failed.connect(lambda message: self._opening_failed(job, message))
+        job.start()
+        self.library_changed.emit()
+
+    def _opened(self, job: Job, library: TileLibrary) -> None:
+        if self._opening is not None and self._opening[0] is job:
+            self._opening = None
+            self._adopt_library(library)
+        elif library is not self.library:  # another was opened meanwhile (open_library)
+            library.close()
+        QTimer.singleShot(0, self, job.forget)  # not in its own slot
+
+    def _opening_failed(self, job: Job, message: str) -> None:
+        if self._opening is not None and self._opening[0] is job:
+            self._opening = None
+            self.library_error = f"The library could not be opened: {message}"
+            self.library_changed.emit()
+        QTimer.singleShot(0, self, job.forget)  # not in its own slot
+
+    def _take_opening(self, folder) -> TileLibrary | None:
+        """The library opening in the background, once open (waiting for it), if it is the
+        one wanted (folder: None or its own); else it is closed. None if none was opening."""
+        if self._opening is None:
+            return None
+        job, result = self._opening
+        self._opening = None
+        job.join()  # its result: here, whatever thread this is (no signals delivered)
+        library = result.get("library")
+        if library is None:
+            return None
+        if folder is None or Path(folder).resolve() == Path(library.folder).resolve():
+            return library
+        library.close()
+        return None
+
     def open_library(self, folder: str | Path | None = None) -> TileLibrary:
-        """Open (or create) the tile library cache; default: the per-user location."""
+        """Open (or create) the tile library cache; default: the per-user location. One
+        opening in the background (open_library_in_background) is waited for instead."""
+        opening = self._take_opening(folder)
+        if opening is not None:
+            self._adopt_library(opening)
+            return opening
+        return self._adopt_library(TileLibrary(folder or default_library_folder()))
+
+    def _adopt_library(self, library: TileLibrary) -> TileLibrary:
+        """Use this library from now on (the one open before is closed)."""
         if self.library is not None:
             self.library.close()
         matches = self.project.matches
         if matches is not None and not matches.picture:  # its tiles refer to the old library
             self._set_matches(None)
             self.matching_changed.emit()
-        self.library = TileLibrary(folder or default_library_folder())
+        self.library = library
         self.matcher = Matcher(self.library)
         self.library_report = self.library_error = None
         self.library_changed.emit()

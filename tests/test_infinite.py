@@ -789,6 +789,87 @@ def test_continuous_auto_dive_makes_the_next_level_ahead_and_stages_it(window, q
     assert flow.textures is None and textures._closing and win.canvas._staging == []
 
 
+def pile_flow(win, qapp, **pile):
+    """A session on Photo Pile in continuous auto-dive, its first level shown."""
+    win.plan.slicers["pile"].update(rotation=20.0, portrait=0.4, **pile)
+    win.settings.update(motion="flow", flow_seconds=2.0, slicer="pile", flow_mosaic=35.0)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+
+
+def test_continuous_auto_dive_shows_the_mosaic_only_once_its_photo_covers_the_tile(window, qapp):
+    """The tile's mosaic never shows through its photo while that fades in (it would show,
+    hide, then show again): its tiles appear under the opaque photo; those over the tile's
+    edges (pile photos sticking out) fade in as the photo fades into the mosaic."""
+    win = window
+    pile_flow(win, qapp)
+    win.auto_button.click()
+    seen = {"fading in": False, "into mosaic": False}
+    end = time.perf_counter() + 20
+    while time.perf_counter() < end and not all(seen.values()):
+        qapp.processEvents()
+        run_animations(win.canvas, 0.02)
+        if win._job is not None and not win._job.running:
+            win._job.wait()
+        flow = win._flow
+        if flow is None or not flow.placed:
+            continue
+        photo = float(flow.photo.instances["alpha"][0])
+        alpha = flow.layer.instances["alpha"]
+        first, _ = win._flow_shares()
+        share = flow.path.tile_share(flow.u)
+        if 0 < photo < 1 and share < first * 1.8 * 0.99:  # the photo fading in
+            assert np.all(alpha == 0)
+            seen["fading in"] = True
+        elif share > first * 1.8 * 1.01 and photo < 1:  # the photo fading into the mosaic
+            assert np.all(alpha[flow.inside] == 1)
+            outside = alpha[~flow.inside]
+            assert np.allclose(outside, outside[0]) if len(outside) else True
+            seen["into mosaic"] = True
+    assert all(seen.values())
+    win.auto_button.click()
+
+
+def test_continuous_auto_dive_heads_for_tiles_on_top_and_lifts_what_lies_on_one(window, qapp):
+    win = window
+    pile_flow(win, qapp, spread=0.8)  # a deep pile: most photos have others on them
+    scene = win.level.scene
+    on_top = scene.visible_share >= 0.98
+    assert on_top.any() and not on_top.all()
+    assert all(on_top[win.pick_tile()] for _ in range(50))
+
+    # Made to head for one with photos on it, those fade away as its photo comes in, and
+    # stay gone after the switch; stopping puts them back.
+    from skitter.ui.steps.tile_picker import upper_closure
+
+    covered = int(np.flatnonzero(scene.visible_share < 0.9)[0])
+    over = upper_closure(scene, covered)[1:]
+    assert len(over)
+    pick = win.pick_tile
+    win.pick_tile = lambda: covered
+    win.auto_button.click()
+    win.pick_tile = pick
+    flow = win._flow
+    assert flow.index == covered and set(flow.over) == set(over)
+    layer, at_switch = win.tile_layer, []
+    arrive = win._flow_arrive
+
+    def watched(over_seconds):
+        at_switch.append(layer.instances["alpha"][over].copy())  # the photo all in
+        arrive(over_seconds)
+
+    win._flow_arrive = watched
+    run_auto(win, qapp, 15.0, until=lambda: win.level is flow.next)
+    win._flow_arrive = arrive
+    np.testing.assert_allclose(at_switch[0], 0.0)
+    assert win._last_layer is layer and np.all(win._last_alpha[over] == 0)
+    win.auto_button.click()  # stopped: what was faded is back (the shown level's own)
+    assert win._last_layer is None
+    np.testing.assert_allclose(win.tile_layer.instances["alpha"], 1.0)
+
+
 def test_continuous_auto_dive_holds_for_a_mosaic_not_made_yet(window, qapp):
     win = window
     win.settings.update(motion="flow", flow_seconds=2.0)
