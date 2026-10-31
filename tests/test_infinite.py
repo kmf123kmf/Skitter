@@ -12,6 +12,8 @@ from skitter.core.infinite import (
     SOURCE_PX_PER_TILE,
     InfiniteSession,
     InfiniteSettings,
+    Loop,
+    Lure,
     TileView,
     centered_crop,
     centered_crops,
@@ -148,6 +150,50 @@ def test_a_random_mosaic_fills_a_canvas_of_the_views_shape(library, monkeypatch)
     assert built == [1]
     session.level(session.picture(TileView(int(scene.slot[0]), tuple(scene.rect[0]))))
     assert built == [1]
+
+
+def test_a_loop_lures_home_back_within_its_range(library):
+    settings = InfiniteSettings(columns=8, max_uses=0, loop=True, loop_dives=(2, 4),
+                                loop_fit=10.0, loop_tint=60.0)  # fmt: skip
+    session = InfiniteSession(library, settings, seed=7)
+    home = session.random_tile()
+    loop = Loop(home)
+    assert loop.lure(settings) is None  # level 1: before the range
+    first = session.level(session.picture(home), source=home)
+    loop.levels.append(first)
+    lure = loop.lure(settings)  # level 2: in the range, not forced
+    assert (lure.tile, lure.tolerance, lure.force, lure.tint) == (home, 0.1, False, 0.6)
+    loop.levels += [first, first]
+    assert loop.lure(settings).force  # level 4: the top, home placed whatever it takes
+
+    # Forced, home is placed with its exact crop, tinted by its own strength.
+    scene = first.scene
+    tile = TileView(int(scene.slot[3]), tuple(float(v) for v in scene.rect[3]))
+    picture = session.picture(tile)
+    level = session.level(picture, lure=Lure(home, 0.0, force=True, tint=0.6), source=tile)
+    assert level.home >= 0 and level.home_fit >= 1.0 and level.source == tile
+    placed = level.scene
+    assert placed.slot[level.home] == home.slot
+    np.testing.assert_allclose(placed.rect[level.home], home.rect, atol=1e-6)
+    region = placed.region[level.home]
+    shift = 0.6 * (placed.target_color[level.home] - level.result.tile_mean[region])
+    np.testing.assert_allclose(placed.tint_shift[level.home], shift, atol=1e-6)
+    # Not forced, only where it fits within the tolerance.
+    loose = session.level(picture, lure=Lure(home, float("inf")), source=tile)
+    strict = session.level(picture, lure=Lure(home, 0.0), source=tile)
+    assert loose.home >= 0 and (strict.home < 0) == (strict.home_fit > 1.0)
+
+    # Looking ahead: candidates' levels, home placed first, then by fit; numbered 0 until
+    # shown.
+    paths = library.paths(scene.slot[[1, 2, 5]])
+    candidates = [(i, TileView(int(scene.slot[i]), tuple(float(v) for v in scene.rect[i])), path)
+                  for i, path in zip([1, 2, 5], paths, strict=True)]  # fmt: skip
+    ahead = session.look_ahead(candidates, Lure(home, 0.05, tint=1.0))
+    assert sorted(i for i, _ in ahead) == [1, 2, 5]
+    keys = [(lv.home < 0, lv.home_fit) for _, lv in ahead]
+    assert keys == sorted(keys) and all(lv.number == 0 for _, lv in ahead)
+    numbered = session.number(ahead[0][1])
+    assert numbered.number == session.levels
 
 
 def test_levels_can_search_with_fewer_threads(library):
@@ -288,7 +334,7 @@ def test_a_dive_waits_for_matching_on_the_photo(window, qapp):
     job_started = []
     original = win._match
 
-    def held(picture, kind, message):  # the match "takes longer than the dive"
+    def held(picture, kind, message, *rest):  # the match "takes longer than the dive"
         job_started.append(picture)
 
     win._match = held
@@ -441,6 +487,49 @@ def test_auto_dive_dwells_zooms_in_rests_and_dives_on_and_on(window, qapp):
     number = win.level.number
     run_auto(win, qapp, 0.5)
     assert win.level.number == number and win._auto_token is None
+
+
+def test_auto_dive_loops_back_home_and_replays_each_pass(window, qapp):
+    win = window
+    win.settings.update(start="mosaic", dwell_seconds=0.0, approach_seconds=0.1,
+                        pause_seconds=0.0, dive_seconds=0.3, fade_seconds=0.05, loop=True,
+                        loop_dives=(2, 3), look_ahead=2)  # fmt: skip
+    win.set_settings(win.settings)
+    win.start_button.click()
+    win.set_auto(True)
+    run_auto(win, qapp, 30.0, until=lambda: win.loop is not None and win.loop.closed
+             and win._loop_pos == 0 and not win.busy)  # fmt: skip
+    loop = win.loop
+    assert loop is not None and loop.closed, win.level_label.text()
+    n = len(loop.levels)
+    assert 2 <= n <= 3 and len(loop.picks) == n
+    closing = loop.levels[-1]
+    assert closing.home >= 0 and loop.picks[-1] == closing.home
+    assert closing.scene.slot[closing.home] == loop.home.slot  # home came back
+    assert loop.levels[0].source == loop.home
+    assert win.level is loop.levels[0] and loop.passes == 1  # back at the first level
+    assert "Loop of" in win.level_label.text()
+
+    # Every pass replays the same levels and tiles: nothing is matched again.
+    matched = win.infinite.levels
+    visited = []
+
+    def seen():
+        if not visited or visited[-1] is not win.level:
+            visited.append(win.level)
+        return loop.passes >= 2 and win._loop_pos == 0
+
+    run_auto(win, qapp, 30.0, until=seen)
+    assert loop.passes == 2 and win.infinite.levels == matched
+    assert [id(lv) for lv in visited] == [id(lv) for lv in loop.levels + loop.levels[:1]]
+
+    # A dive by hand leaves the loop.
+    win.set_auto(False)
+    run_auto(win, qapp, 10.0, until=lambda: not win.busy)
+    scene = win.level.scene
+    sx, sy = win.canvas.camera.world_to_screen(*scene.center[0])
+    win._on_double_click(float(sx), float(sy))
+    assert win.loop is None and win.dive is not None
 
 
 def test_input_on_the_mosaic_or_esc_stops_auto_dive(window, qapp):
