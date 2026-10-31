@@ -51,6 +51,9 @@ def make_instances(count: int) -> np.ndarray:
     return instances
 
 
+STAGE_BYTES = 8 * 2**20  # texture bytes a staged layer uploads a frame (SpriteRenderer.stage)
+
+
 def to_rgba(textures: np.ndarray) -> np.ndarray:
     """Convert (..., 3|4) uint8 textures to contiguous RGBA."""
     if textures.shape[-1] == 3:
@@ -162,18 +165,23 @@ def _load_shader(name: str) -> str:
 
 class _GpuLayer:
     def __init__(self, ctx: moderngl.Context, program: moderngl.Program, quad, layer,
-                 spare_details: dict | None = None):  # fmt: skip
+                 spare_details: dict | None = None, staged: bool = False):  # fmt: skip
         """spare_details: detail page stacks of released layers, by (side, pages), to take
-        instead of allocating (see SpriteRenderer)."""
+        instead of allocating (see SpriteRenderer). staged: the textures go up a strip at
+        a time (`stage`), not all at once."""
         count, h, w, _ = layer.textures.shape
         max_layers = ctx.info["GL_MAX_ARRAY_TEXTURE_LAYERS"]
         if count > max_layers:
             raise ValueError(f"{count} textures exceeds the GPU limit of {max_layers} per layer")
-        self.texture = ctx.texture_array((w, h, count), 4, layer.textures.tobytes())
+        data = None if staged else layer.textures.tobytes()
+        self.texture = ctx.texture_array((w, h, count), 4, data)
         self.texture.repeat_x = self.texture.repeat_y = False
-        self.texture.build_mipmaps()
-        self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
-        self.texture.anisotropy = 8.0
+        rows = max(1, min(h, STAGE_BYTES // (4 * w)))
+        # Strips (page, first row, rows) still to upload (staged).
+        self.pending = [(p, y, min(rows, h - y)) for p in range(count)
+                        for y in range(0, h, rows)] if staged else []  # fmt: skip
+        if not staged:
+            self._finish_texture()
         self.pages = count
         self.detail: moderngl.TextureArray | None = None  # made when first written
         self.spare_details = {} if spare_details is None else spare_details
@@ -184,6 +192,25 @@ class _GpuLayer:
         self.capacity = 0
         self.vbo = None
         self.vao = None
+
+    def _finish_texture(self) -> None:
+        self.texture.build_mipmaps()
+        self.texture.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+        self.texture.anisotropy = 8.0
+
+    def stage(self, textures: np.ndarray, budget: float) -> bool:
+        """Upload strips of the textures, about budget bytes of them (at least one);
+        True once all are up."""
+        spent = 0
+        while self.pending and (spent < budget or not spent):
+            page, y, rows = self.pending.pop(0)
+            strip = np.ascontiguousarray(textures[page, y : y + rows])
+            w = strip.shape[1]
+            self.texture.write(strip.tobytes(), viewport=(0, y, page, w, rows, 1))
+            spent += strip.nbytes
+            if not self.pending:
+                self._finish_texture()
+        return not self.pending
 
     def write_instances(self, instances: np.ndarray) -> None:
         if len(instances) > self.capacity:
@@ -293,6 +320,16 @@ class SpriteRenderer:
         self.program["u_rotation"] = float(camera.rotation)
         self.program["u_viewport"] = tuple(camera.viewport)
 
+    def stage(self, layer: SpriteLayer) -> bool:
+        """Upload some more of a layer not drawn yet (STAGE_BYTES of its textures); True
+        once it is all up, so drawing it costs no more than any frame."""
+        gpu = self._layers.get(layer)
+        if gpu is None:
+            gpu = self._layers[layer] = _GpuLayer(self.ctx, self.program, self.quad, layer,
+                                                  self._spare_details, staged=True)  # fmt: skip
+            layer.patches.clear()  # the whole is going up
+        return gpu.stage(layer.textures, STAGE_BYTES)
+
     def render(self, layer: SpriteLayer, pixelate: float = 0.0) -> None:
         """Draw a layer; texels covering `pixelate` device pixels or more show as sharp
         squares (0: never)."""
@@ -301,6 +338,8 @@ class SpriteRenderer:
             gpu = self._layers[layer] = _GpuLayer(self.ctx, self.program, self.quad, layer,
                                                   self._spare_details)  # fmt: skip
             layer.patches.clear()  # just uploaded whole
+        if gpu.pending:  # drawn before it was all staged: the rest now
+            gpu.stage(layer.textures, float("inf"))
         if layer.patches:
             gpu.write_patches(layer.textures, layer.patches)
             layer.patches.clear()

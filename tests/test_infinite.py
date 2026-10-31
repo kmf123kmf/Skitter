@@ -681,6 +681,124 @@ def run_auto(win, qapp, seconds: float, until=lambda: False) -> None:
             win._job.wait()
 
 
+def photo_corners(win, layer) -> np.ndarray:
+    """(4, 2) screen corners of a one-sprite layer."""
+    inst = layer.instances[0]
+    (cx, cy), (w, h), r = inst["pos"], inst["size"], float(inst["rotation"])
+    c, s = np.cos(r), np.sin(r)
+    corners = []
+    for dx, dy in ((-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)):
+        x, y = cx + c * dx - s * dy, cy + s * dx + c * dy
+        corners.append(win.canvas.camera.world_to_screen(x, y))
+    return np.array(corners)
+
+
+@pytest.mark.parametrize("slicer", ["grid", "pile"])  # pile: tiles at angles, some turned
+def test_continuous_auto_dive_zooms_on_from_mosaic_to_mosaic_seamlessly(window, qapp, slicer):
+    win = window
+    win.plan.slicers["pile"].update(rotation=20.0, portrait=0.4)
+    win.settings.update(motion="flow", flow_seconds=2.0, slicer=slicer)
+    win.set_settings(win.settings)
+    assert not win.forms["auto"].is_shown("dwell_seconds")  # steps' settings: hidden
+    assert win.forms["auto"].is_shown("flow_seconds")
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+
+    # Each switch of level: the photo stays put on screen, as the tile it was.
+    switches, ahead = [], []
+    arrive = win._flow_arrive
+
+    def watched(over):  # compared exactly where they meet: the end, the next one's start
+        win._flow.u = 1.0
+        win._flow_frame()
+        before = photo_corners(win, win._flow.incoming)
+        ahead.append(win._flow.layer)  # made ahead (and staged), or None
+        arrive(0.0)
+        assert ahead[-1] is None or win.tile_layer is ahead[-1]
+        switches.append((before, photo_corners(win, win.photo_layer)))
+
+    win._flow_arrive = watched
+    zooms = []  # (level, zoom) frame by frame
+    win.auto_button.click()
+    assert win._flow is not None and win.busy and win.dive is None
+    end = time.perf_counter() + 30
+    while time.perf_counter() < end and win.level.number < 4:
+        qapp.processEvents()
+        run_animations(win.canvas, 0.05)
+        zooms.append((win.level.number, win.canvas.camera.zoom))
+        if win._job is not None and not win._job.running:
+            win._job.wait()
+    assert win.level.number >= 4 and len(switches) >= 3 and win.dive is None
+    for before, after in switches:
+        np.testing.assert_allclose(after, before, atol=0.5)  # pixels
+    for number in {n for n, _ in zooms}:  # within a level, the view only zooms in
+        z = [zoom for n, zoom in zooms if n == number]
+        assert np.all(np.diff(z) >= -1e-9)
+    photos = [layer for layer in win.canvas.layers if layer.texture_size is not None
+              and len(layer.instances) == 1]  # fmt: skip
+    assert len(photos) <= 2  # the last tile's photo, the next one's: no more kept
+
+    # Stopping leaves the view where it is, with nothing of the next level behind.
+    win.auto_button.click()
+    assert win._flow is None and not win.busy and win._job is None
+    assert win.canvas.pixelate_above == 4.0
+
+
+def test_continuous_auto_dive_makes_the_next_level_ahead_and_stages_it(window, qapp):
+    """While the view heads for the tile, its mosaic's textures load and its tile layer and
+    photo go up to the GPU (staged), so the switch costs no frame; stopping lets go of them."""
+    win = window
+    win.settings.update(motion="flow", flow_seconds=3.0)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    win.auto_button.click()
+    flow = win._flow
+    run_auto(win, qapp, 10.0, until=lambda: flow.next is not None)
+    assert flow.photo in win.canvas._staging and flow.textures is not None
+    flow.textures.wait()  # its full-size crops (the app's pool is warm: much sooner)
+    qapp.processEvents()
+    assert flow.layer_job is not None
+    flow.layer_job.wait()
+    qapp.processEvents()
+    layer, textures = flow.layer, flow.textures
+    assert layer is not None and layer in win.canvas._staging
+    assert layer.textures.shape[0] == len(textures.pages)  # its full-size pages
+    run_auto(win, qapp, 10.0, until=lambda: win.level is flow.next)
+    assert win.tile_layer is layer and win.textures is textures
+    assert layer not in win.canvas._staging  # added: shown
+
+    # Stopping lets go of the next level's, made meanwhile.
+    flow = win._flow
+    run_auto(win, qapp, 10.0, until=lambda: flow.textures is not None)
+    textures = flow.textures
+    win.auto_button.click()
+    assert flow.textures is None and textures._closing and win.canvas._staging == []
+
+
+def test_continuous_auto_dive_holds_for_a_mosaic_not_made_yet(window, qapp):
+    win = window
+    win.settings.update(motion="flow", flow_seconds=2.0)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    match = win._flow_match
+    win._flow_match = lambda: None  # "making it takes long"
+    win.auto_button.click()
+    flow = win._flow
+    run_auto(win, qapp, 4.0)
+    assert win._flow is flow and flow.u == pytest.approx(flow.hold) and flow.speed == 0
+    assert flow.incoming is None  # the photo waits for its mosaic
+    win._flow_match = match
+    match()
+    run_auto(win, qapp, 10.0, until=lambda: win.level.number >= 2)
+    assert win.level.number >= 2 and win._flow is not None and win._flow is not flow
+    win.auto_button.click()
+
+
 def test_auto_dive_dwells_zooms_in_rests_and_dives_on_and_on(window, qapp):
     win = window
     win.settings.update(start="mosaic", dwell_seconds=0.0, approach_seconds=0.3,

@@ -58,9 +58,12 @@ import os
 from dataclasses import dataclass, field
 
 import faiss
+import numba
 import numpy as np
+from PIL import Image
 
 from skitter.core import dive_styles
+from skitter.core.dive_path import CENTER_FIRST, STRAIGHT
 from skitter.core.matching.candidates import Pins
 from skitter.core.matching.index import rerank
 from skitter.core.matching.matcher import Matcher
@@ -93,7 +96,8 @@ from skitter.core.tiles.render import render_crops_or_thumbs
 MOSAIC = ("start", "tile_aspect", "columns", "slicer")  # InfiniteSettings by group
 MATCHING = ("tint", "tint_strength", "max_uses", "min_spacing", "mirror")
 DIVE = ("dive_seconds", "dive_style", "fade_seconds")
-AUTO = ("dwell_seconds", "next_tile", "variety", "approach_seconds", "approach_tiles",
+AUTO = ("motion", "flow_seconds", "flow_path", "dwell_seconds", "next_tile", "variety",
+        "approach_seconds", "approach_tiles",
         "pause_seconds", "highlight", "loop", "loop_dives", "loop_fit", "loop_tint",
         "look_ahead")  # fmt: skip
 LIVE = DIVE + AUTO  # settings a running session follows as they change (pacing only)
@@ -168,8 +172,29 @@ class InfiniteSettings(Configurable):
         help="How long the photo takes to dissolve into its own mosaic once it is matched.",
     )  # fmt: skip
 
+    motion = ChoiceParam(
+        "steps", "Auto-dive moves",
+        choices=[("steps", "In steps"), ("flow", "Continuously")],
+        help="In steps: each mosaic shows whole for a while, the view zooms in on a tile and "
+             "dives into it. Continuously: one never-ending zoom; each mosaic's next tile is "
+             "picked as it appears and its mosaic made while the view heads for it.",
+    )  # fmt: skip
+    flow_seconds = FloatParam(
+        6.5, "Time per mosaic", min=2.0, max=120.0, step=0.5, decimals=1, suffix=" s",
+        under="motion", when=lambda s: s.motion == "flow",
+        help="Continuously: about how long the zoom takes from a whole mosaic onto one of "
+             "its tiles (a base tile; larger tiles take less). Slower is calmer.",
+    )  # fmt: skip
+    flow_path = ChoiceParam(
+        "straight", "Path", choices=[(STRAIGHT, "Straight in"), (CENTER_FIRST, "Center first")],
+        under="motion", when=lambda s: s.motion == "flow",
+        help="Continuously: Straight in moves toward the tile while zooming all the way; "
+             "Center first brings it to the middle early, then zooms straight in. Either way "
+             "the view stays on the mosaic and only waits to center a tile near its edge.",
+    )  # fmt: skip
     dwell_seconds = FloatParam(
         3.0, "Dwell", min=0.0, max=600.0, step=0.5, decimals=1, suffix=" s",
+        when=lambda s: s.motion == "steps",
         help="Auto-dive: how long each new mosaic shows whole before the view heads for "
              "the next tile.",
     )  # fmt: skip
@@ -188,52 +213,55 @@ class InfiniteSettings(Configurable):
     )  # fmt: skip
     approach_seconds = FloatParam(
         2.0, "Zoom-in time", min=0.0, max=60.0, step=0.5, decimals=1, suffix=" s",
+        when=lambda s: s.motion == "steps",
         help="Auto-dive: how long the view takes to move to the tile and zoom in on it "
              "before diving (0: dive straight from where the view is).",
     )  # fmt: skip
     approach_tiles = FloatParam(
         6.0, "Zoom in to", min=1.0, max=500.0, step=1.0, decimals=1, suffix=" tiles across",
+        when=lambda s: s.motion == "steps",
         help="Auto-dive: how close the view gets before diving, as the number of tiles "
              "across it. With the zoom-in time this sets how fast the view zooms.",
     )  # fmt: skip
     pause_seconds = FloatParam(
         0.5, "Pause on tile", min=0.0, max=30.0, step=0.1, decimals=1, suffix=" s",
+        when=lambda s: s.motion == "steps",
         help="Auto-dive: how long the view rests on the chosen tile before diving into it.",
     )  # fmt: skip
     highlight = BoolParam(
-        True, "Highlight the tile",
+        True, "Highlight the tile", when=lambda s: s.motion == "steps",
         help="Auto-dive: outline the chosen tile while the view zooms in on it.",
     )  # fmt: skip
     loop = BoolParam(
-        False, "Loop",
+        False, "Loop", when=lambda s: s.motion == "steps",
         help="Auto-dive comes back to where it started: the first tile it dives into turns "
              "up again, placed where it fits, within the range of dives below. After that "
              "it replays the same dives, again and again.",
     )  # fmt: skip
     loop_dives = RangeParam(
         (3, 6), "Loop within", min=1, max=50, step=1, decimals=0, suffix=" dives", whole=True,
-        under="loop", when=lambda s: s.loop,
+        under="loop", when=lambda s: s.loop and s.motion == "steps",
         help="How many dives one pass of the loop takes: it closes as soon as the first tile "
              "fits naturally (see Closing fit) once the low end is reached, and at the high "
              "end regardless. 1: the picture contains itself.",
     )  # fmt: skip
     loop_fit = FloatParam(
         30.0, "Closing fit", min=0.0, max=500.0, step=5.0, decimals=0, suffix="%",
-        under="loop_dives", when=lambda s: s.loop,
+        under="loop_dives", when=lambda s: s.loop and s.motion == "steps",
         help="How much more error than the best tile for its spot the first tile may have "
              "there for the loop to close early (0: only where it is the best). Larger "
              "closes sooner but can look placed.",
     )  # fmt: skip
     loop_tint = FloatParam(
         100.0, "Home tint", min=0.0, max=100.0, step=10.0, decimals=0, suffix="%",
-        under="loop_dives", when=lambda s: s.loop,
+        under="loop_dives", when=lambda s: s.loop and s.motion == "steps",
         help="How far the first tile's color is pulled to its spot's when it comes back. "
              "Stronger lets it go where its shapes fit and blend in by color (it loses the "
              "tint as the view dives in).",
     )  # fmt: skip
     look_ahead = IntParam(
         4, "Look ahead", min=1, max=16, suffix=" tiles",
-        under="loop_dives", when=lambda s: s.loop,
+        under="loop_dives", when=lambda s: s.loop and s.motion == "steps",
         help="In the loop's range, how many tiles' mosaics are made before each dive, to "
              "dive into the one the first tile fits best (in the background, while the "
              "mosaic dwells). More closes the loop sooner and more naturally, but takes "
@@ -370,6 +398,17 @@ def blank_picture(aspect: float, width: int) -> np.ndarray:
     picture = np.zeros((max(1, round(width / aspect)), width, 4), np.uint8)
     picture[..., 3] = 255
     return picture
+
+
+def display_copy(picture: np.ndarray, longest: int) -> np.ndarray:
+    """picture, scaled down (if need be) so its longest side is at most longest pixels:
+    as much as a view shows of it (a full-size one would stall a frame to upload)."""
+    height, width = picture.shape[:2]
+    scale = longest / max(height, width)
+    if scale >= 1:
+        return picture
+    size = (max(1, round(width * scale)), max(1, round(height * scale)))
+    return np.asarray(Image.fromarray(picture).resize(size, Image.Resampling.LANCZOS))
 
 
 def picture_size(native_width: float, aspect: float, columns: int) -> tuple[int, int]:
@@ -528,6 +567,9 @@ class InfiniteSession:
         if it is shown).
         """
         if threads is not None:
+            # numba's first: its parallel kernels (they run before the search) set OpenMP's
+            # count, faiss's too, to numba's for the calling thread.
+            numba.set_num_threads(max(1, min(int(threads), numba.config.NUMBA_NUM_THREADS)))
             faiss.omp_set_num_threads(int(threads))
         timings = {}
         report = Reporter(progress, cancelled, detail, None)

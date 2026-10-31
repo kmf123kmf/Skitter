@@ -284,6 +284,11 @@ def thumb_crop(thumbs, thumb_size, slot: int, rect, size) -> np.ndarray:
     return cut(Image.fromarray(np.asarray(thumbs[slot])[:th, :tw]), rect, size)
 
 
+def thumbnail_atlas(scene: MosaicScene, library: TileLibrary):
+    """The thumbnails of a scene's photos, packed (TileTextures' first pages)."""
+    return build_atlas(library.thumbs, library.thumb_size, scene.slot)
+
+
 class TileTextures(QObject):
     """The textures of a scene's tiles: thumbnails at once, full-size crops when read."""
 
@@ -293,10 +298,12 @@ class TileTextures(QObject):
 
     def __init__(
         self, scene: MosaicScene, library: TileLibrary, parent=None,
-        picture: np.ndarray | None = None, pool=None,
+        picture: np.ndarray | None = None, pool=None, atlas=None,
     ):  # fmt: skip
         """picture: (H, W, 4) the source picture, for blended tiles (see `picture`).
-        pool: a process pool kept running to read crops with (see render_crops)."""
+        pool: a process pool kept running to read crops with (see render_crops).
+        atlas: the scene's thumbnails, packed (`thumbnail_atlas`; made here if not given:
+        it reads a thumbnail per photo, so make it in the background where that stalls)."""
         super().__init__(parent)
         self._pool = pool
         self.scene = scene
@@ -312,7 +319,7 @@ class TileTextures(QObject):
             self.pages = np.zeros((1, 1, 1, 3), np.uint8)
             self.layer, self.uv = np.zeros(0), np.zeros((0, 4))
             return
-        self._atlas = build_atlas(library.thumbs, library.thumb_size, scene.slot)
+        self._atlas = thumbnail_atlas(scene, library) if atlas is None else atlas
         self.pages: np.ndarray = self._atlas.pages
         self.layer, self.uv = self._atlas.locate(scene.slot, scene.rect, scene.mirrored)
         self._load_detail(library)

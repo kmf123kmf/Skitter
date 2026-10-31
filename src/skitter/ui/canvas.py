@@ -98,6 +98,7 @@ class MosaicCanvas(QOpenGLWidget):
 
         self._animations: list[tuple[Animation, float | None]] = []
         self._released: list[SpriteLayer] = []
+        self._staging: list[SpriteLayer] = []  # going up to the GPU a bit each frame (stage)
         self._view_token: object | None = None
         self._fbo: moderngl.Framebuffer | None = None
         self._drag_pos: QPointF | None = None
@@ -111,7 +112,10 @@ class MosaicCanvas(QOpenGLWidget):
     # Layers and animations
 
     def add_layer(self, layer: SpriteLayer, index: int | None = None) -> SpriteLayer:
-        """Add a layer on top, or at index in the draw order (0 draws first)."""
+        """Add a layer on top, or at index in the draw order (0 draws first). A layer
+        staged (`stage`) shows at no upload cost; one still staging uploads the rest."""
+        if layer in self._staging:
+            self._staging.remove(layer)
         if index is None:
             self.layers.append(layer)
         else:
@@ -123,6 +127,26 @@ class MosaicCanvas(QOpenGLWidget):
         self.layers.remove(layer)
         self._released.append(layer)  # GPU resources freed on next paint
         self.update()
+
+    def stage(self, layer: SpriteLayer) -> None:
+        """Upload a layer before it is added, a part each frame (SpriteRenderer.stage):
+        adding it later then stalls no frame for its textures."""
+        if layer not in self._staging and layer not in self.layers:
+            self._staging.append(layer)
+            self.update()
+
+    def unstage(self, layer: SpriteLayer) -> None:
+        """Drop a staged layer that won't be added after all (its GPU memory goes)."""
+        if layer in self._staging:
+            self._staging.remove(layer)
+        if layer not in self.layers:
+            self._released.append(layer)
+            self.update()
+
+    def staged(self, layer: SpriteLayer) -> bool:
+        """The layer is all up (staged), or being drawn."""
+        return layer in self.layers or (layer not in self._staging and self.renderer is not None
+                                        and layer in self.renderer._layers)  # fmt: skip
 
     def add_animation(self, animation: Animation) -> None:
         self._animations.append((animation, None))
@@ -285,6 +309,11 @@ class MosaicCanvas(QOpenGLWidget):
         for layer in self._released:
             self.renderer.release(layer)
         self._released.clear()
+        for layer in list(self._staging):
+            if self.renderer.stage(layer):
+                self._staging.remove(layer)
+        if self._staging:
+            self.update()  # more next frame
 
         pixelate = self.pixelate_above or 0.0
         self.renderer.set_camera(self.camera)
