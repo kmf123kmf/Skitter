@@ -6,8 +6,10 @@ fraction)` reports status (fraction None or negative: unknown), and
 worker thread and delivered to receivers on the UI thread (queued).
 """
 
+import contextlib
 import logging
 import threading
+import warnings
 from collections.abc import Callable
 
 from PySide6.QtCore import QCoreApplication, QObject, Signal
@@ -53,6 +55,24 @@ class Job(QObject):
         if self._thread is not None:
             self._thread.join(timeout)
         QCoreApplication.processEvents()
+
+    def join(self, timeout: float | None = None) -> None:
+        """Block until the work's thread has ended, delivering nothing (unlike wait). After
+        `stopped` it is about to: then the job may go (with its parent, say) safely."""
+        if self._thread is not None:
+            self._thread.join(timeout)
+
+    def forget(self) -> None:
+        """Done with a stopped job (call it from `stopped`): wait for its thread to end and
+        drop its connections and work. Slots that capture their owner (lambdas) would
+        otherwise keep it alive through the job (a child it owns): a cycle through C++
+        that Python can't collect."""
+        self.join()
+        for signal in (self.progress, self.finished, self.failed, self.cancelled, self.stopped):
+            with warnings.catch_warnings(), contextlib.suppress(RuntimeError, TypeError):
+                warnings.simplefilter("ignore")  # nothing connected
+                signal.disconnect()
+        self._work = None
 
     def _report(self, message: str, fraction: float | None = None) -> None:
         self.progress.emit(message, -1.0 if fraction is None else float(fraction))

@@ -809,7 +809,7 @@ class Session(QObject):
         """Replace project.matches, with its scene (made here unless given) and textures
         (callers emit matching_changed)."""
         if self.textures is not None:
-            self.textures.cancel()
+            self.textures.close()  # views holding them let go when they rebind
         self.project.matches, self._match_key = result, key
         self._pick_undo.clear()
         self._pick_redo.clear()

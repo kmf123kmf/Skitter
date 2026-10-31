@@ -147,6 +147,9 @@ class InfiniteWindow(QWidget):
         self._job_kind = ""  # "first" (a random photo's level), "prepare" or "dive"
         self._job_started = 0.0
         self._queued: np.ndarray | None = None  # a dive's picture, matched once prepared
+        # Jobs have no parent (it would keep each, and its inputs, for the window's life):
+        # the last two are kept here, so each goes once a later one has started.
+        self._recent_jobs: list[Job] = []
         self._prepared = False  # the search index is built (a random mosaic's session)
         self._pool: ProcessPoolExecutor | None = None
         self._locked = False  # pan and zoom off (diving, fading)
@@ -361,7 +364,10 @@ class InfiniteWindow(QWidget):
                         self._on_prepared)  # fmt: skip
 
     def _start_job(self, work, kind: str, message: str, on_done) -> None:
-        job = Job(work, (MatchCancelled, SlicingCancelled), self)
+        job = Job(work, (MatchCancelled, SlicingCancelled))
+        for old in self._recent_jobs[:-1]:
+            old.join()  # long stopped; its thread too, to be sure
+        self._recent_jobs = [*self._recent_jobs[-1:], job]
         job.progress.connect(self._on_progress)
         job.finished.connect(on_done)
         job.failed.connect(self._on_failed)
@@ -437,8 +443,8 @@ class InfiniteWindow(QWidget):
             self.canvas.remove_layer(self.tile_layer)
             self.tile_layer = None
         if self.textures is not None:
-            self.textures.cancel()
             self.textures.changed.disconnect(self._on_textures_changed)
+            self.textures.close()
             self.textures = None
 
     def _arrive(self, level: Level) -> None:

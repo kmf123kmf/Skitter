@@ -348,6 +348,36 @@ def test_new_start_shows_another_random_photo(window, qapp):
     assert win.level is not first and win.level.number == 2  # the session counts on
 
 
+def test_diving_on_and_on_keeps_no_level_behind(window, qapp):
+    """Infinite means flat: each dive lets the last level's textures and jobs go."""
+    import gc
+
+    from skitter.ui.jobs import Job
+    from skitter.ui.render.tile_textures import TileTextures
+
+    def alive(cls) -> int:
+        qapp.processEvents()  # textures let go from a zero-delay timer
+        gc.collect()
+        return sum(1 for o in gc.get_objects() if isinstance(o, cls))
+
+    win = window
+    win.settings.update(start="mosaic")
+    win.set_settings(win.settings)
+    win.start_button.click()
+    counts = []
+    for _ in range(6):
+        wait_for_level(win, qapp)
+        run_animations(win.canvas, 2.0)
+        win.textures.wait()  # full-size tiles in, their job stopped
+        qapp.processEvents()
+        counts.append((alive(TileTextures), alive(Job)))
+        scene = win.level.scene
+        sx, sy = win.canvas.camera.world_to_screen(*scene.center[len(scene) // 2])
+        win._on_double_click(float(sx), float(sy))
+        assert win.dive is not None
+    assert counts[-1] == counts[1] and counts[-1][0] == 1, counts
+
+
 def test_settings_persist_between_windows(window, qapp):
     from skitter.ui.infinite_window import InfiniteWindow
 

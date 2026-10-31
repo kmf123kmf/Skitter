@@ -29,7 +29,7 @@ from dataclasses import dataclass
 
 import numpy as np
 from PIL import Image
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, QTimer, Signal
 
 from skitter.core.assembly import TileFiles
 from skitter.core.scene import MosaicScene
@@ -264,6 +264,10 @@ class PictureTextures(QObject):
     def wait(self, timeout: float | None = None) -> None:
         pass
 
+    def close(self) -> None:
+        """Done with these textures: let them go once nothing refers to them."""
+        QTimer.singleShot(0, lambda: self.setParent(None))
+
     def set_scene(self, scene: MosaicScene, library=None) -> None:
         self.scene = scene
 
@@ -301,6 +305,7 @@ class TileTextures(QObject):
         self.status = "Thumbnails"
         self._job: Job | None = None
         self._crop_jobs: list[Job] = []
+        self._closing = False
         self._library = library
         if not len(scene):
             self.pages = np.zeros((1, 1, 1, 3), np.uint8)
@@ -333,6 +338,20 @@ class TileTextures(QObject):
             if job is not None:
                 job.cancel()
 
+    def close(self) -> None:
+        """Done with these textures (another scene's replace them): cancel their work and,
+        once it has stopped, let them go. Their parent would otherwise keep them, pages
+        and all, for as long as it lives; now they live as long as something (a view not
+        yet moved on) refers to them."""
+        self.cancel()
+        self._closing = True
+        self._release_if_idle()
+
+    def _release_if_idle(self) -> None:
+        if self._closing and self._job is None and not self._crop_jobs:
+            # Not here and now: this may run in a slot of these textures or their job.
+            QTimer.singleShot(0, lambda: self.setParent(None))
+
     def wait(self, timeout: float | None = None) -> None:
         """Block until full detail (and crops for picks) are loaded, delivering signals."""
         for job in (self._job, *list(self._crop_jobs)):
@@ -352,13 +371,21 @@ class TileTextures(QObject):
         job.finished.connect(lambda detail: self._show_detail(detail, request, scene))
         job.failed.connect(lambda message: self._set_status(f"Thumbnails ({message})"))
         job.cancelled.connect(lambda: self._set_status("Thumbnails"))
-        job.stopped.connect(self._job_stopped)
+        job.stopped.connect(lambda: self._job_stopped(job))
         self._job = job
         self._set_status("Loading full-size tiles…")
         job.start()
 
-    def _job_stopped(self) -> None:
-        self._job = None
+    def _job_stopped(self, job: Job) -> None:
+        if self._job is job:
+            self._job = None
+        job.forget()  # its slots capture these textures
+        self._release_if_idle()
+
+    def _crop_job_stopped(self, job: Job) -> None:
+        self._crop_jobs.remove(job)
+        job.forget()
+        self._release_if_idle()
 
     def _show_detail(self, detail: TileDetail, request: DetailRequest, scene) -> None:
         atlas = detail.atlas
@@ -516,7 +543,7 @@ class TileTextures(QObject):
 
         job = Job(work, parent=self)
         job.finished.connect(lambda images: self._swap_in(keys, images))
-        job.stopped.connect(lambda: self._crop_jobs.remove(job))
+        job.stopped.connect(lambda: self._crop_job_stopped(job))
         self._crop_jobs.append(job)
         job.start()
 
