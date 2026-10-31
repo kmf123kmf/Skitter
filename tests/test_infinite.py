@@ -254,7 +254,7 @@ def window(qapp, photos, tmp_path):
     win.show()
     qapp.processEvents()
     yield win
-    win.shutdown()
+    win.close()  # shuts it down; an open application-modal window blocks other tests' input
     session.shutdown()
     library.close()
     win.deleteLater()
@@ -636,6 +636,6 @@ def test_the_panel_fits_its_width(window, qapp):
                 need, have = content.minimumSizeHint().width(), scroll.viewport().width()
                 assert need <= have, f"{state}: needs {need} px, has {have}"
     finally:
-        win.shutdown()
+        win.close()
         win.deleteLater()
         QFontDatabase.removeApplicationFont(font)
