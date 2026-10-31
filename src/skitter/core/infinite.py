@@ -64,6 +64,9 @@ from skitter.core.tiles.render import render_crops_or_thumbs
 MOSAIC = ("start", "tile_aspect", "columns", "slicer")  # InfiniteSettings by group
 MATCHING = ("tint", "tint_strength", "max_uses", "min_spacing", "mirror")
 DIVE = ("dive_seconds", "fade_seconds")
+AUTO = ("dwell_seconds", "next_tile", "approach_seconds", "approach_tiles", "pause_seconds",
+        "highlight")  # fmt: skip
+LIVE = DIVE + AUTO  # settings a running session follows as they change (pacing only)
 SOURCE_PX_PER_TILE = 16  # least picture pixels across a base tile (4 per cell: full detail)
 MAX_SOURCE_PX = 4096  # longest side a level's picture is read at
 DIVE_THREADS = max(2, (os.cpu_count() or 4) // 4)  # search threads while the UI animates
@@ -123,6 +126,36 @@ class InfiniteSettings(Configurable):
     fade_seconds = FloatParam(
         0.6, "Fade time", min=0.0, max=5.0, step=0.1, decimals=1, suffix=" s",
         help="How long the photo takes to dissolve into its own mosaic once it is matched.",
+    )  # fmt: skip
+
+    dwell_seconds = FloatParam(
+        3.0, "Dwell", min=0.0, max=600.0, step=0.5, decimals=1, suffix=" s",
+        help="Auto-dive: how long each new mosaic shows whole before the view heads for "
+             "the next tile.",
+    )  # fmt: skip
+    next_tile = ChoiceParam(
+        "anywhere", "Next tile",
+        choices=[("anywhere", "Anywhere in view"), ("middle", "Near the middle")],
+        help="Auto-dive: where the next tile is picked, at random among the tiles in view "
+             "(those mostly hidden under others left out).",
+    )  # fmt: skip
+    approach_seconds = FloatParam(
+        2.0, "Zoom-in time", min=0.0, max=60.0, step=0.5, decimals=1, suffix=" s",
+        help="Auto-dive: how long the view takes to move to the tile and zoom in on it "
+             "before diving (0: dive straight from where the view is).",
+    )  # fmt: skip
+    approach_tiles = FloatParam(
+        6.0, "Zoom in to", min=1.0, max=500.0, step=1.0, decimals=1, suffix=" tiles across",
+        help="Auto-dive: how close the view gets before diving, as the number of tiles "
+             "across it. With the zoom-in time this sets how fast the view zooms.",
+    )  # fmt: skip
+    pause_seconds = FloatParam(
+        0.5, "Pause on tile", min=0.0, max=30.0, step=0.1, decimals=1, suffix=" s",
+        help="Auto-dive: how long the view rests on the chosen tile before diving into it.",
+    )  # fmt: skip
+    highlight = BoolParam(
+        True, "Highlight the tile",
+        help="Auto-dive: outline the chosen tile while the view zooms in on it.",
     )  # fmt: skip
 
     @property
@@ -253,7 +286,9 @@ class InfiniteSession:
             mirrored=np.zeros(n, bool), cost=np.full(n, np.nan, np.float32),
             tile_mean=zeros, tint_target=zeros, tint=0.0, quality=None, regret=[],
         )  # fmt: skip
-        return Level(0, ctx.picture, ctx, result, MosaicScene.from_result(result, ctx))
+        scene = MosaicScene.from_result(result, ctx)
+        scene.visible_share  # noqa: B018 (auto-dive asks; at the start, not mid-animation)
+        return Level(0, ctx.picture, ctx, result, scene)
 
     def prepare(
         self,
@@ -322,13 +357,16 @@ class InfiniteSession:
         result = run.result(lean=True)
         timings.update(report.timings)
         scene = MosaicScene.from_result(result, ctx)
+        scene.visible_share  # noqa: B018 (auto-dive asks: here, not on the UI thread)
         self.levels += 1
         return Level(self.levels, picture, ctx, result, scene, timings)
 
 
 __all__ = [
+    "AUTO",
     "DIVE",
     "DIVE_THREADS",
+    "LIVE",
     "MATCHING",
     "MOSAIC",
     "MAX_SOURCE_PX",

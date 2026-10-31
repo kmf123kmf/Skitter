@@ -1,6 +1,7 @@
 """Application entry point."""
 
 import argparse
+import gc
 import sys
 
 from PySide6.QtWidgets import QApplication
@@ -22,4 +23,9 @@ def main(argv: list[str] | None = None) -> int:
 
     window = MainWindow()
     window.show()
+    # Everything made so far (modules, Qt, numba, faiss...) lives as long as the app: keep
+    # it out of the collector's full passes, which otherwise scan it all on the UI thread
+    # (measured: 51 ms, a visible stutter mid-animation; 9 ms after freezing).
+    gc.collect()
+    gc.freeze()
     return app.exec()

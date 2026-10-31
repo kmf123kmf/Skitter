@@ -33,6 +33,13 @@ once and full-size crops when read (TileTextures, through a process pool
 kept running for the session); zooming in sharpens them (ZoomDetail).
 Pan and zoom are locked during a dive and the fade. F11 toggles full
 screen (the panel hides).
+
+Auto-dive (the Auto-Dive button, A) dives on its own until stopped (the
+button, A, Esc, or a click or the wheel on the mosaic): each mosaic shows
+whole for the Dwell time, then a tile in view is picked (`pick_tile`), the
+view moves to it and zooms in (`_approach`, the tile outlined), rests on it
+for a moment, and dives. Its settings and the dive's apply as they change,
+even while a session runs: they only pace it.
 """
 
 import json
@@ -41,7 +48,7 @@ import time
 from concurrent.futures import ProcessPoolExecutor
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, Qt, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QGroupBox,
@@ -54,8 +61,10 @@ from PySide6.QtWidgets import (
 
 from skitter.core.easing import ease_in_out_cubic, ease_out_cubic
 from skitter.core.infinite import (
+    AUTO,
     DIVE,
     DIVE_THREADS,
+    LIVE,
     MATCHING,
     MOSAIC,
     InfiniteSession,
@@ -83,6 +92,13 @@ FLY_OUT = 3.0  # how far the other tiles fly, in their distances from the dived-
 PHOTO_IN = 0.2  # share of the dive over which the photo fades in over its tile
 PIXELATE_ABOVE = 4.0  # texels this large show as squares (not while diving: tiles blow up)
 START_TIP = "Start a session from a random photo of the library."
+HIGHLIGHT_COLOR = (1.0, 1.0, 1.0)  # the outline of the tile auto-dive heads for
+HIGHLIGHT_PX = 3.0
+AUTO_TIP = "Dive on and on by itself until stopped (A; Esc, a click or the wheel stop it too)."
+# Input on the mosaic that stops auto-dive (the viewer takes over).
+STOPS_AUTO = (
+    QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick, QEvent.Type.Wheel,
+)  # fmt: skip
 LOCKED_EVENTS = (
     QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease, QEvent.Type.MouseMove,
     QEvent.Type.MouseButtonDblClick, QEvent.Type.Wheel,
@@ -154,6 +170,12 @@ class InfiniteWindow(QWidget):
         self._pool: ProcessPoolExecutor | None = None
         self._locked = False  # pan and zoom off (diving, fading)
         self._fade_token: object | None = None
+        self.auto = False  # auto-dive is on
+        self._auto_token: object | None = None  # the auto-dive step under way
+        self._highlight: SpriteLayer | None = None  # the outline of auto-dive's next tile
+        self._approaching = False  # auto-dive's view moving in on a tile
+        self._swap_waiting = False  # full-size tiles came in meanwhile: swap them in after
+        self._rng = np.random.default_rng()
 
         self.canvas = MosaicCanvas()
         self.canvas.fit_margin = 1.0  # a picture fills the view, as a tile dived into does
@@ -172,22 +194,27 @@ class InfiniteWindow(QWidget):
         layout.addWidget(self.canvas, stretch=1)
         layout.addWidget(self.panel)
         QShortcut(QKeySequence("F11"), self, self.toggle_full_screen)
-        QShortcut(QKeySequence("Esc"), self, self._leave_full_screen)
+        QShortcut(QKeySequence("Esc"), self, self._on_escape)
+        QShortcut(QKeySequence("A"), self, self.toggle_auto)
         self.resize(1400, 900)
         self._refresh()
 
     # Construction
 
     def _build_settings_groups(self) -> list[QGroupBox]:
-        """Mosaic (with the slicer's own settings), Matching and Dive."""
-        self.forms = {name: ParamForm() for name in ("mosaic", "matching", "dive")}
+        """Mosaic (with the slicer's own settings), Matching, Dive and Auto-dive."""
+        self.forms = {name: ParamForm() for name in ("mosaic", "matching", "dive", "auto")}
         for form in self.forms.values():
             form.changed.connect(self._on_setting_changed)
         self.slicer_form = ParamForm()
-        self.settings_note = muted(QLabel("Settings stay as they are for the whole session."))
+        self.settings_note = muted(QLabel(
+            "Mosaic and matching settings stay as they are for the whole session; dive and "
+            "auto-dive settings apply as they change."
+        ))  # fmt: skip
         self._target_forms()
         groups = []
-        for title, name in (("Mosaic", "mosaic"), ("Matching", "matching"), ("Dive", "dive")):
+        for title, name in (("Mosaic", "mosaic"), ("Matching", "matching"), ("Dive", "dive"),
+                            ("Auto-dive", "auto")):  # fmt: skip
             group = QGroupBox(title)
             layout = QVBoxLayout(group)
             layout.addWidget(self.forms[name])
@@ -199,7 +226,8 @@ class InfiniteWindow(QWidget):
 
     def _target_forms(self) -> None:
         """Show self.settings (and its slicer's settings) in the forms."""
-        for name, only in (("mosaic", MOSAIC), ("matching", MATCHING), ("dive", DIVE)):
+        for name, only in (("mosaic", MOSAIC), ("matching", MATCHING), ("dive", DIVE),
+                           ("auto", AUTO)):  # fmt: skip
             self.forms[name].set_target(self.settings, only)
         self.slicer_form.set_target(self.plan.slicers[self.settings.slicer])
 
@@ -217,6 +245,10 @@ class InfiniteWindow(QWidget):
             "Start again from another random photo or mosaic, with the same settings."
         )
         self.new_start_button.clicked.connect(self.new_start)
+        self.auto_button = QPushButton("Auto-Dive")
+        self.auto_button.setCheckable(True)
+        self.auto_button.setToolTip(AUTO_TIP)
+        self.auto_button.toggled.connect(self.set_auto)
         self.status = QLabel()
         self.status.setWordWrap(True)
         self.progress = progress_bar()
@@ -227,7 +259,7 @@ class InfiniteWindow(QWidget):
         self.level_label.setWordWrap(True)
         help_text = muted(QLabel(
             "Double-click a tile to dive into it: its photo becomes the next mosaic. Drag to "
-            "pan, use the wheel to zoom. F11: full screen."
+            "pan, use the wheel to zoom. A: auto-dive. F11: full screen."
         ))  # fmt: skip
         group = QGroupBox("Session")
         layout = QVBoxLayout(group)
@@ -235,12 +267,15 @@ class InfiniteWindow(QWidget):
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.new_start_button)
         layout.addLayout(buttons)
+        layout.addWidget(self.auto_button)
         for widget in (self.status, self.progress, self.sub_status, self.sub_progress,
                        self.level_label, help_text):  # fmt: skip
             layout.addWidget(widget)
         return group
 
     def _on_setting_changed(self, name: str) -> None:
+        if name in LIVE:  # a running session follows them: keep them for the next one too
+            save_settings(self.settings, self.plan)
         if name == "slicer":
             self.slicer_form.set_target(self.plan.slicers[self.settings.slicer])
         else:  # settings in one form may show or hide others in another (`when`)
@@ -291,6 +326,7 @@ class InfiniteWindow(QWidget):
         """Show the session's start: another random photo or mosaic."""
         if not self.can_start_anew:
             return
+        self._cancel_auto_step()
         if self.settings.start == "mosaic":
             self._start_mosaic()
         else:
@@ -318,9 +354,11 @@ class InfiniteWindow(QWidget):
             self._prepare()
         elif self._prepared:
             self.status.setText("Ready.")
+        self._auto_next()
 
     def stop(self) -> None:
         """End the session: stop its work and clear the view."""
+        self.set_auto(False)
         if self._job is not None:
             self._job.cancel()
             self._job.wait()
@@ -438,6 +476,7 @@ class InfiniteWindow(QWidget):
         self.photo_layer = self.canvas.add_layer(SpriteLayer(picture, photo))
 
     def _clear_level(self) -> None:
+        self._swap_waiting = False  # that level's tiles
         self.zoom_detail.show(None, None, None)
         if self.tile_layer is not None:
             self.canvas.remove_layer(self.tile_layer)
@@ -481,9 +520,18 @@ class InfiniteWindow(QWidget):
         self.zoom_detail.show(layer, self.level.scene, self.infinite.library)
 
     def _on_textures_changed(self) -> None:
-        """Full-size tiles arrived: swap them in (unless a dive is moving them)."""
-        if self.tile_layer is not None and self.dive is None:
+        """Full-size tiles arrived: swap them in (unless a dive is moving them; while
+        auto-dive zooms in, once it rests: uploading them stalls a frame)."""
+        if self._approaching:
+            self._swap_waiting = True
+        elif self.tile_layer is not None and self.dive is None:
             self._new_tile_layer()
+
+    def _end_approach(self) -> None:
+        self._approaching = False
+        if self._swap_waiting:
+            self._swap_waiting = False
+            self._on_textures_changed()
 
     def _fade_photo(self) -> None:
         token = self._fade_token = object()
@@ -503,6 +551,7 @@ class InfiniteWindow(QWidget):
             self._fade_token = None
             self._locked = False
             self._refresh()
+            self._auto_next()
             return False
 
         self.canvas.add_animation(step)
@@ -532,6 +581,7 @@ class InfiniteWindow(QWidget):
         tile = TileView(int(scene.slot[index]), tuple(float(v) for v in scene.rect[index]),
                         bool(scene.mirrored[index]))  # fmt: skip
         picture = infinite.picture(tile)
+        self._remove_highlight()
         self.zoom_detail.show(None, None, None)  # tiles move: nothing to sharpen
         self.canvas.pixelate_above = None  # tiles grow far past their texels: smooth them
         tiles = self.tile_layer.instances
@@ -585,6 +635,127 @@ class InfiniteWindow(QWidget):
         # The tile moves on screen from where it was to the middle as the view zooms.
         canvas.set_view(dive.center - dive.screen0 * (1 - m) / zoom, zoom)
 
+    # Auto-dive
+
+    def toggle_auto(self) -> None:
+        self.set_auto(not self.auto)
+
+    def set_auto(self, on: bool) -> None:
+        """Turn auto-dive on (it starts from the current mosaic, once it is shown) or off
+        (what it was doing stops; a dive under way finishes)."""
+        on = bool(on) and self.running
+        if on == self.auto:
+            self._refresh()
+            return
+        self.auto = on
+        if on:
+            self._auto_next()
+        else:
+            self._cancel_auto_step()
+            if self.running and not self.busy:
+                self.status.setText("Ready.")
+        self._refresh()
+
+    def _cancel_auto_step(self) -> None:
+        self._auto_token = None
+        self._remove_highlight()
+        if self._approaching:
+            self._end_approach()
+
+    def _auto_next(self) -> None:
+        """Auto-dive's next round, once the mosaic shows (no dive or fade under way): dwell,
+        then head for a tile."""
+        if not self.auto or not self.running or self.level is None or self.busy:
+            return
+        token = self._auto_token = object()
+        dwell = float(self.settings.dwell_seconds)
+        self.status.setText(f"Auto-dive: next dive in {dwell:g} s." if dwell else "Auto-dive.")
+        QTimer.singleShot(round(dwell * 1000), lambda: self._approach(token))
+
+    def pick_tile(self) -> int:
+        """Auto-dive's next tile: at random among the tiles in view (Next tile: anywhere,
+        or among the tenth nearest the middle), leaving out those mostly hidden."""
+        scene, cam = self.level.scene, self.canvas.camera
+        pos = scene.center
+        half = cam.viewport / (2 * cam.zoom)
+        in_view = np.all(np.abs(pos - cam.center) <= half, axis=1)
+        shown = scene.visible_share >= 0.5
+        for candidates in (in_view & shown, in_view, shown):
+            pool = np.flatnonzero(candidates)
+            if len(pool):
+                break
+        else:
+            pool = np.arange(len(scene))
+        if self.settings.next_tile == "middle" and len(pool) > 1:
+            distance = np.linalg.norm(pos[pool] - cam.center, axis=1)
+            pool = pool[np.argsort(distance)[: max(1, len(pool) // 10)]]
+        return int(self._rng.choice(pool))
+
+    def _approach(self, token: object) -> None:
+        """Move to a tile and zoom in on it (to Zoom in to tiles across, over Zoom-in
+        time), rest on it (Pause on tile), then dive."""
+        if token is not self._auto_token or self.busy or self.level is None:
+            return
+        index = self.pick_tile()
+        settings, canvas = self.settings, self.canvas
+        cam = canvas.camera
+        center = self.level.scene.center[index].astype(np.float64)
+        tile_width = float(self.level.ctx.tile_size[0])
+        across = cam.viewport[0] / (float(settings.approach_tiles) * tile_width)
+        zoom0 = float(cam.zoom)
+        zoom1 = float(np.clip(max(across, zoom0), cam.min_zoom, cam.max_zoom))  # never out
+        screen0 = (center - cam.center) * zoom0
+        duration = float(settings.approach_seconds)
+        if settings.highlight:
+            self._show_highlight(index)
+        self.status.setText("Auto-dive: heading for a tile…")
+        self._approaching = True
+
+        def step(t: float) -> bool:
+            if token is not self._auto_token:
+                return False  # stopped: the view stays where it got to
+            e = 1.0 if duration <= 0 else min(t / duration, 1.0)
+            m = float(ease_in_out_cubic(e))
+            zoom = zoom0 * (zoom1 / zoom0) ** m
+            canvas.set_view(center - screen0 * (1 - m) / zoom, zoom)
+            if self._highlight is not None:
+                self._highlight.instances["alpha"] = min(1.0, 2 * e)
+                self._highlight.mark_dirty()
+            if e < 1.0:
+                return True
+            self._end_approach()
+            pause = round(float(settings.pause_seconds) * 1000)
+            QTimer.singleShot(pause, lambda: self._auto_dive(token, index))
+            return False
+
+        canvas.add_animation(step)
+
+    def _auto_dive(self, token: object, index: int) -> None:
+        if token is not self._auto_token or self.busy or self.level is None:
+            return
+        self._auto_token = None
+        self.dive_into(index)
+
+    def _show_highlight(self, index: int) -> None:
+        self._remove_highlight()
+        scene = self.level.scene
+        outline = make_instances(1)
+        outline["pos"], outline["size"] = scene.center[index], scene.size[index]
+        outline["rotation"], outline["alpha"] = scene.rotation[index], 0.0
+        outline["tint"][:, :3], outline["tint"][:, 3] = HIGHLIGHT_COLOR, 1.0
+        self._highlight = self.canvas.add_layer(
+            SpriteLayer(None, outline, outline_px=HIGHLIGHT_PX, edge_px=1.0)
+        )
+
+    def _remove_highlight(self) -> None:
+        if self._highlight is not None:
+            self.canvas.remove_layer(self._highlight)
+            self._highlight = None
+
+    def _on_escape(self) -> None:
+        self.set_auto(False)
+        self._leave_full_screen()
+
     # Window
 
     def _refresh(self) -> None:
@@ -593,14 +764,21 @@ class InfiniteWindow(QWidget):
         self.new_start_button.setVisible(running)
         self.new_start_button.setEnabled(self.can_start_anew)
         self.start_button.setToolTip("End this session." if running else START_TIP)
-        for form in (*self.forms.values(), self.slicer_form):
+        for form in (self.forms["mosaic"], self.forms["matching"], self.slicer_form):
             form.setEnabled(not running)
+        self.auto_button.setVisible(running)
+        self.auto_button.blockSignals(True)
+        self.auto_button.setChecked(self.auto)
+        self.auto_button.blockSignals(False)
+        self.auto_button.setText("Stop Auto-Dive" if self.auto else "Auto-Dive")
         self.settings_note.setVisible(running)
         self.progress.setVisible(self._followed)
         if not self._followed:
             self._show_sub(False)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
+        if watched is self.canvas and self.auto and event.type() in STOPS_AUTO:
+            self.set_auto(False)  # the viewer takes over
         if watched is self.canvas and self._locked and event.type() in LOCKED_EVENTS:
             return True  # no panning or zooming while diving or fading
         return super().eventFilter(watched, event)

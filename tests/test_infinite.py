@@ -5,6 +5,8 @@ import time
 import numpy as np
 import pytest
 from PIL import Image
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 from skitter.core.infinite import (
     SOURCE_PX_PER_TILE,
@@ -224,7 +226,8 @@ def test_window_starts_dives_and_stops(window, qapp):
     assert win.start_button.text() == "Start" and win.forms["mosaic"].isEnabled()
     win.start_button.click()
     assert win.running and win.start_button.text() == "Stop"
-    assert not any(form.isEnabled() for form in win.forms.values())
+    assert not win.forms["mosaic"].isEnabled() and not win.forms["matching"].isEnabled()
+    assert win.forms["dive"].isEnabled() and win.forms["auto"].isEnabled()  # pacing only
     assert not win.slicer_form.isEnabled()
     assert win.photo_layer is not None and win.photo_layer.instances["alpha"][0] == 1
     wait_for_level(win, qapp)
@@ -355,10 +358,22 @@ def test_diving_on_and_on_keeps_no_level_behind(window, qapp):
     from skitter.ui.jobs import Job
     from skitter.ui.render.tile_textures import TileTextures
 
-    def alive(cls) -> int:
+    def ours():
+        """This window's textures (other tests in this process may leave some behind)."""
+        library = win.app_session.library
+        return [o for o in gc.get_objects()
+                if isinstance(o, TileTextures) and o._library is library]  # fmt: skip
+
+    def alive() -> tuple[int, int]:
+        """(textures, their jobs) still alive, once those winding down are done."""
+        gc.collect()
+        for textures in ours():
+            textures.wait()  # a replaced level's cancelled job may still be winding down
         qapp.processEvents()  # textures let go from a zero-delay timer
         gc.collect()
-        return sum(1 for o in gc.get_objects() if isinstance(o, cls))
+        textures = ours()
+        jobs = sum(1 for o in gc.get_objects() if isinstance(o, Job) and o.parent() in textures)
+        return len(textures), jobs
 
     win = window
     win.settings.update(start="mosaic")
@@ -370,12 +385,119 @@ def test_diving_on_and_on_keeps_no_level_behind(window, qapp):
         run_animations(win.canvas, 2.0)
         win.textures.wait()  # full-size tiles in, their job stopped
         qapp.processEvents()
-        counts.append((alive(TileTextures), alive(Job)))
+        counts.append(alive())
         scene = win.level.scene
         sx, sy = win.canvas.camera.world_to_screen(*scene.center[len(scene) // 2])
         win._on_double_click(float(sx), float(sy))
         assert win.dive is not None
     assert counts[-1] == counts[1] and counts[-1][0] == 1, counts
+
+
+def run_auto(win, qapp, seconds: float, until=lambda: False) -> None:
+    """Let timers and animations run for about seconds of time (or until until())."""
+    end = time.perf_counter() + seconds
+    while time.perf_counter() < end and not until():
+        qapp.processEvents()
+        run_animations(win.canvas, 0.05)
+        if win._job is not None and not win._job.running:
+            win._job.wait()
+
+
+def test_auto_dive_dwells_zooms_in_rests_and_dives_on_and_on(window, qapp):
+    win = window
+    win.settings.update(start="mosaic", dwell_seconds=0.0, approach_seconds=0.3,
+                        approach_tiles=3.0, pause_seconds=0.0, dive_seconds=0.3,
+                        fade_seconds=0.1)  # fmt: skip
+    win.set_settings(win.settings)
+    assert not win.auto_button.isVisibleTo(win)  # only with a session
+    win.start_button.click()
+    assert win.auto_button.isVisibleTo(win) and not win.auto
+    win.textures.wait()
+    level = win.level
+    zoom = win.canvas.camera.zoom
+    win.auto_button.click()
+    assert win.auto and win.auto_button.text() == "Stop Auto-Dive"
+
+    # The view heads for a tile and zooms in on it (outlined), then dives into it.
+    qapp.processEvents()  # the dwell (0 s) ends
+    assert win._highlight is not None
+    target = win._highlight.instances["pos"][0].copy()
+    run_animations(win.canvas, 0.3)
+    cam = win.canvas.camera
+    assert cam.zoom > zoom * 2
+    np.testing.assert_allclose(cam.center, target, atol=1e-6)  # the tile in the middle
+    tile_width = level.ctx.tile_size[0]
+    assert cam.viewport[0] / (cam.zoom * tile_width) == pytest.approx(3.0)  # 3 tiles across
+    qapp.processEvents()  # the pause (0 s) ends: the dive starts
+    assert win.dive is not None and win._highlight is None
+    np.testing.assert_allclose(level.scene.center[win.dive.index], target)
+
+    # And on: it keeps diving, level after level, until stopped.
+    run_auto(win, qapp, 20.0, until=lambda: win.level.number >= 2)
+    assert win.level.number >= 2
+    win.auto_button.click()
+    assert not win.auto and win.auto_button.text() == "Auto-Dive"
+    run_auto(win, qapp, 10.0, until=lambda: not win.busy)  # a dive under way finishes
+    number = win.level.number
+    run_auto(win, qapp, 0.5)
+    assert win.level.number == number and win._auto_token is None
+
+
+def test_input_on_the_mosaic_or_esc_stops_auto_dive(window, qapp):
+    from PySide6.QtCore import QPoint, QPointF
+    from PySide6.QtGui import QWheelEvent
+
+    win = window
+    win.settings.update(start="mosaic", dwell_seconds=0.0, approach_seconds=5.0)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    win.set_auto(True)
+    qapp.processEvents()
+    run_animations(win.canvas, 0.2)
+    assert win._highlight is not None  # heading for a tile
+    center = QPointF(win.canvas.width() / 2, win.canvas.height() / 2)
+    wheel = QWheelEvent(center, win.canvas.mapToGlobal(center), QPoint(), QPoint(0, 120),
+                        Qt.MouseButton.NoButton, Qt.KeyboardModifier.NoModifier,
+                        Qt.ScrollPhase.NoScrollPhase, False)  # fmt: skip
+    QApplication.sendEvent(win.canvas, wheel)
+    assert not win.auto and win._highlight is None and not win.auto_button.isChecked()
+    zoom = win.canvas.camera.zoom
+    run_animations(win.canvas, 1.0)  # the approach stopped where it was
+    assert win.canvas.camera.zoom == pytest.approx(zoom)
+
+    win.toggle_auto()  # A
+    assert win.auto
+    win._on_escape()
+    assert not win.auto
+
+
+def test_auto_dive_picks_tiles_in_view(window, qapp):
+    win = window
+    win.settings.update(start="mosaic", columns=12)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    scene, cam = win.level.scene, win.canvas.camera
+    picks = {win.pick_tile() for _ in range(200)}
+    assert len(picks) > 20  # anywhere in view
+    win.settings.update(next_tile="middle")
+    distance = np.linalg.norm(scene.center - cam.center, axis=1)
+    near = set(np.argsort(distance)[: max(1, len(scene) // 10)].tolist())
+    assert {win.pick_tile() for _ in range(100)} <= near
+    win.canvas.set_view(scene.center[0], cam.zoom * 6)  # zoomed in on a corner
+    half = cam.viewport / (2 * cam.zoom)
+    for _ in range(50):
+        assert np.all(np.abs(scene.center[win.pick_tile()] - cam.center) <= half)
+
+
+def test_pacing_settings_apply_during_a_session_and_are_kept(window, qapp):
+    from skitter.ui.infinite_window import load_settings
+
+    win = window
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    win.forms["auto"].editor("dwell_seconds").widget.setValue(7.5)
+    assert win.settings.dwell_seconds == 7.5
+    assert load_settings()[0].dwell_seconds == 7.5  # kept for the next session too
 
 
 def test_settings_persist_between_windows(window, qapp):

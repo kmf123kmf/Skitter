@@ -37,6 +37,12 @@ _INSTANCE_ATTRIBUTES = (
 )  # fmt: skip
 
 
+# Detail page stacks kept from released layers, per size, for later layers to take: a new
+# stack costs a frame about 45 ms when first written (the driver allocating 144 MB at
+# 3 x 4096^2), every time a view replaces its tile layer (each Infinite Mosaic level).
+SPARE_DETAILS = 1
+
+
 def make_instances(count: int) -> np.ndarray:
     """Zeroed instance array with full opacity, each showing its whole texture."""
     instances = np.zeros(count, INSTANCE_DTYPE)
@@ -155,7 +161,10 @@ def _load_shader(name: str) -> str:
 
 
 class _GpuLayer:
-    def __init__(self, ctx: moderngl.Context, program: moderngl.Program, quad, layer):
+    def __init__(self, ctx: moderngl.Context, program: moderngl.Program, quad, layer,
+                 spare_details: dict | None = None):  # fmt: skip
+        """spare_details: detail page stacks of released layers, by (side, pages), to take
+        instead of allocating (see SpriteRenderer)."""
         count, h, w, _ = layer.textures.shape
         max_layers = ctx.info["GL_MAX_ARRAY_TEXTURE_LAYERS"]
         if count > max_layers:
@@ -167,6 +176,7 @@ class _GpuLayer:
         self.texture.anisotropy = 8.0
         self.pages = count
         self.detail: moderngl.TextureArray | None = None  # made when first written
+        self.spare_details = {} if spare_details is None else spare_details
         self.picture: moderngl.Texture | None = None
         self.picture_source: np.ndarray | None = None  # the array `picture` holds
 
@@ -199,10 +209,14 @@ class _GpuLayer:
 
     def write_detail(self, layer: SpriteLayer) -> None:
         if self.detail is None:
-            side = layer.detail_side
-            self.detail = self.ctx.texture_array((side, side, layer.detail_pages), 3)
-            self.detail.repeat_x = self.detail.repeat_y = False
-            self.detail.filter = (moderngl.LINEAR, moderngl.LINEAR)
+            side, pages = layer.detail_side, layer.detail_pages
+            spares = self.spare_details.get((side, pages))
+            if spares:  # a released layer's: its old texels show nowhere until rewritten
+                self.detail = spares.pop()
+            else:
+                self.detail = self.ctx.texture_array((side, side, pages), 3)
+                self.detail.repeat_x = self.detail.repeat_y = False
+                self.detail.filter = (moderngl.LINEAR, moderngl.LINEAR)
         for page, x, y, image in layer.detail_writes:
             h, w = image.shape[:2]
             data = np.ascontiguousarray(image, dtype=np.uint8)
@@ -239,7 +253,13 @@ class _GpuLayer:
         self._release_buffers()
         self.texture.release()
         if self.detail is not None:
-            self.detail.release()
+            side, _, pages = self.detail.size
+            spares = self.spare_details.setdefault((side, pages), [])
+            if len(spares) < SPARE_DETAILS:
+                spares.append(self.detail)  # for the next layer (the next level, say)
+            else:
+                self.detail.release()
+            self.detail = None
         self.sync_picture(None)
 
 
@@ -260,6 +280,7 @@ class SpriteRenderer:
         self.program["u_detail"] = 2
         self._no_picture = ctx.texture((1, 1), 4, bytes(4))  # bound when a layer has none
         self._no_detail = ctx.texture_array((1, 1, 1), 3, bytes(3))
+        self._spare_details: dict = {}  # (side, pages) -> detail stacks to reuse (_GpuLayer)
         corners = np.array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5], dtype="f4")
         self.quad = ctx.buffer(corners.tobytes())
         self._layers: dict[SpriteLayer, _GpuLayer] = {}
@@ -277,7 +298,8 @@ class SpriteRenderer:
         squares (0: never)."""
         gpu = self._layers.get(layer)
         if gpu is None:
-            gpu = self._layers[layer] = _GpuLayer(self.ctx, self.program, self.quad, layer)
+            gpu = self._layers[layer] = _GpuLayer(self.ctx, self.program, self.quad, layer,
+                                                  self._spare_details)  # fmt: skip
             layer.patches.clear()  # just uploaded whole
         if layer.patches:
             gpu.write_patches(layer.textures, layer.patches)

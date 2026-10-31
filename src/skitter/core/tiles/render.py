@@ -88,7 +88,12 @@ def render_crops(
             store(done, ix, _render_file(job))
         return out
     if pool is not None:
-        futures = [pool.submit(_render_file, job) for job in jobs]
+        try:
+            futures = [pool.submit(_render_file, job) for job in jobs]
+        except RuntimeError:  # the pool was shut down: its owner is done with this work
+            if cancelled():
+                return None
+            raise
         try:
             for done, (ix, future) in enumerate(zip(groups.values(), futures, strict=True), 1):
                 if cancelled():
