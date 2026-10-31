@@ -5,6 +5,12 @@ does one phase per method: analyze, search, pin, assign (with widening),
 refine, adapt, result. Its `Reporter` (method.py) is how it talks to the
 outside: progress steps (each checks for cancelling), progress within a
 step, and previews of the run so far.
+
+Runs made one after another with the same settings (core/infinite.py) can
+skip work a single run needs: `efforts` remembers each shape and detail
+level's calibrated search effort, so later runs search at it without
+sampling exact searches again, and `result(lean=True)` leaves out what only
+the Matching tab uses (candidates for picking by hand, the gamut gap).
 """
 
 import math
@@ -98,7 +104,7 @@ class MatchRun:
     """One run of the pipeline; call the phases in order (see Matcher.run)."""
 
     def __init__(self, matcher, regions: RegionSet, ctx: SliceContext, settings: "MosaicMethod",
-                 pins: Pins | None, report: Reporter):  # fmt: skip
+                 pins: Pins | None, report: Reporter, efforts: dict | None = None):  # fmt: skip
         self.matcher, self.library = matcher, matcher.library
         self.regions, self.ctx, self.settings, self.pins = regions, ctx, settings, pins
         self.report = report
@@ -111,6 +117,9 @@ class MatchRun:
         # Searches per shape class and detail level (targets.detail_levels): (c, level) -> Search
         self.searches: dict[tuple[int, int], Search] = {}
         self.regret: list[RegretStats] = []
+        # Calibrated search efforts by (shape, detail level), kept between runs (None: calibrate)
+        self.efforts = efforts
+        self.quality = None  # set by adapt
 
     # Previews
 
@@ -183,9 +192,15 @@ class MatchRun:
                                 progress)  # fmt: skip
                 weights = level_weights(settings.weights(), int(level))
                 index = self.matcher.index(key, cands, settings, report.detail, weights)
-                report.step("Checking search accuracy", None, "index")
-                effort, stats = self._calibrate(cands, index, mine)
-                self.regret.append(stats)
+                known = None if self.efforts is None else self.efforts.get((key, int(level)))
+                if known is None:
+                    report.step("Checking search accuracy", None, "index")
+                    effort, stats = self._calibrate(cands, index, mine)
+                    self.regret.append(stats)
+                    if self.efforts is not None:
+                        self.efforts[key, int(level)] = effort
+                else:
+                    effort = known
                 self.searches[c, int(level)] = Search(index, effort)
                 report.step("Searching", 0.3 + 0.3 * c / len(self.classes), "calibrate")
                 batched_search(cands, index, mine, self.targets.desc, self.weights, settings, k,
@@ -349,14 +364,15 @@ class MatchRun:
             self.quality, _ = self._quality(self._raster)
         report.step("Done", 1.0, "quality")
 
-    def result(self) -> MatchResult:
+    def result(self, lean: bool = False) -> MatchResult:
+        """The result; lean: without candidates for picking by hand or the gamut gap."""
         assign, n = self.assignment, self.n
         tint_target = (assign.tint_target if assign.tint_target is not None
                        else self.targets.desc[:, MEAN])  # fmt: skip
         result = self._snapshot(self._chosen(), assign.chosen_costs(), tint_target, self.quality,
                                 self.regret)  # fmt: skip
         result.settings = self.settings.copy()
-        result.candidates = self._remember()
+        result.candidates = None if lean else self._remember()
         result.choice = self._chosen().astype(np.int32)
         result.manual = np.zeros(n, bool)
         result.manual[self.pinned] = True
@@ -372,7 +388,7 @@ class MatchRun:
             forced=int(self.forced.sum()),
             manual=int(len(self.pinned)),
             candidates=int(sum(len(c) for c, _ in self.shapes.values())),
-            gamut_gap=self._gamut_gap(),
+            gamut_gap=None if lean else self._gamut_gap(),
             timings=self.report.timings,
         )
         return result

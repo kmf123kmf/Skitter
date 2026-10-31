@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
 from skitter.core.project_file import EXTENSION, ProjectFileError
 from skitter.ui import preferences
 from skitter.ui.export_dialog import ExportDialog
+from skitter.ui.infinite_window import InfiniteWindow
 from skitter.ui.session import Session
 from skitter.ui.steps import STEPS, StepPage
 from skitter.ui.steps.animate import AnimateStep
@@ -145,6 +146,11 @@ class MainWindow(QMainWindow):
         self.video_action.setShortcut(QKeySequence("Ctrl+Shift+E"))
         self.video_action.triggered.connect(self.open_video_export)
         mosaic_menu.addAction(self.video_action)
+        mosaic_menu.addSeparator()
+        self.infinite_action = QAction("&Infinite Mosaic...", self)
+        self.infinite_action.setShortcut(QKeySequence("Ctrl+I"))
+        self.infinite_action.triggered.connect(self.open_infinite)
+        mosaic_menu.addAction(self.infinite_action)
         self.step(AnimateStep).export_requested.connect(self.open_video_export)
         self.step(MatchingStep).export_requested.connect(self.open_export)
         session = self.session
@@ -370,8 +376,16 @@ class MainWindow(QMainWindow):
         self.video_dialog.activateWindow()
         return self.video_dialog
 
+    def open_infinite(self) -> InfiniteWindow:
+        """Infinite Mosaic, in a window of its own (blocking this one while open)."""
+        window = InfiniteWindow(self.session, self)
+        window.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        window.show()
+        return window
+
     def _update_actions(self) -> None:
         self.export_action.setEnabled(self.session.can_export)
+        self.infinite_action.setEnabled(self.session.busy is None)
         scene = self.session.scene
         self.video_action.setEnabled(
             self.session.can_export and scene is not None and len(scene) > 0

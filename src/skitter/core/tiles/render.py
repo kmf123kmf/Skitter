@@ -4,12 +4,13 @@ Analysis thumbnails (32 px) are enough to match tiles but far too coarse to
 show them. `render_crops` reads each tile image once (JPEGs decoded at
 reduced scale when that is still large enough), cuts out every crop of it
 that is asked for, and resizes each to its own pixel size. Files are read by
-a pool of processes.
+a pool of processes: a new one for each call, or one the caller keeps running
+(`pool`), which saves starting the processes (about 2 s on Windows) each time.
 """
 
 import os
 from collections.abc import Callable, Sequence
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import Executor, ProcessPoolExecutor
 
 import numpy as np
 from PIL import Image, ImageOps
@@ -53,12 +54,14 @@ def render_crops(
     workers: int | None = None,
     progress: Callable[[int, int], None] = lambda done, total: None,
     cancelled: Callable[[], bool] = lambda: False,
+    pool: Executor | None = None,
 ) -> list[np.ndarray | str] | None:
     """Each crop of each image, resized: (h, w, 3) uint8, or an error message.
 
     paths, rects (N, 4) fractions of the upright image and sizes (N, 2) output
     (w, h) pixels describe N crops; crops of the same file share one read.
     workers: processes to use (default: all cores; 0 reads in this thread).
+    pool: a process pool to read with (kept running by the caller) instead of a new one.
     progress(files done, files total) is called as files finish. Returns None
     if cancelled.
     """
@@ -84,15 +87,26 @@ def render_crops(
                 return None
             store(done, ix, _render_file(job))
         return out
-    with ProcessPoolExecutor(max_workers=workers or os.cpu_count()) as pool:
-        results = pool.map(_render_file, jobs, chunksize=8)
+    if pool is not None:
+        futures = [pool.submit(_render_file, job) for job in jobs]
+        try:
+            for done, (ix, future) in enumerate(zip(groups.values(), futures, strict=True), 1):
+                if cancelled():
+                    return None
+                store(done, ix, future.result())
+        finally:
+            for future in futures:
+                future.cancel()
+        return out
+    with ProcessPoolExecutor(max_workers=workers or os.cpu_count()) as own:
+        results = own.map(_render_file, jobs, chunksize=8)
         try:
             for done, (ix, result) in enumerate(zip(groups.values(), results, strict=True), 1):
                 if cancelled():
                     return None
                 store(done, ix, result)
         finally:
-            pool.shutdown(wait=True, cancel_futures=True)
+            own.shutdown(wait=True, cancel_futures=True)
     return out
 
 

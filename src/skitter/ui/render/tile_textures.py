@@ -108,13 +108,14 @@ def detail_sizes(sizes, budget: int = DETAIL_TEXELS, page: int = DETAIL_PAGE, ba
 
 def build_detail(
     paths, rects, sizes, thumbs, thumb_size, progress, cancelled, budget: int = DETAIL_TEXELS,
-    base=None,
+    base=None, pool=None,
 ) -> TileDetail:  # fmt: skip
     """Read and pack full-detail crops (runs in a background job).
 
     paths, rects, sizes describe each distinct crop; thumbs / thumb_size are
     each crop's library thumbnail, shown instead when its file can't be read.
     base: the base tile in texels, to boost smaller tiles (see boosts); None: no boost.
+    pool: a process pool kept running to read with (see render_crops); None: a new one.
     """
     pixels, scale, boost = detail_sizes(sizes, budget, base=base)
 
@@ -122,7 +123,7 @@ def build_detail(
         progress(f"Loading full-size tiles: {done:,} of {total:,} files", done / max(total, 1))
 
     rendered = render_crops_or_thumbs(
-        paths, rects, pixels, thumbs, thumb_size, progress=report, cancelled=cancelled
+        paths, rects, pixels, thumbs, thumb_size, progress=report, cancelled=cancelled, pool=pool
     )
     if rendered is None:
         raise JobCancelled
@@ -173,9 +174,9 @@ class DetailRequest:
             base=tuple(float(v) * scale for v in scene.tile_size) if boost else None,
         )
 
-    def build(self, progress, cancelled, budget: int = DETAIL_TEXELS) -> TileDetail:
+    def build(self, progress, cancelled, budget: int = DETAIL_TEXELS, pool=None) -> TileDetail:
         return build_detail(self.paths, self.rects, self.sizes, self.thumbs, self.thumb_size,
-                            progress, cancelled, budget, self.base)  # fmt: skip
+                            progress, cancelled, budget, self.base, pool)  # fmt: skip
 
     def content(self, scene: MosaicScene, progress, cancelled, budget: int = DETAIL_TEXELS):
         """(pages, instances, scale, failed): the scene's textures read and packed, its
@@ -287,10 +288,12 @@ class TileTextures(QObject):
 
     def __init__(
         self, scene: MosaicScene, library: TileLibrary, parent=None,
-        picture: np.ndarray | None = None,
+        picture: np.ndarray | None = None, pool=None,
     ):  # fmt: skip
-        """picture: (H, W, 4) the source picture, for blended tiles (see `picture`)."""
+        """picture: (H, W, 4) the source picture, for blended tiles (see `picture`).
+        pool: a process pool kept running to read crops with (see render_crops)."""
         super().__init__(parent)
+        self._pool = pool
         self.scene = scene
         self._picture = picture
         self._blend_page: np.ndarray | None = None
@@ -343,7 +346,8 @@ class TileTextures(QObject):
     def _load_detail(self, library: TileLibrary) -> None:
         scene = self.scene
         request = DetailRequest.for_scene(scene, TileFiles.read(library, scene.slot), boost=True)
-        job = Job(request.build, parent=self)
+        job = Job(lambda progress, cancelled: request.build(progress, cancelled, pool=self._pool),
+                  parent=self)  # fmt: skip
         job.progress.connect(lambda message, _: self._set_status(message))
         job.finished.connect(lambda detail: self._show_detail(detail, request, scene))
         job.failed.connect(lambda message: self._set_status(f"Thumbnails ({message})"))
