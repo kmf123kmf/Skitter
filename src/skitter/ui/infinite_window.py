@@ -139,10 +139,14 @@ START_TIP = "Start a session from a random photo of the library."
 # and under the new one: its gaps, the view's margins) fades out over LAST_OUT_ZOOM, ending
 # once the new one covers the view. A leg
 # slows to a stop (over EASE_SECONDS) where the photo would start to show if the next
-# mosaic isn't made by then.
+# mosaic isn't made by then. Continuously by hand, the view creeps in between legs, at the
+# same rate, slowing to a stop CREEP_ROOM of zoom before a base tile would start to show
+# its photo, so a leg into one has time to make its mosaic.
 FADE_ZOOM = 1.8
 LAST_OUT_ZOOM = 1.6
 EASE_SECONDS = 1.0
+CREEP_ROOM = FADE_ZOOM
+CREEP_STATUS = "Double-click a tile to head into it (drag to steer)."
 PHOTO_DISPLAY = 2.0  # a photo is shown at up to this many times the view's pixels
 MAX_FRAME_STEP = 0.1  # seconds the zoom moves on in one frame, at most
 HIGHLIGHT_COLOR = (1.0, 1.0, 1.0)  # the outline of the tile auto-dive heads for
@@ -282,11 +286,15 @@ class InfiniteWindow(QWidget):
         self._start_when_open = False  # Start was pressed while the library opened
         self._auto_token: object | None = None  # the auto-dive step under way
         self._highlight: SpriteLayer | None = None  # the outline of auto-dive's next tile
-        self._flow: _Flow | None = None  # continuous auto-dive's leg under way
-        self._flow_token: object | None = None  # its animation
+        self._flow: _Flow | None = None  # continuous dive's leg under way
+        self._flow_token: object | None = None  # its animation (and by hand, the creep's)
         self._flow_last: float | None = None  # the animation's time at the previous frame
+        self._creep_speed = 0.0  # by hand, between legs: the creep's, as a share of the rate
+        self._creep_left = 0.0  # its log zoom to go, as of the last frame
         self._last_layer: SpriteLayer | None = None  # the last level's, fading after a switch
         self._last_alpha: np.ndarray | None = None  # its tiles' opacity as the switch left it
+        self._last_zoom = 1.0  # the view's zoom at the switch
+        self._last_clock = 0.0  # seconds since
         self._tile_swap: SpriteLayer | None = None  # full-size tiles, staging, to swap in
         self._layer_jobs: list[Job] = []  # building tile layers in the background
         self._approaching = False  # auto-dive's view moving in on a tile
@@ -396,7 +404,8 @@ class InfiniteWindow(QWidget):
         self.level_label.setWordWrap(True)
         help_text = muted(QLabel(
             "Double-click a tile to dive into it: its photo becomes the next mosaic. Drag to "
-            "pan, use the wheel to zoom. A: auto-dive. F11: full screen."
+            "pan, use the wheel to zoom (diving continuously: the view zooms in by itself). "
+            "A: auto-dive. F11: full screen."
         ))  # fmt: skip
         group = QGroupBox("Session")
         layout = QVBoxLayout(group)
@@ -415,9 +424,11 @@ class InfiniteWindow(QWidget):
             save_settings(self.settings, self.plan)
         if name == "loop" and not self.settings.loop:
             self._drop_loop()
-        if name == "motion" and self.auto:  # the other way of moving, from where it is
-            self.set_auto(False)
-            self.set_auto(True)
+        if name == "motion" and self.running:  # the other way of moving, from where it is
+            self._cancel_auto_step()
+            if self.level is not None and not self.busy:  # at rest (a creep's may not be)
+                self.canvas.pixelate_above = PIXELATE_ABOVE
+            self._auto_next()
         if name == "tile_aspect":
             self.library.refresh_stats()
         if name == "slicer":
@@ -439,6 +450,11 @@ class InfiniteWindow(QWidget):
         matching = self._job is not None and self._job_kind in ("first", "dive")
         moving = self.dive is not None or self._flow is not None
         return matching or moving or self._fade_token is not None
+
+    @property
+    def _continuous(self) -> bool:
+        """Dives move continuously in this session."""
+        return self.running and self.settings.motion == "flow"
 
     @property
     def can_start_anew(self) -> bool:
@@ -512,6 +528,7 @@ class InfiniteWindow(QWidget):
     def stop(self) -> None:
         """End the session: stop its work and clear the view."""
         self.set_auto(False)
+        self._stop_flow()
         if self._job is not None:
             self._job.cancel()
             self._job.wait()
@@ -745,7 +762,10 @@ class InfiniteWindow(QWidget):
         index = self.tile_at(*self.canvas.camera.screen_to_world(sx, sy))
         if index >= 0:
             self._drop_loop()  # loops are auto-dive's: a dive by hand leaves it
-            self.dive_into(index)
+            if self.settings.motion == "flow":
+                self._flow_into(index)
+            else:
+                self.dive_into(index)
 
     def tile_view(self, index: int) -> TileView:
         """Tile index of the shown level, as a TileView."""
@@ -840,6 +860,8 @@ class InfiniteWindow(QWidget):
         self.auto = on
         if on:
             self._auto_next()
+        elif self._flow is not None:  # a leg on its way: it goes on to its mosaic, then creeps
+            self.status.setText("Auto-dive stops once this mosaic shows.")
         else:
             self._cancel_auto_step()
             if self.running and not self.busy:
@@ -854,12 +876,18 @@ class InfiniteWindow(QWidget):
             self._end_approach()
 
     def _auto_next(self) -> None:
-        """Auto-dive's next round, once the mosaic shows (no dive or fade under way): dwell,
-        then head for a tile."""
-        if not self.auto or not self.running or self.level is None or self.busy:
+        """Once the mosaic shows (no dive or fade under way): auto-dive's next round (dwell,
+        then head for a tile); continuously, its next leg, or by hand the creep."""
+        if not self.running or self.level is None or self.busy:
             return
         if self.settings.motion == "flow":
-            self._start_flow()
+            if self._flow_token is None:
+                self._start_flow()
+            elif self.auto:  # from the creep, at its speed
+                self._flow_leg(self.level, speed=self._creep_speed)
+                self._refresh()
+            return
+        if not self.auto:
             return
         token = self._auto_token = object()
         self._look_ahead()
@@ -945,13 +973,19 @@ class InfiniteWindow(QWidget):
 
     # Continuous auto-dive
 
-    def _start_flow(self) -> None:
-        """Start the never-ending zoom from the view as it is (see core/dive_path.py)."""
+    def _start_flow(self, index: int | None = None, speed: float = 1.0) -> None:
+        """Start the never-ending zoom from the view as it is (see core/dive_path.py):
+        auto-dive's legs, a leg onto tile index (a double-click), or by hand the creep
+        (from rest: speed is a leg's, as a share of the rate)."""
         self._drop_loop()  # loops are made in steps (for now)
         token = self._flow_token = object()
         self._flow_last = None
         self.canvas.pixelate_above = None  # tiles grow far past their texels: smooth them
-        self._flow_leg(self.level)
+        if self.auto or index is not None:
+            self._flow_leg(self.level, index, speed)
+        else:
+            self._creep_speed = 0.0
+            self.status.setText(CREEP_STATUS)
 
         def step(t: float) -> bool:
             if self._flow_token is not token:
@@ -960,6 +994,8 @@ class InfiniteWindow(QWidget):
             self._flow_last = t
             dt = min(max(dt, 0.0), MAX_FRAME_STEP)  # a stalled frame doesn't leap ahead
             self._flow_advance(dt)
+            if self._flow_token is token and self._flow is None and self._creep_done():
+                self._flow_token = None  # at rest, nothing left to show: no more frames
             return self._flow_token is token
 
         self.canvas.add_animation(step)
@@ -967,20 +1003,23 @@ class InfiniteWindow(QWidget):
 
     def _stop_flow(self) -> None:
         """Stop where the view is: the next mosaic's making stops, what was made ahead for
-        it goes, the last level's leftovers too."""
+        it goes, the last level's leftovers too (a leg's, or the creep's)."""
+        moving = self._flow_token is not None
         flow, self._flow, self._flow_token = self._flow, None, None
-        if flow is None:
-            return
-        if self._job is not None and self._job_kind == "flow":
-            self._job.cancel()
-            self._job.wait()
-            self._job = None
+        self._creep_speed = 0.0
+        if flow is None and not moving and self._last_layer is None and self._tile_swap is None:
+            return  # nothing continuous under way (a step dive may be)
         for job in self._layer_jobs:
             job.cancel()
-        if len(flow.over) and self.tile_layer is not None and flow.level is self.level:
-            self.tile_layer.instances["alpha"][flow.over] = 1.0  # back on the tile
-            self.tile_layer.mark_dirty()
-        self._flow_discard(flow)
+        if flow is not None:
+            if self._job is not None and self._job_kind == "flow":
+                self._job.cancel()
+                self._job.wait()
+                self._job = None
+            if len(flow.over) and self.tile_layer is not None and flow.level is self.level:
+                self.tile_layer.instances["alpha"][flow.over] = 1.0  # back on the tile
+                self.tile_layer.mark_dirty()
+            self._flow_discard(flow)
         if self._last_layer is not None:
             self.canvas.remove_layer(self._last_layer)
             self._last_layer = None
@@ -1007,9 +1046,11 @@ class InfiniteWindow(QWidget):
             flow.textures.close()
         flow.photo = flow.layer = flow.full = flow.textures = None
 
-    def _flow_leg(self, level: Level) -> None:
-        """A leg through level, from the view as it is onto a tile picked now."""
-        index = self.pick_tile()
+    def _flow_leg(self, level: Level, index: int | None = None, speed: float = 1.0) -> None:
+        """A leg through level, from the view as it is (moving at speed) onto tile index (by
+        hand: double-clicked), or one picked now."""
+        if index is None:
+            index = self.pick_tile()
         scene, cam, settings = level.scene, self.canvas.camera, self.settings
         size = scene.size[index].astype(np.float64)
         _, end_zoom = cam.fit_params(0, 0, *size, margin=self.canvas.fit_margin)
@@ -1019,9 +1060,10 @@ class InfiniteWindow(QWidget):
         path = FlowPath(start, scene.center[index], float(scene.rotation[index]), end_zoom,
                         cam.viewport, rate, str(settings.flow_path))  # fmt: skip
         self._flow = _Flow(level, index, self.tile_view(index), path)
+        self._flow.speed = speed
         if self._job is not None:  # preparing (a random mosaic's start): once it's done
             self._flow.waiting = True
-            self.status.setText("Auto-dive: the next mosaic is made once tiles are ready…")
+            self.status.setText("The next mosaic is made once tiles are ready…")
         else:
             self._flow_match()
 
@@ -1048,10 +1090,10 @@ class InfiniteWindow(QWidget):
                 flow.next, flow.picture, atlas = result
                 flow.seconds = time.perf_counter() - self._job_started
                 self._flow_prepare(flow, atlas)
-                self.status.setText("Auto-dive.")
+                self.status.setText("Auto-dive." if self.auto else "Diving.")
             self._refresh()
 
-        self._start_job(work, "flow", "Auto-dive: making the next mosaic…", done)
+        self._start_job(work, "flow", "Making the next mosaic…", done)
 
     def _flow_prepare(self, flow: _Flow, atlas) -> None:
         """The next level is made: its photo's layer and its textures (reading full-size
@@ -1094,6 +1136,9 @@ class InfiniteWindow(QWidget):
                     flow.full = layer
             elif self.textures is textures and self._flow_token is not None:
                 self._tile_swap = layer
+            elif self.textures is textures and self.dive is None and self.tile_layer is not None:
+                self._new_tile_layer(layer)  # the creep came to rest meanwhile: in now
+                return
             else:
                 return
             self.canvas.stage(layer)
@@ -1113,12 +1158,14 @@ class InfiniteWindow(QWidget):
     def _flow_advance(self, dt: float) -> None:
         """Move the leg on by dt seconds: slowing to a stop where the photo is to show if
         the next level isn't ready yet; on to the next leg once the tile fills the view."""
+        self._last_clock += dt
         flow = self._flow
         if flow is None:
+            self._creep(dt)
             return
         rate = flow_rate(int(self.settings.columns), float(self.settings.flow_seconds))
         per_second = 1.0 / max(flow.path.span / rate if rate > 0 else 0.0, MIN_SECONDS)
-        first, _ = self._flow_shares()
+        first, _ = self._flow_shares(flow.path)
         flow.hold = flow.path.u_at_share(first)
         ready = flow.photo is not None and flow.layer is not None
         target = 1.0
@@ -1140,26 +1187,66 @@ class InfiniteWindow(QWidget):
             return
         self._flow_frame()
 
-    def _flow_shares(self) -> tuple[float, float]:
+    def _flow_shares(self, path: FlowPath) -> tuple[float, float]:
         """The tile's shares of the view where its photo starts to fade in, and where its
-        mosaic has taken over (Mosaic appears at)."""
+        mosaic has taken over (Mosaic appears at). A tile already larger than the first at
+        the leg's start (few columns, a large tile) starts there, its mosaic later."""
         last = float(self.settings.flow_mosaic) / 100
-        return last / FADE_ZOOM**2, last
+        first = last / FADE_ZOOM**2
+        start = path.tile_share(0.0)
+        if start > first:
+            first, last = start, min(max(last, start * FADE_ZOOM**2), 1.0)
+            first = min(first, last / 1.01)  # some zoom for the fades, however little
+        return first, last
 
-    def _flow_frame(self) -> None:
-        """Show the leg at its progress: the view; the last level fading; the tile's photo
-        fading in, then into its mosaic, inside it; full-size tiles staged, swapped in."""
-        flow, canvas = self._flow, self.canvas
-        path, u = flow.path, flow.u
-        view = path.at(u)
-        canvas.camera.rotation = view.rotation
-        canvas.set_view(view.center, view.zoom)
-        canvas.update()
-        last = self._last_layer
+    def _creep(self, dt: float) -> None:
+        """By hand, between legs: the view zooms on in about its middle (dragging steers
+        it), at the legs' rate, easing to a stop CREEP_ROOM short of where a base tile
+        would start to show its photo; the last level fades meanwhile."""
+        canvas, cam, settings = self.canvas, self.canvas.camera, self.settings
+        rate = flow_rate(int(settings.columns), float(settings.flow_seconds))
+        width, height = (float(v) for v in self.level.ctx.tile_size)
+        _, tile_zoom = cam.fit_params(0, 0, width, height, margin=canvas.fit_margin)
+        first = float(settings.flow_mosaic) / 100 / FADE_ZOOM**2
+        limit = tile_zoom * first / CREEP_ROOM
+        left = math.log(max(limit / cam.zoom, 1.0))  # log zoom to go
+        self._creep_left = left
+        braking = 0.5 * self._creep_speed**2 * EASE_SECONDS * rate
+        target = 1.0 if left > braking + 1e-4 else 0.0
+        step = dt / EASE_SECONDS
+        if self._creep_speed < target:
+            self._creep_speed = min(self._creep_speed + step, target)
+        else:
+            self._creep_speed = max(self._creep_speed - step, target)
+        if left > 0:
+            zoom = min(cam.zoom * math.exp(self._creep_speed * rate * dt), limit)
+            canvas.set_view(cam.center, zoom)
+        self._flow_leftovers(cam.zoom)
+
+    def _creep_done(self) -> bool:
+        """The creep is at rest where it stops, with nothing left to fade or swap in."""
+        return (self._creep_speed == 0 and self._creep_left <= 1e-4
+                and self._last_layer is None and self._tile_swap is None)  # fmt: skip
+
+    def _flow_into(self, index: int) -> None:
+        """By hand: head on into tile index (double-clicked) from the creep, as a leg."""
+        if self._flow_token is None:  # the creep at rest
+            self._start_flow(index, speed=0.0)
+        else:
+            self._flow_leg(self.level, index, self._creep_speed)
+        self._refresh()
+
+    def _flow_leftovers(self, zoom: float) -> None:
+        """The last level fading (by the view's zoom since the switch, or as if it had
+        zoomed on at the rate if slower: by hand the creep may stop), full-size tiles
+        swapped in once staged."""
+        canvas, last = self.canvas, self._last_layer
         if last is not None:  # until this level covers the view (its margins), at least
+            rate = flow_rate(int(self.settings.columns), float(self.settings.flow_seconds))
+            z0 = self._last_zoom
             canvas_size = np.array([self.level.ctx.width, self.level.ctx.height], np.float64)
-            cover = float(np.max(canvas.camera.viewport / (canvas_size * path.z0)))
-            zoomed = math.log(max(view.zoom / path.z0, 1.0))
+            cover = float(np.max(canvas.camera.viewport / (canvas_size * z0)))
+            zoomed = max(math.log(max(zoom / z0, 1.0)), rate * self._last_clock)
             fading = max(math.log(max(cover, 1.0)) - math.log(LAST_OUT_ZOOM), 0.0)
             gone = (zoomed - fading) / math.log(LAST_OUT_ZOOM)
             last.instances["alpha"] = self._last_alpha * (1.0 - _fade(gone))
@@ -1171,13 +1258,24 @@ class InfiniteWindow(QWidget):
         if swap is not None and canvas.staged(swap):
             self._tile_swap = None
             self._new_tile_layer(swap)
+
+    def _flow_frame(self) -> None:
+        """Show the leg at its progress: the view; the last level fading; the tile's photo
+        fading in, then into its mosaic, inside it; full-size tiles staged, swapped in."""
+        flow, canvas = self._flow, self.canvas
+        path, u = flow.path, flow.u
+        view = path.at(u)
+        canvas.camera.rotation = view.rotation
+        canvas.set_view(view.center, view.zoom)
+        canvas.update()
+        self._flow_leftovers(view.zoom)
         if flow.full is not None and canvas.staged(flow.full):
             self._flow_full_in(flow)
         if flow.photo is None or flow.layer is None:
             return
-        first, done = self._flow_shares()
+        first, done = self._flow_shares(path)
         share = math.log(path.tile_share(u))
-        step = math.log(FADE_ZOOM)
+        step = math.log(done / first) / 2  # each fade's zoom (FADE_ZOOM, if there's room)
         photo_in = _fade((share - math.log(first)) / step)
         mosaic_in = _fade((share - math.log(first) - step) / step)
         if photo_in <= 0:
@@ -1278,6 +1376,14 @@ class InfiniteWindow(QWidget):
         self.zoom_detail.show(layer, level.scene, self.infinite.library)
         self.level_label.setText(f"Level {level.number}: {len(level.scene):,} tiles, made in "
                                  f"{flow.seconds:.2f} s")  # fmt: skip
+        self._last_zoom, self._last_clock = float(canvas.camera.zoom), over
+        if not self.auto:  # by hand: the view creeps on, for the next tile to be picked
+            speed, self._flow = flow.speed, None
+            self._creep_speed = speed
+            self._creep(over)
+            self.status.setText(CREEP_STATUS)
+            self._refresh()
+            return
         self._flow_leg(level)
         self._flow.u = over / max(self._flow.path.seconds, MIN_SECONDS)
         self._flow_frame()
@@ -1456,8 +1562,11 @@ class InfiniteWindow(QWidget):
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
         if watched is self.canvas and self.auto and event.type() in STOPS_AUTO:
             self.set_auto(False)  # the viewer takes over
-        if watched is self.canvas and self._locked and event.type() in LOCKED_EVENTS:
-            return True  # no panning or zooming while diving or fading
+        if watched is self.canvas and event.type() in LOCKED_EVENTS:
+            if self._locked or self._flow is not None:
+                return True  # no panning or zooming while diving or fading (a leg's path)
+            if event.type() == QEvent.Type.Wheel and self._continuous:
+                return True  # it zooms by itself
         return super().eventFilter(watched, event)
 
     def toggle_full_screen(self) -> None:

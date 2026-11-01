@@ -155,14 +155,16 @@ def load_project(path) -> ProjectFile:
             source = load_image(io.BytesIO(archive.read("source.png")))
             regions = _arrays(archive.read("regions.npz")) if "regions.npz" in names else None
             mosaic = _arrays(archive.read("mosaic.npz")) if "mosaic.npz" in names else None
-    except (OSError, KeyError, ValueError, zipfile.BadZipFile) as exc:
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile, Image.DecompressionBombError) as exc:
         raise ProjectFileError(f"{path.name} is not a readable Skitter project ({exc})") from exc
-    if not isinstance(doc, dict) or doc.get("format", 0) > FORMAT:
-        raise ProjectFileError(f"{path.name} was saved by a newer version of Skitter")
-
-    problems: list[str] = []
-    project = _project(doc, source, problems)
-    committed = bool(doc.get("source", {}).get("committed"))
+    try:
+        if not isinstance(doc, dict) or doc.get("format", 0) > FORMAT:
+            raise ProjectFileError(f"{path.name} was saved by a newer version of Skitter")
+        problems: list[str] = []
+        project = _project(doc, source, problems)
+        committed = bool(doc.get("source", {}).get("committed"))
+    except (AttributeError, TypeError) as exc:  # a part of the wrong type (a damaged file)
+        raise ProjectFileError(f"{path.name} is not a readable Skitter project ({exc})") from exc
     if committed:
         final = np.array(project.source_image, dtype=np.uint8, order="C", copy=True)
         final.setflags(write=False)

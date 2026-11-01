@@ -700,7 +700,8 @@ def test_continuous_auto_dive_zooms_on_from_mosaic_to_mosaic_seamlessly(window, 
     win.settings.update(motion="flow", flow_seconds=2.0, slicer=slicer)
     win.set_settings(win.settings)
     assert not win.forms["auto"].is_shown("dwell_seconds")  # steps' settings: hidden
-    assert win.forms["auto"].is_shown("flow_seconds")
+    assert not win.forms["dive"].is_shown("dive_style")
+    assert win.forms["dive"].is_shown("flow_seconds")
     win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
@@ -745,8 +746,9 @@ def test_continuous_auto_dive_zooms_on_from_mosaic_to_mosaic_seamlessly(window, 
     # and its photo; nothing more is kept.
     assert len(win.canvas.layers) <= 4
 
-    # Stopping leaves the view where it is, with nothing of the next level behind.
-    win.auto_button.click()
+    # Diving in steps instead stops where the view is, with nothing of the next level
+    # behind.
+    switch_motion(win, "steps")
     assert win._flow is None and not win.busy and win._job is None
     assert win.canvas.pixelate_above == 4.0
 
@@ -785,8 +787,14 @@ def test_continuous_auto_dive_makes_the_next_level_ahead_and_stages_it(window, q
     flow = win._flow
     run_auto(win, qapp, 10.0, until=lambda: flow.textures is not None)
     textures = flow.textures
-    win.auto_button.click()
+    switch_motion(win, "steps")
     assert flow.textures is None and textures._closing and win.canvas._staging == []
+
+
+def switch_motion(win, motion: str) -> None:
+    """Change Dives move, as its form does."""
+    win.settings.update(motion=motion)
+    win._on_setting_changed("motion")
 
 
 def pile_flow(win, qapp, **pile):
@@ -818,18 +826,19 @@ def test_continuous_auto_dive_shows_the_mosaic_only_once_its_photo_covers_the_ti
             continue
         photo = float(flow.photo.instances["alpha"][0])
         alpha = flow.layer.instances["alpha"]
-        first, _ = win._flow_shares()
+        first, done = win._flow_shares(flow.path)
+        middle = np.sqrt(first * done)  # where the photo is in and starts to fade out
         share = flow.path.tile_share(flow.u)
-        if 0 < photo < 1 and share < first * 1.8 * 0.99:  # the photo fading in
+        if 0 < photo < 1 and share < middle * 0.99:  # the photo fading in
             assert np.all(alpha == 0)
             seen["fading in"] = True
-        elif share > first * 1.8 * 1.01 and photo < 1:  # the photo fading into the mosaic
+        elif share > middle * 1.01 and photo < 1:  # the photo fading into the mosaic
             assert np.all(alpha[flow.inside] == 1)
             outside = alpha[~flow.inside]
             assert np.allclose(outside, outside[0]) if len(outside) else True
             seen["into mosaic"] = True
     assert all(seen.values())
-    win.auto_button.click()
+    switch_motion(win, "steps")
 
 
 def test_continuous_auto_dive_heads_for_tiles_on_top_and_lifts_what_lies_on_one(window, qapp):
@@ -865,7 +874,7 @@ def test_continuous_auto_dive_heads_for_tiles_on_top_and_lifts_what_lies_on_one(
     win._flow_arrive = arrive
     np.testing.assert_allclose(at_switch[0], 0.0)
     assert win._last_layer is layer and np.all(win._last_alpha[over] == 0)
-    win.auto_button.click()  # stopped: what was faded is back (the shown level's own)
+    switch_motion(win, "steps")  # stopped: what was faded is back (the shown level's own)
     assert win._last_layer is None
     np.testing.assert_allclose(win.tile_layer.instances["alpha"], 1.0)
 
@@ -889,6 +898,105 @@ def test_continuous_auto_dive_holds_for_a_mosaic_not_made_yet(window, qapp):
     run_auto(win, qapp, 10.0, until=lambda: win.level.number >= 2)
     assert win.level.number >= 2 and win._flow is not None and win._flow is not flow
     win.auto_button.click()
+
+
+def creep_limit(win) -> float:
+    """The zoom the creep comes to rest at (see InfiniteWindow._creep)."""
+    from skitter.ui.infinite_window import CREEP_ROOM, FADE_ZOOM
+
+    cam = win.canvas.camera
+    _, tile_zoom = cam.fit_params(0, 0, *win.level.ctx.tile_size, margin=win.canvas.fit_margin)
+    return tile_zoom * float(win.settings.flow_mosaic) / 100 / FADE_ZOOM**2 / CREEP_ROOM
+
+
+def test_continuous_by_hand_creeps_in_and_dives_where_double_clicked(window, qapp):
+    from PySide6.QtCore import QEvent
+
+    from skitter.ui.infinite_window import CREEP_STATUS
+
+    win = window
+    win.settings.update(motion="flow", flow_seconds=2.0, columns=12, flow_mosaic=100.0)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 0.25)  # the photo fades into the mosaic
+    fit = win.canvas.camera.zoom
+    assert win._flow_token is not None and win._flow is None  # creeping, no leg
+    assert win.status.text() == CREEP_STATUS
+
+    def filtered(kind) -> bool:  # the window takes this input from the canvas
+        return win.eventFilter(win.canvas, QEvent(kind))
+
+    assert filtered(QEvent.Type.Wheel)  # it zooms by itself
+    assert not filtered(QEvent.Type.MouseButtonPress) and not filtered(QEvent.Type.MouseMove)
+
+    # It eases to rest short of where a tile would show its photo, and stops its frames.
+    zooms = []
+    for _ in range(400):
+        run_animations(win.canvas, 0.05)
+        zooms.append(win.canvas.camera.zoom)
+        if win._flow_token is None:
+            break
+    assert win._flow_token is None and not win.busy
+    assert np.all(np.diff(zooms) >= 0) and zooms[-1] > fit * 1.2
+    assert zooms[-1] == pytest.approx(creep_limit(win), rel=1e-3)
+
+    # A double-click heads on into that tile, as auto-dive's legs do, input locked.
+    cam = win.canvas.camera
+    index = win.tile_at(*cam.center)
+    w, h = cam.viewport
+    win._on_double_click(w / 2, h / 2)
+    flow = win._flow
+    assert flow is not None and flow.index == index and win.busy and win._flow_token
+    assert filtered(QEvent.Type.MouseButtonPress) and filtered(QEvent.Type.MouseButtonDblClick)
+    run_auto(win, qapp, 15.0, until=lambda: win.level is flow.next)
+    assert win.level.number == 2 and win.level is flow.next
+
+    # Then it creeps on in the next mosaic, the last one fading, for the next pick.
+    assert win._flow is None and win._flow_token is not None and not win.auto
+    assert win._last_layer is not None and win.status.text() == CREEP_STATUS
+    run_auto(win, qapp, 15.0, until=lambda: win._flow_token is None)
+    assert win._last_layer is None and win._flow is None and win.level.number == 2
+    assert win.canvas.camera.zoom == pytest.approx(creep_limit(win), rel=1e-3)
+
+    # From rest too; switching to steps stops it where it is, the wheel zooms again.
+    win._on_double_click(w / 2, h / 2)
+    assert win._flow is not None and win._flow.speed == 0
+    switch_motion(win, "steps")
+    assert win._flow is None and win._flow_token is None and not win.busy
+    assert not filtered(QEvent.Type.Wheel) and win.canvas.pixelate_above == 4.0
+
+
+def test_turning_continuous_auto_dive_off_lets_its_leg_reach_the_mosaic(window, qapp):
+    """Auto-dive off (or a click on the view) mid-leg: the leg goes on into its tile, then
+    the view creeps as by hand. Its tile, larger than its photo needs to start showing
+    (6 columns), has its photo fade in from nothing all the same."""
+    win = window
+    win.settings.update(motion="flow", flow_seconds=2.0)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    win.auto_button.click()
+    flow = win._flow
+    first, done = win._flow_shares(flow.path)
+    start = flow.path.tile_share(0.0)
+    assert start > 0.35 / 1.8**2  # Mosaic appears at's photo start: already past
+    assert first == pytest.approx(start) and done == pytest.approx(min(start * 1.8**2, 1.0))
+    win.auto_button.click()
+    assert not win.auto and win._flow is flow and win.busy
+    photo = []
+
+    def frame():
+        if flow.placed and flow.photo is not None:
+            photo.append(float(flow.photo.instances["alpha"][0]))
+        return win.level is flow.next
+
+    run_auto(win, qapp, 15.0, until=frame)
+    assert win.level is flow.next and win._flow is None and win._flow_token is not None
+    assert photo and photo[0] < 0.2 and max(photo) == pytest.approx(1.0, abs=0.05)
+    run_auto(win, qapp, 1.0)
+    assert win._flow is None  # no next leg by itself
 
 
 def test_auto_dive_dwells_zooms_in_rests_and_dives_on_and_on(window, qapp):

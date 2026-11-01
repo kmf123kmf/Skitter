@@ -95,10 +95,11 @@ from skitter.core.tiles.render import render_crops_or_thumbs
 
 MOSAIC = ("start", "tile_aspect", "columns", "slicer")  # InfiniteSettings by group
 MATCHING = ("tint", "tint_strength", "max_uses", "min_spacing", "mirror")
-DIVE = ("dive_seconds", "dive_style", "fade_seconds")
-AUTO = ("motion", "flow_seconds", "flow_path", "flow_mosaic", "dwell_seconds", "next_tile",
-        "variety", "approach_seconds", "approach_tiles", "pause_seconds", "highlight", "loop",
-        "loop_dives", "loop_fit", "loop_tint", "look_ahead")  # fmt: skip
+DIVE = ("motion", "flow_seconds", "flow_path", "flow_mosaic", "dive_seconds", "dive_style",
+        "fade_seconds")  # fmt: skip
+AUTO = ("dwell_seconds", "next_tile", "variety", "approach_seconds", "approach_tiles",
+        "pause_seconds", "highlight", "loop", "loop_dives", "loop_fit", "loop_tint",
+        "look_ahead")  # fmt: skip
 LIVE = DIVE + AUTO  # settings a running session follows as they change (pacing only)
 SOURCE_PX_PER_TILE = 16  # least picture pixels across a base tile (4 per cell: full detail)
 MAX_SOURCE_PX = 4096  # longest side a level's picture is read at
@@ -153,30 +154,14 @@ class InfiniteSettings(Configurable):
     )  # fmt: skip
     mirror = BoolParam(False, "Mirrored tiles", help="Also try every crop flipped left to right.")
 
-    dive_seconds = FloatParam(
-        1.5, "Dive time", min=0.3, max=10.0, step=0.1, decimals=1, suffix=" s",
-        help="How long a dive takes: the tile straightens and fills the view while the "
-             "others leave the view.",
-    )  # fmt: skip
-    dive_style = ChoiceParam(
-        "fly_out", "Tiles leave by", choices=dive_styles.CHOICES,
-        help="How the other tiles clear the view during a dive. Fly out: straight away "
-             "from the tile. Vortex: swirling around it. Ripple: shrinking away, nearest "
-             "first. Fade away: dissolving where they lie. Fall away: dropping off the "
-             "bottom. Card flip: turning edge-on in a wave. Wind: blown off one side. "
-             "Random: a different one each dive (a loop replays the same ones).",
-    )  # fmt: skip
-    fade_seconds = FloatParam(
-        0.6, "Fade time", min=0.0, max=5.0, step=0.1, decimals=1, suffix=" s",
-        help="How long the photo takes to dissolve into its own mosaic once it is matched.",
-    )  # fmt: skip
-
     motion = ChoiceParam(
-        "steps", "Auto-dive moves",
+        "steps", "Dives move",
         choices=[("steps", "In steps"), ("flow", "Continuously")],
-        help="In steps: each mosaic shows whole for a while, the view zooms in on a tile and "
-             "dives into it. Continuously: one never-ending zoom; each mosaic's next tile is "
-             "picked as it appears and its mosaic made while the view heads for it.",
+        help="In steps: each mosaic shows whole until a tile is dived into (by a double-click, "
+             "or auto-dive zooming in on one). Continuously: one never-ending zoom. By hand "
+             "the view creeps in by itself (drag to steer; the wheel doesn't zoom) and a "
+             "double-click heads on into a tile, its mosaic made on the way; auto-dive picks "
+             "each mosaic's next tile as it appears.",
     )  # fmt: skip
     flow_seconds = FloatParam(
         6.5, "Time per mosaic", min=2.0, max=120.0, step=0.5, decimals=1, suffix=" s",
@@ -198,6 +183,26 @@ class InfiniteSettings(Configurable):
              "turned into its own mosaic, shown inside it as the view heads on in. Lower "
              "shows the next mosaic sooner; 100%: as the tile fills the view.",
     )  # fmt: skip
+    dive_seconds = FloatParam(
+        1.5, "Dive time", min=0.3, max=10.0, step=0.1, decimals=1, suffix=" s",
+        when=lambda s: s.motion == "steps",
+        help="How long a dive takes: the tile straightens and fills the view while the "
+             "others leave the view.",
+    )  # fmt: skip
+    dive_style = ChoiceParam(
+        "fly_out", "Tiles leave by", choices=dive_styles.CHOICES,
+        when=lambda s: s.motion == "steps",
+        help="How the other tiles clear the view during a dive. Fly out: straight away "
+             "from the tile. Vortex: swirling around it. Ripple: shrinking away, nearest "
+             "first. Fade away: dissolving where they lie. Fall away: dropping off the "
+             "bottom. Card flip: turning edge-on in a wave. Wind: blown off one side. "
+             "Random: a different one each dive (a loop replays the same ones).",
+    )  # fmt: skip
+    fade_seconds = FloatParam(
+        0.6, "Fade time", min=0.0, max=5.0, step=0.1, decimals=1, suffix=" s",
+        help="How long the photo takes to dissolve into its own mosaic once it is matched.",
+    )  # fmt: skip
+
     dwell_seconds = FloatParam(
         3.0, "Dwell", min=0.0, max=600.0, step=0.5, decimals=1, suffix=" s",
         when=lambda s: s.motion == "steps",

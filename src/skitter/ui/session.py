@@ -642,10 +642,6 @@ class Session(QObject):
         self.library_changed.emit()
         return self.library
 
-    def set_library_folders(self, folders) -> None:
-        self.library.set_roots(folders)
-        self.library_changed.emit()
-
     def add_library_folder(self, folder) -> None:
         """Scan a folder too (one inside a library folder is put back in use instead)."""
         self.library.add_root(folder)

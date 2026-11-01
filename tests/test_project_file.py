@@ -328,6 +328,11 @@ def test_files_that_are_not_projects_are_refused(tmp_path):
     rewrite(path, lambda doc: doc.update(format=99))
     with pytest.raises(ProjectFileError, match="newer version"):
         load_project(path)
+    for damage in ({"source": None}, {"format": "2"}):  # parts of the wrong type
+        save_project(path, sample_project(), committed=True, mosaic=None)
+        rewrite(path, lambda doc, damage=damage: doc.update(damage))
+        with pytest.raises(ProjectFileError, match="not a readable"):
+            load_project(path)
     with pytest.raises(ValueError):
         save_project(tmp_path / "empty.skitter", Project(), committed=False, mosaic=None)
 
