@@ -268,6 +268,18 @@ class DiveTimeline:
         """The record index of the level whose tiles show at t (frame wants it made)."""
         return self.steps[self._step_at(t)[0]].position
 
+    def phase_at(self, t: float) -> tuple[TimelineStep, str]:
+        """The step at t and its phase there (one of PHASES), without the level."""
+        k, local = self._step_at(t)
+        step = self.steps[k]
+        for name, seconds in zip(PHASES, self._phases(), strict=True):
+            if name == "approach" and step.pick < 0:
+                return step, "dwell"  # it ends at rest
+            if local < seconds or name == "dive":
+                return step, name
+            local -= seconds
+        return step, "dive"
+
     def frame(self, t: float, level) -> TimelineFrame:
         """The timeline at t seconds; level: the record's level position_at(t), made
         (InfiniteSession.rebuild, or the live one)."""

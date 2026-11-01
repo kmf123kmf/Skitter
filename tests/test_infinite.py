@@ -382,7 +382,10 @@ def test_a_timeline_plays_a_record_seamlessly_from_level_to_level(library):
     assert timeline.duration == pytest.approx(3 * 4.5 + 1.5)
 
     def frame(t):
-        return timeline.frame(t, levels[timeline.position_at(t)])
+        made = timeline.frame(t, levels[timeline.position_at(t)])
+        step, phase = timeline.phase_at(t)  # without the level, the same
+        assert (step.position, phase) == (made.position, made.phase)
+        return made
 
     for step in timeline.steps[:-1]:
         t0 = step.start
@@ -654,9 +657,13 @@ def test_the_infinite_panel_fits_its_width(windows_font, window, qapp):
     win.setFont(windows_font)
     qapp.processEvents()
     assert overflowing() == []
-    win.start_button.click()  # running: the lock note, Stop, New Start, Auto-Dive
+    win.start_button.click()  # running: the lock note, Stop, New Start, Auto-Dive, Replay
     wait_for_level(win, qapp)
     assert win.library.locked and overflowing() == []
+    win.auto_button.setText("Stop Auto-Dive")  # the longest each says, side by side
+    win.replay_button.setText("Stop Replay")
+    qapp.processEvents()
+    assert overflowing() == []
 
 
 def test_every_dive_style_moves_the_others_and_keeps_the_tile(window, qapp):
@@ -1294,9 +1301,22 @@ def test_auto_dive_loops_back_home_and_replays_each_pass(window, qapp):
     assert record.passes == 2 and win.infinite.levels == matched
     assert [lv.number for lv in visited] == [lv.number for lv in loop + loop[:1]]
 
-    # A dive by hand elsewhere records from there on: the loop is open again.
+    # Replayed, the whole record plays, the loop's way back last: it rests on its first.
     win.set_auto(False)
     run_auto(win, qapp, 10.0, until=lambda: not win.busy)
+    labels = []
+
+    def replayed() -> bool:
+        labels.append(win.level_label.text())
+        return win._replay is None
+
+    win.toggle_replay()
+    run_auto(win, qapp, 30.0, until=replayed)
+    steps = len(record.levels) + 1
+    assert win._replay is None and win._pos == first and win.infinite.levels == matched
+    assert f"Replay: mosaic {steps} of {steps}" in labels  # the loop's first, again, last
+
+    # A dive by hand elsewhere records from there on: the loop is open again.
     pick = record.picks[win._pos]
     other = next(i for i in range(len(win.level.scene)) if i != pick)
     sx, sy = win.canvas.camera.world_to_screen(*win.level.scene.center[other])
@@ -1387,6 +1407,62 @@ def test_the_timeline_dives_where_auto_dive_does_live(window, qapp):
         assert end.zoom == pytest.approx(end_zoom, rel=1e-4)
         checked += 1
     assert checked >= 2
+
+
+def dive_by_hand(win, qapp, index: int) -> None:
+    """Double-click tile index of the shown level, and let the dive land and fade in."""
+    sx, sy = win.canvas.camera.world_to_screen(*win.level.scene.center[index])
+    win._on_double_click(float(sx), float(sy))
+    run_animations(win.canvas, 2.0)  # the dive
+    wait_for_level(win, qapp)  # matched, or made again from the record
+    run_animations(win.canvas, 2.0)  # the photo fades into the mosaic
+
+
+def test_replay_plays_the_sessions_dives_again_and_goes_on_from_its_end(window, qapp):
+    win = window
+    win.settings.update(fade_seconds=0.05, dwell_seconds=0.1, approach_seconds=0.2,
+                        pause_seconds=0.0, dive_seconds=0.3)  # fmt: skip
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    assert win.replay_button.isVisible() and not win.replay_button.isEnabled()  # no dive yet
+    dive_by_hand(win, qapp, 0)
+    dive_by_hand(win, qapp, 1)
+    record, matched, last = win.record, win.infinite.levels, win._pos
+    assert last == 2 and win.replay_button.isEnabled()
+
+    win.replay_button.click()
+    assert win._replay is not None and win.replay_button.text() == "Stop Replay" and win.busy
+    shown = []
+
+    def done() -> bool:
+        if win._replay is not None and (not shown or shown[-1] != win._replay.shown):
+            shown.append(win._replay.shown)
+        return win._replay is None
+
+    run_auto(win, qapp, 30.0, until=done)
+    assert win._replay is None and [p for p in shown if p >= 0] == [0, 1, 2]
+    assert win.infinite.levels == matched  # made again from the record: nothing matched
+    assert win._pos == last and win.level.number == record.levels[last].number
+    assert "done" in win.status.text() and win.replay_button.text() == "Replay"
+    level, cam = win.level, win.canvas.camera
+    _, fit = cam.fit_params(0, 0, level.ctx.width, level.ctx.height, margin=1.0)
+    assert cam.zoom == pytest.approx(fit)  # at rest, the mosaic in view
+    np.testing.assert_allclose(win.tile_layer.instances["pos"], level.scene.center, atol=1e-3)
+
+    # The session goes on from there: a dive is recorded after the last.
+    dive_by_hand(win, qapp, 0)
+    assert len(record.levels) == 4 and win._pos == 3
+
+    # Stopped part way (Esc), it rests on the mosaic it shows, the session from there.
+    win.toggle_replay()
+    run_auto(win, qapp, 30.0, until=lambda: win._replay is None or win._replay.shown >= 1)
+    at = win._replay.shown
+    win._on_escape()
+    assert win._replay is None and win._pos == at and not win.busy
+    assert "stopped" in win.status.text()
+    assert win.photo_layer is None or not win.photo_layer.visible
 
 
 def test_input_on_the_mosaic_or_esc_stops_auto_dive(window, qapp):

@@ -65,6 +65,14 @@ hand and auto-dive's alike. In steps a dive the record has is replayed: its
 level made again from the record, nothing matched (`_dive`); any other is
 recorded from there on. Stop and New Start begin a new record.
 
+Replay (R) plays the record again from its first mosaic: its timeline
+(core/dive_motion.py's DiveTimeline: in steps, with the dive settings as they
+are then) drives the view, the tiles, the photo and the outline frame by
+frame (`_replay_frame`). Each level is made again from the record in the
+background, with its tile layer and photo staged, while the one before it
+plays; one not made in time holds the replay before its dive. Esc, a click or
+the wheel stop it; stopped or done, the session goes on from the mosaic shown.
+
 With Loop on, dives come back to where they started: the first tile dived
 into is home; from the bottom of the range on each level lures it back, and
 where a level holds it, it is outlined once the mosaic shows (by hand: find
@@ -99,6 +107,7 @@ from PySide6.QtWidgets import (
 from skitter.core.dive_motion import (
     FADE_ZOOM,
     DiveMotion,
+    DiveTimeline,
     approach_zoom,
     fade,
     fade_out,
@@ -107,6 +116,7 @@ from skitter.core.dive_motion import (
     glide,
     last_fade,
     moved,
+    rest_tiles,
 )
 from skitter.core.dive_path import CENTER_FIRST, MIN_SECONDS, FlowPath, View, flow_rate
 from skitter.core.dive_styles import DiveStyle, dive_seed, pick_style
@@ -171,6 +181,8 @@ MAX_FRAME_STEP = 0.1  # seconds the zoom moves on in one frame, at most
 HIGHLIGHT_COLOR = (1.0, 1.0, 1.0)  # the outline of the tile auto-dive heads for
 HIGHLIGHT_PX = 3.0
 AUTO_TIP = "Dive on and on by itself until stopped (A; Esc, a click or the wheel stop it too)."
+REPLAY_TIP = ("Play this session's dives again from its first mosaic, in steps, with the "
+              "dive settings as they are now (R; Esc, a click or the wheel stop it).")  # fmt: skip
 # Input on the mosaic that stops auto-dive (the viewer takes over).
 STOPS_AUTO = (
     QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonDblClick, QEvent.Type.Wheel,
@@ -215,6 +227,38 @@ class _Dive(DiveMotion):
         self.textures: TileTextures | None = None
         self.layer: SpriteLayer | None = None  # staged
         self.layer_pages: np.ndarray | None = None  # the textures' pages it was built from
+
+
+class _Made:
+    """A recorded level made again for a replay: the level, its textures, its tile layer
+    and its photo (staged; None: not yet, or no photo: a blank canvas's)."""
+
+    def __init__(self):
+        self.level: Level | None = None
+        self.textures: TileTextures | None = None
+        self.layer: SpriteLayer | None = None
+        self.layer_pages: np.ndarray | None = None  # the textures' pages it was built from
+        self.photo: SpriteLayer | None = None
+        self.listening = False  # its textures' changed signal is connected (for the layer)
+
+    @property
+    def ready(self) -> bool:
+        level = self.level
+        return (level is not None and self.layer is not None
+                and (self.photo is not None or level.source is None))  # fmt: skip
+
+
+class _Replay:
+    """A replay under way: its timeline, its clock, and the levels made for it (by record
+    index: the one shown, the next)."""
+
+    def __init__(self, timeline: DiveTimeline):
+        self.timeline = timeline
+        self.t = 0.0
+        self.made: dict[int, _Made] = {}
+        self.shown = -1  # the record index on screen (-1: the session's own view still)
+        self.diving = False  # the frame shown is a dive's
+        self.waiting = False  # holding for a level not made yet
 
 
 class _Flow:
@@ -266,6 +310,7 @@ class InfiniteWindow(QWidget):
         # A dive's (picture, lure, tile), matched once prepared
         self._queued: tuple[np.ndarray, Lure | None, TileView] | None = None
         self.record = DiveRecord()  # the session's dives (see the module docstring)
+        self._replay: _Replay | None = None  # a replay under way
         self._pos = -1  # the shown level's index in record.levels (-1: none yet)
         self._next = -1  # where the dive under way lands in it (-1: a new level)
         self._ahead: list[tuple[int, Level]] | None = None  # look-ahead's, for self.level
@@ -333,6 +378,7 @@ class InfiniteWindow(QWidget):
         QShortcut(QKeySequence("F11"), self, self.toggle_full_screen)
         QShortcut(QKeySequence("Esc"), self, self._on_escape)
         QShortcut(QKeySequence("A"), self, self.toggle_auto)
+        QShortcut(QKeySequence("R"), self, self.toggle_replay)
         self.resize(1400, 900)
         self._refresh()
 
@@ -387,6 +433,10 @@ class InfiniteWindow(QWidget):
         self.auto_button.setCheckable(True)
         self.auto_button.setToolTip(AUTO_TIP)
         self.auto_button.toggled.connect(self.set_auto)
+        self.replay_button = QPushButton("Replay")
+        self.replay_button.setCheckable(True)
+        self.replay_button.setToolTip(REPLAY_TIP)
+        self.replay_button.toggled.connect(self.set_replay)
         self.status = QLabel()
         self.status.setWordWrap(True)
         self.progress = progress_bar()
@@ -398,7 +448,7 @@ class InfiniteWindow(QWidget):
         help_text = muted(QLabel(
             "Double-click a tile to dive into it: its photo becomes the next mosaic. Drag to "
             "pan, use the wheel to zoom (diving continuously: the view zooms in by itself). "
-            "A: auto-dive. F11: full screen."
+            "A: auto-dive. R: replay. F11: full screen."
         ))  # fmt: skip
         group = QGroupBox("Session")
         layout = QVBoxLayout(group)
@@ -406,7 +456,10 @@ class InfiniteWindow(QWidget):
         buttons.addWidget(self.start_button)
         buttons.addWidget(self.new_start_button)
         layout.addLayout(buttons)
-        layout.addWidget(self.auto_button)
+        moving = QHBoxLayout()
+        moving.addWidget(self.auto_button)
+        moving.addWidget(self.replay_button)
+        layout.addLayout(moving)
         for widget in (self.status, self.progress, self.sub_status, self.sub_progress,
                        self.level_label, help_text):  # fmt: skip
             layout.addWidget(widget)
@@ -441,7 +494,7 @@ class InfiniteWindow(QWidget):
         """Matching a level, diving or fading: no new dive yet (preparing or looking
         ahead allow one)."""
         matching = self._job is not None and self._job_kind in ("first", "dive")
-        moving = self.dive is not None or self._flow is not None
+        moving = self.dive is not None or self._flow is not None or self._replay is not None
         return matching or moving or self._fade_token is not None
 
     @property
@@ -530,6 +583,7 @@ class InfiniteWindow(QWidget):
 
     def stop(self) -> None:
         """End the session: stop its work and clear the view."""
+        self._end_replay("")
         self.set_auto(False)
         self._stop_flow()
         if self._job is not None:
@@ -889,7 +943,8 @@ class InfiniteWindow(QWidget):
         def step(t: float) -> bool:
             if self._tile_swap is not layer:
                 return False  # swapped or dropped meanwhile
-            if not self.canvas.staged(layer) or self.dive is not None or self._approaching:
+            moving = self._approaching or self._replay is not None and self._replay.diving
+            if not self.canvas.staged(layer) or self.dive is not None or moving:
                 return True
             self._tile_swap = None
             self._new_tile_layer(layer)
@@ -906,6 +961,8 @@ class InfiniteWindow(QWidget):
         """Turn auto-dive on (it starts from the current mosaic, once it is shown) or off
         (what it was doing stops; a dive under way finishes)."""
         on = bool(on) and self.running
+        if on:
+            self._end_replay("Replay stopped.")
         if on == self.auto:
             self._refresh()
             return
@@ -1167,11 +1224,12 @@ class InfiniteWindow(QWidget):
             self._build_layer(flow.textures, flow)
 
     def _build_layer(self, textures: TileTextures, flow: _Flow | None,
-                     dive: _Dive | None = None) -> None:  # fmt: skip
+                     dive: _Dive | None = None, into=None) -> None:  # fmt: skip
         """Build a tile layer from the textures' pages as they are, in the background (the
         pages are copied out to RGBA there), then stage it: for the leg's next level (the
         first: shown inside the tile; full-size ones swap in), the dive's (dive) or the
-        shown one (flow None, or the leg moved on meanwhile: it swaps in once staged)."""
+        shown one (flow None, or the leg moved on meanwhile: it swaps in once staged).
+        into(layer, pages): given, it takes the layer instead (a replay's)."""
         pages, instances = textures.pages, textures.instances()
 
         def work(progress, cancelled):
@@ -1180,6 +1238,9 @@ class InfiniteWindow(QWidget):
 
         def built(layer: SpriteLayer) -> None:
             if textures.pages is not pages:  # newer pages: their own layer follows
+                return
+            if into is not None:
+                into(layer, pages)
                 return
             if dive is not None:
                 if self.dive is not dive or dive.textures is not textures:
@@ -1605,8 +1666,254 @@ class InfiniteWindow(QWidget):
             self._highlight = None
 
     def _on_escape(self) -> None:
+        self._end_replay("Replay stopped.")
         self.set_auto(False)
         self._leave_full_screen()
+
+    # Replay
+
+    @property
+    def can_replay(self) -> bool:
+        """Replay: a session with a dive recorded, at rest (or replaying: to stop it)."""
+        if self._replay is not None:
+            return True
+        return self.running and len(self.record.levels) >= 2 and not self.busy
+
+    def toggle_replay(self) -> None:
+        self.set_replay(self._replay is None)
+
+    def set_replay(self, on: bool) -> None:
+        if on and self._replay is None and self.can_replay:
+            self.replay()
+        elif not on:
+            self._end_replay("Replay stopped.")
+        self._refresh()
+
+    def replay(self) -> None:
+        """Play the session's dives again from its first mosaic (see the module
+        docstring)."""
+        self.set_auto(False)
+        self._cancel_auto_step()  # a creep's too
+        settings = self.settings.copy()  # as they are now: changes apply to the next replay
+        timeline = DiveTimeline(self.record, settings, self.canvas.camera.viewport.copy())
+        replay = self._replay = _Replay(timeline)
+        self._remove_highlight()
+        if self.photo_layer is not None:
+            self.canvas.remove_layer(self.photo_layer)
+            self.photo_layer = None
+        first = timeline.steps[0]
+        self._make_for_replay(first.position)
+        self._make_for_replay(first.next)
+        self.status.setText("Replay: making the first mosaic…")
+        self.level_label.setText(f"Replay: mosaic 1 of {len(timeline.steps)}")
+        show_progress(self.progress, 0.0)
+        last = {"t": None}
+
+        def step(t: float) -> bool:
+            if self._replay is not replay:
+                return False
+            dt = 0.0 if last["t"] is None else min(max(t - last["t"], 0.0), MAX_FRAME_STEP)
+            last["t"] = t
+            return self._replay_frame(replay, dt)
+
+        self.canvas.add_animation(step)
+        self._refresh()
+
+    def _replay_frame(self, replay: _Replay, dt: float) -> bool:
+        """Move the replay on by dt seconds and show it (an animation: False once done).
+        It holds (shows the same) while a level it needs isn't made yet."""
+        timeline = replay.timeline
+        t = min(replay.t + dt, timeline.duration)
+        step, phase = timeline.phase_at(t)
+        for pos in (step.position, step.next):
+            self._make_for_replay(pos)
+        keep = {replay.shown, step.position, step.next}
+        for pos in [p for p in replay.made if p not in keep]:
+            self._discard_made(replay.made.pop(pos))
+        need = [step.position] + ([step.next] if phase == "dive" else [])
+        if not all(replay.made[pos].ready for pos in need):
+            if not replay.waiting:
+                replay.waiting = True
+                self.status.setText("Replay: making the next mosaic…")
+            return True
+        if replay.waiting or replay.shown < 0:
+            replay.waiting = False
+            self.status.setText("Replaying the session's dives (R or Esc stops).")
+        replay.t = t
+        self._show_replay_frame(replay, timeline.frame(t, replay.made[step.position].level))
+        show_progress(self.progress, t / timeline.duration if timeline.duration > 0 else 1.0)
+        if t >= timeline.duration:
+            self._end_replay("Replay done: dive on from here.")
+            return False
+        return True
+
+    def _show_replay_frame(self, replay: _Replay, frame) -> None:
+        """Show a timeline frame: its level (switching to it), tiles, view, photo, outline."""
+        canvas = self.canvas
+        if replay.shown != frame.position:
+            self._replay_switch(replay, frame.position)
+        if frame.diving and not replay.diving:  # tiles move: nothing to sharpen
+            self.zoom_detail.show(None, None, None)
+            canvas.pixelate_above = None  # they grow far past their texels: smooth them
+        replay.diving = frame.diving
+        tiles = self.tile_layer.instances
+        for name, values in frame.tiles.items():
+            tiles[name] = values
+        self.tile_layer.mark_dirty()
+        canvas.camera.rotation = 0.0
+        canvas.set_view(frame.center, frame.zoom)
+        photo = frame.photo
+        if photo is None:
+            if self.photo_layer is not None:
+                self.photo_layer.visible = False
+        else:
+            layer = replay.made[photo.level].photo
+            if self.photo_layer is not layer:
+                if self.photo_layer is not None and self.photo_layer in canvas.layers:
+                    canvas.remove_layer(self.photo_layer)
+                self.photo_layer = canvas.add_layer(layer)  # over the tiles
+            inst = layer.instances
+            inst["pos"], inst["size"] = photo.pos, photo.size
+            inst["rotation"], inst["alpha"] = photo.rotation, photo.alpha
+            layer.visible = True
+            layer.mark_dirty()
+        if frame.highlight >= 0:
+            if self._highlight is None:
+                self._show_highlight(frame.highlight)
+            self._highlight.instances["alpha"] = frame.highlight_alpha
+            self._highlight.mark_dirty()
+        elif self._highlight is not None:
+            self._remove_highlight()
+        canvas.update()
+
+    def _replay_switch(self, replay: _Replay, pos: int) -> None:
+        """Show the replay's level pos (made, its tile layer staged) in the last one's place."""
+        made = replay.made[pos]
+        if made.listening:
+            made.textures.changed.disconnect(self._replay_textures_ready)
+            made.listening = False
+        old = replay.made.pop(replay.shown, None)
+        self._show_level(made.level, made.textures, made.layer)  # the last one's go
+        if made.layer_pages is not made.textures.pages:
+            self._on_textures_changed()  # its full-size tiles came while it was built
+        if old is not None:  # its textures and tile layer went with it: its photo too
+            old.textures = old.layer = None
+            self._discard_made(old)
+        replay.shown, replay.diving = pos, False
+        replay.made[pos] = made
+        steps = replay.timeline.steps  # a closed loop's first shows twice: by time, not index
+        k = steps.index(replay.timeline.phase_at(replay.t)[0])
+        self.level_label.setText(f"Replay: mosaic {k + 1} of {len(steps)}")
+
+    def _make_for_replay(self, pos: int) -> None:
+        """Make the record's level pos again in the background, then its textures, tile
+        layer and photo (staged), for the replay to show."""
+        replay = self._replay
+        if pos < 0 or replay is None or pos in replay.made:
+            return
+        made = replay.made[pos] = _Made()
+        infinite = self.infinite
+        library = infinite.library
+        entry = self.record.levels[pos]
+        path = None if entry.source is None else library.paths([entry.source.slot])[0]
+        ratio = self.canvas.devicePixelRatioF()
+        longest = round(PHOTO_DISPLAY * max(self.canvas.camera.viewport) * ratio)
+
+        def work(progress, cancelled):
+            level = infinite.rebuild(entry, path)
+            picture = None if level.source is None else display_copy(level.picture, longest)
+            return (level, thumbnail_atlas(level.scene, library),
+                    detail_request(level.scene, library), picture)  # fmt: skip
+
+        def done(result) -> None:
+            if self._replay is not replay or replay.made.get(pos) is not made:
+                return  # done or moved on meanwhile
+            level, atlas, request, picture = result
+            made.level = level
+            made.textures = TileTextures(level.scene, library, self, pool=self._pool,
+                                         atlas=atlas, request=request)  # fmt: skip
+            made.textures.changed.connect(self._replay_textures_ready)
+            made.listening = True
+            if picture is not None:
+                photo = make_instances(1)
+                photo["alpha"] = 0.0
+                made.photo = SpriteLayer(picture, photo)
+                self.canvas.stage(made.photo)
+            self._build_made_layer(replay, pos, made)
+
+        self._layer_job(work, done)
+
+    def _build_made_layer(self, replay: _Replay, pos: int, made: _Made) -> None:
+        def into(layer: SpriteLayer, pages) -> None:
+            if self._replay is not replay or replay.made.get(pos) is not made:
+                return  # done or moved on meanwhile
+            if replay.shown == pos:
+                return  # shown: its full-size tiles swap in as the session's do
+            if made.layer is not None:
+                self.canvas.unstage(made.layer)
+            made.layer, made.layer_pages = layer, pages
+            self.canvas.stage(layer)
+
+        self._build_layer(made.textures, None, into=into)
+
+    def _replay_textures_ready(self) -> None:
+        """Full-size crops came for a level the replay has made, not shown yet: its tile
+        layer from them."""
+        replay = self._replay
+        if replay is None:
+            return
+        for pos, made in replay.made.items():
+            if pos != replay.shown and made.listening and made.layer is not None and (
+                    made.layer_pages is not made.textures.pages):  # fmt: skip
+                self._build_made_layer(replay, pos, made)
+
+    def _discard_made(self, made: _Made) -> None:
+        """Let go of what a replay made for a level, not to be shown."""
+        canvas = self.canvas
+        for layer in (made.layer, made.photo):
+            if layer is None:
+                continue
+            if layer is self.photo_layer:
+                self.photo_layer = None
+            if layer in canvas.layers:
+                canvas.remove_layer(layer)
+            else:
+                canvas.unstage(layer)
+        if made.textures is not None:
+            if made.listening:
+                made.textures.changed.disconnect(self._replay_textures_ready)
+            made.textures.close()
+        made.textures = made.layer = made.photo = None
+
+    def _end_replay(self, message: str) -> None:
+        """Stop a replay (if one is under way): at rest on the mosaic it shows, which the
+        session goes on from."""
+        replay = self._replay
+        if replay is None:
+            return
+        self._replay = None
+        for pos in [p for p in replay.made if p != replay.shown]:
+            self._discard_made(replay.made.pop(pos))
+        self._remove_highlight()
+        if self.photo_layer is not None:
+            self.photo_layer.visible = False
+        if replay.shown >= 0:
+            level, canvas = self.level, self.canvas
+            tiles = self.tile_layer.instances
+            for name, values in rest_tiles(level.scene).items():
+                tiles[name] = values
+            self.tile_layer.mark_dirty()
+            canvas.camera.rotation = 0.0
+            canvas.fit_to(0, 0, float(level.ctx.width), float(level.ctx.height))
+            canvas.pixelate_above = PIXELATE_ABOVE
+            if replay.diving:  # it stopped mid-dive: tiles at rest, sharpened again
+                self.zoom_detail.show(self.tile_layer, level.scene, self.infinite.library)
+            self._pos, self._next = replay.shown, -1
+            self.level_label.setText(f"Level {level.number}: {len(level.scene):,} tiles")
+        show_progress(self.progress, 1.0)
+        self.status.setText(message)
+        self._refresh()
+        self._auto_next()  # continuously by hand, the creep
 
     # Window
 
@@ -1641,14 +1948,23 @@ class InfiniteWindow(QWidget):
         self.auto_button.setChecked(self.auto)
         self.auto_button.blockSignals(False)
         self.auto_button.setText("Stop Auto-Dive" if self.auto else "Auto-Dive")
+        replaying = self._replay is not None
+        self.replay_button.setVisible(running)
+        self.replay_button.setEnabled(self.can_replay)
+        self.replay_button.blockSignals(True)
+        self.replay_button.setChecked(replaying)
+        self.replay_button.blockSignals(False)
+        self.replay_button.setText("Stop Replay" if replaying else "Replay")
         self.settings_note.setVisible(running)
-        self.progress.setVisible(self._followed)
+        self.progress.setVisible(self._followed or replaying)
         if not self._followed:
             self._show_sub(False)
 
     def eventFilter(self, watched: QObject, event: QEvent) -> bool:
-        if watched is self.canvas and self.auto and event.type() in STOPS_AUTO:
-            self.set_auto(False)  # the viewer takes over
+        if watched is self.canvas and event.type() in STOPS_AUTO:
+            self._end_replay("Replay stopped.")  # the viewer takes over
+            if self.auto:
+                self.set_auto(False)
         if watched is self.canvas and event.type() in LOCKED_EVENTS:
             if self._locked or self._flow is not None:
                 return True  # no panning or zooming while diving or fading (a leg's path)
