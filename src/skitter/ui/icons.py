@@ -198,6 +198,16 @@ def _pause(p: QPainter, color: QColor) -> None:
     p.setBrush(color)
     p.drawRoundedRect(QRectF(6.5, 5, 3.5, 14), 0.8, 0.8)
     p.drawRoundedRect(QRectF(14, 5, 3.5, 14), 0.8, 0.8)
+
+
+def _record(p: QPainter, color: QColor) -> None:
+    p.setBrush(color)
+    p.drawEllipse(QPointF(12, 12), 6.5, 6.5)
+
+
+def _stop(p: QPainter, color: QColor) -> None:
+    p.setBrush(color)
+    p.drawRoundedRect(QRectF(6, 6, 12, 12), 1.5, 1.5)
     p.setBrush(Qt.BrushStyle.NoBrush)
 
 
@@ -320,6 +330,16 @@ def play() -> QIcon:
 @_shared
 def pause() -> QIcon:
     return _make_icon(_pause)
+
+
+@_shared
+def record() -> QIcon:
+    return _make_icon(_record)
+
+
+@_shared
+def stop() -> QIcon:
+    return _make_icon(_stop)
 
 
 @_shared

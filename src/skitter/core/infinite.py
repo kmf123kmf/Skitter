@@ -107,9 +107,9 @@ MATCHING = ("tint", "tint_strength", "max_uses", "min_spacing", "mirror")
 DIVE = ("motion", "flow_seconds", "flow_path", "flow_mosaic", "dive_seconds", "dive_style",
         "fade_seconds")  # fmt: skip
 AUTO = ("dwell_seconds", "next_tile", "variety", "approach_seconds", "approach_tiles",
-        "pause_seconds", "highlight", "loop", "loop_dives", "loop_fit", "loop_tint",
-        "look_ahead")  # fmt: skip
-LIVE = DIVE + AUTO  # settings a running session follows as they change (pacing only)
+        "pause_seconds", "highlight")  # fmt: skip
+LOOP = ("loop", "loop_dives", "loop_fit", "loop_tint", "look_ahead")
+LIVE = DIVE + AUTO + LOOP  # settings a running session follows as they change
 SOURCE_PX_PER_TILE = 16  # least picture pixels across a base tile (4 per cell: full detail)
 MAX_SOURCE_PX = 4096  # longest side a level's picture is read at
 DIVE_THREADS = max(2, (os.cpu_count() or 4) // 4)  # search threads while the UI animates
@@ -772,6 +772,10 @@ class DiveRecord:
     loop_start on are the loop's (levels[loop_start]: the mosaic of home); closed, a dive
     into home from the last leads back to levels[loop_start], and every pass replays
     them as recorded.
+
+    The recording (what Replay plays) is a span of it: from the level shown when it
+    started to the last reached while it was on (`recording`, `recording_on`). The
+    record keeps every level either way (loops need them).
     """
 
     levels: list[RecordedLevel] = field(default_factory=list)
@@ -780,6 +784,8 @@ class DiveRecord:
     loop_start: int = -1
     closed: bool = False
     passes: int = 0  # times the loop has come back to its first level
+    recording: tuple[int, int] | None = None  # its (first, last) level, if there is one
+    recording_on: bool = False  # levels arrived at extend it
 
     def add(self, level: Level) -> int:
         """Record the level arrived at (after its pick); its index."""
@@ -803,6 +809,42 @@ class DiveRecord:
         self.closed = False
         if self.loop_start > pos:
             self.end_loop()
+        if self.recording is not None:  # what it held past pos is gone
+            first, last = self.recording
+            if first > pos:
+                self.recording, self.recording_on = None, False
+            elif last > pos:
+                self.recording = (first, pos)
+
+    def start_recording(self, pos: int) -> None:
+        """Record from levels[pos] (the one shown) on, in place of any recording."""
+        self.recording, self.recording_on = (pos, pos), True
+
+    def stop_recording(self) -> None:
+        self.recording_on = False
+
+    def reached(self, pos: int) -> None:
+        """levels[pos] is shown: while recording, the recording reaches it."""
+        if self.recording_on and self.recording is not None and pos > self.recording[1]:
+            self.recording = (self.recording[0], pos)
+
+    def recorded_dives(self) -> int:
+        """Dives the recording holds (the way back of a closed loop in it, too)."""
+        if self.recording is None:
+            return 0
+        first, last = self.recording
+        back = self.leads_to(last, self.picks[last]) if last < len(self.picks) else -1
+        return last - first + (1 if first <= back <= last else 0)
+
+    def cut_by(self, pos: int, index: int, replays: bool = True) -> int:
+        """Dives of the recording a dive from levels[pos] into tile index would cut away
+        (replays: one the record has is replayed, not cut; continuous legs aren't)."""
+        if self.recording is None or pos >= self.recording[1]:
+            return 0
+        if replays and self.leads_to(pos, index) >= 0:
+            return 0
+        first, last = self.recording
+        return self.recorded_dives() if pos < first else last - pos  # before it: all of it
 
     def start_loop(self, home: TileView, start: int) -> None:
         """A loop from home, levels[start] (the next to arrive) being its mosaic."""
@@ -829,6 +871,7 @@ __all__ = [
     "DIVE",
     "DIVE_THREADS",
     "LIVE",
+    "LOOP",
     "DiveRecord",
     "Lure",
     "MATCHING",

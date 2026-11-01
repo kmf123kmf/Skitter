@@ -480,6 +480,7 @@ def window(qapp, photos, tmp_path):
     win.settings.update(columns=6, max_uses=0, dive_seconds=0.5, fade_seconds=0.2)
     win.set_settings(win.settings)
     win.resize(1000, 700)
+    win._confirm = lambda text, action: True  # a dialog would wait for a click (see tests)
     win.show()
     qapp.processEvents()
     yield win
@@ -532,7 +533,7 @@ def test_window_starts_dives_and_stops(window, qapp):
     win = window
     assert win.start_button.text() == "Start" and win.forms["mosaic"].isEnabled()
     win.start_button.click()
-    assert win.running and win.start_button.text() == "Stop"
+    assert win.running and win.start_button.text() == "End Session…"
     assert not win.forms["mosaic"].isEnabled() and not win.forms["matching"].isEnabled()
     assert win.forms["dive"].isEnabled() and win.forms["auto"].isEnabled()  # pacing only
     assert not win.slicer_form.isEnabled()
@@ -660,10 +661,14 @@ def test_the_infinite_panel_fits_its_width(windows_font, window, qapp):
     win.start_button.click()  # running: the lock note, Stop, New Start, Auto-Dive, Replay
     wait_for_level(win, qapp)
     assert win.library.locked and overflowing() == []
-    win.auto_button.setText("Stop Auto-Dive")  # the longest each says, side by side
-    win.replay_button.setText("Stop Replay")
+    win.auto_button.setText("Stop Auto-Dive")  # the longest they say
+    win.recording_label.setText("● Recording: 1,234 dives (a closed loop)")
+    win.replay_label.setText("Replay: mosaic 1,234 of 1,234")
+    for widget in (win.replay_progress, win.replay_label):
+        widget.setVisible(True)
     qapp.processEvents()
-    assert overflowing() == []
+    recording = win.panel.layout().itemAt(1).widget()
+    assert overflowing() == [] and recording.minimumSizeHint().width() <= win.panel.width()
 
 
 def test_every_dive_style_moves_the_others_and_keeps_the_tile(window, qapp):
@@ -1272,6 +1277,7 @@ def test_auto_dive_loops_back_home_and_replays_each_pass(window, qapp):
                         loop_dives=(2, 3), look_ahead=2)  # fmt: skip
     win.set_settings(win.settings)
     win.start_button.click()
+    win.start_recording()  # from the start: the recording holds the loop
     win.set_auto(True)
     record = win.record
     run_auto(win, qapp, 30.0, until=lambda: record.closed and win._pos == record.loop_start
@@ -1307,9 +1313,10 @@ def test_auto_dive_loops_back_home_and_replays_each_pass(window, qapp):
     labels = []
 
     def replayed() -> bool:
-        labels.append(win.level_label.text())
+        labels.append(win.replay_label.text())
         return win._replay is None
 
+    assert record.recording == (0, len(record.levels) - 1)
     win.toggle_replay()
     run_auto(win, qapp, 30.0, until=replayed)
     steps = len(record.levels) + 1
@@ -1426,14 +1433,21 @@ def test_replay_plays_the_sessions_dives_again_and_goes_on_from_its_end(window, 
     win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
-    assert win.replay_button.isVisible() and not win.replay_button.isEnabled()  # no dive yet
+    assert win.recording_group.isVisible() and not win.replay_action.isEnabled()
+    assert win.record_action.isEnabled() and not win.stop_recording_action.isEnabled()
+    assert win.recording_label.text() == "Not recording."
+    win.record_action.trigger()  # from the mosaic shown
+    assert win.stop_recording_action.isEnabled() and not win.record_action.isEnabled()
     dive_by_hand(win, qapp, 0)
     dive_by_hand(win, qapp, 1)
     record, matched, last = win.record, win.infinite.levels, win._pos
-    assert last == 2 and win.replay_button.isEnabled()
+    assert last == 2 and record.recording == (0, 2) and "Recording: 2 dives" in (
+        win.recording_label.text())  # fmt: skip
+    assert win.replay_action.isEnabled()
 
-    win.replay_button.click()
-    assert win._replay is not None and win.replay_button.text() == "Stop Replay" and win.busy
+    win.replay_action.trigger()  # recording stops; the replay plays it
+    assert win._replay is not None and win.replay_action.text() == "Stop Replay" and win.busy
+    assert not record.recording_on and win.replay_progress.isVisible()
     shown = []
 
     def done() -> bool:
@@ -1445,15 +1459,16 @@ def test_replay_plays_the_sessions_dives_again_and_goes_on_from_its_end(window, 
     assert win._replay is None and [p for p in shown if p >= 0] == [0, 1, 2]
     assert win.infinite.levels == matched  # made again from the record: nothing matched
     assert win._pos == last and win.level.number == record.levels[last].number
-    assert "done" in win.status.text() and win.replay_button.text() == "Replay"
+    assert "done" in win.status.text() and win.replay_action.text() == "Replay"
+    assert win.recording_label.text() == "Recorded: 2 dives"
     level, cam = win.level, win.canvas.camera
     _, fit = cam.fit_params(0, 0, level.ctx.width, level.ctx.height, margin=1.0)
     assert cam.zoom == pytest.approx(fit)  # at rest, the mosaic in view
     np.testing.assert_allclose(win.tile_layer.instances["pos"], level.scene.center, atol=1e-3)
 
-    # The session goes on from there: a dive is recorded after the last.
+    # The session goes on from there (not recording: the record keeps it, not the recording).
     dive_by_hand(win, qapp, 0)
-    assert len(record.levels) == 4 and win._pos == 3
+    assert len(record.levels) == 4 and win._pos == 3 and record.recording == (0, 2)
 
     # Stopped part way (Esc), it rests on the mosaic it shows, the session from there.
     win.toggle_replay()
@@ -1572,3 +1587,45 @@ def test_the_panel_fits_its_width(window, qapp):
         win.close()
         win.deleteLater()
         QFontDatabase.removeApplicationFont(font)
+
+
+def test_what_would_lose_the_recording_asks_first(window, qapp):
+    win = window
+    asked = []
+    answer = {"go": False}
+
+    def confirm(text, action):
+        asked.append(action)
+        return answer["go"]
+
+    win._confirm = confirm
+    win.settings.update(fade_seconds=0.05)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    win.start_recording()  # nothing to lose yet: no question
+    assert asked == [] and win.record.recording_on
+    dive_by_hand(win, qapp, 0)
+    win.stop_recording()
+
+    win.start_recording()  # over a recording of 1 dive: asked, declined
+    win.toggle_session()  # End Session…
+    win.ask_new_start()
+    win.close()
+    assert asked == ["Record", "End Session", "New Start", "Close"]
+    assert win.running and win.record.recording == (0, 1) and not win.record.recording_on
+
+    # Diving elsewhere from inside the recording would cut it: asked, declined.
+    win.replay_action.trigger()
+    run_auto(win, qapp, 30.0, until=lambda: win._replay is None or win._replay.shown >= 0)
+    win._on_escape()  # stopped at its first mosaic (it dwells there seconds)
+    assert win._pos == 0
+    other = next(i for i in range(len(win.level.scene)) if i != win.record.picks[0])
+    sx, sy = win.canvas.camera.world_to_screen(*win.level.scene.center[other])
+    win._on_double_click(float(sx), float(sy))
+    assert asked[-1] == "Dive" and win.dive is None and win.record.recording == (0, 1)
+    sx, sy = win.canvas.camera.world_to_screen(*win.level.scene.center[win.record.picks[0]])
+    win._on_double_click(float(sx), float(sy))  # the recorded way: replayed, not asked
+    assert asked[-1] == "Dive" and len(asked) == 5 and win.dive is not None
+    answer["go"] = True

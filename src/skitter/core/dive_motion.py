@@ -222,22 +222,28 @@ class DiveTimeline:
     from it (Zoom-in time, to Zoom in to tiles across; outlined with Highlight), pauses
     on it and dives (Dive time, Tiles leave by), arriving at the next level.
 
-    The whole record from its first level (ending at rest on its last, or, a closed
-    loop's, once its dive back has landed), or with loop, one pass of its closed loop:
+    The whole record from its first level, or span (first, last): its levels from first
+    to last (ending at rest on last, or, a closed loop's way back from it in the span,
+    once that dive has landed); or with loop, one pass of its closed loop:
     frame(duration) is then frame(0), for seamless video. viewport: the view's pixels.
     """
 
-    def __init__(self, record, settings, viewport, loop: bool = False):
+    def __init__(self, record, settings, viewport, loop: bool = False, span=None):
         self.settings = settings
         self.viewport = np.asarray(viewport, np.float64)
         self.loop = loop
         if loop and not record.closed:
             raise ValueError("only a closed loop has a pass to play")
+        if loop:
+            first, last = record.loop_start, len(record.levels) - 1
+        else:
+            first, last = span if span is not None else (0, len(record.levels) - 1)
         steps, start = [], 0.0
-        for p in range(record.loop_start if loop else 0, len(record.levels)):
+        for p in range(first, last + 1):
             pick = record.picks[p] if p < len(record.picks) else -1
             then = record.leads_to(p, pick) if pick >= 0 else -1
-            pick = pick if then >= 0 else -1
+            if not first <= then <= last:  # it leads out of the span: it ends at rest here
+                pick, then = -1, -1
             steps.append(TimelineStep(p, pick, then, start))
             start += self._seconds(pick >= 0)
         if not loop and steps and steps[-1].next >= 0:  # a closed loop's way back, at rest
