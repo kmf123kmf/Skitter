@@ -7,13 +7,17 @@ mosaic (that tile's photo) takes over and the zoom goes on. `FlowPath` is one
 mosaic's leg, from where the view starts (`View`) to the tile filling it:
 
 - Zoom: geometric from the start's to the tile's (`end_zoom`), at `rate`
-  (natural log of zoom per second), so a leg lasts log(end / start) / rate.
-- Pan: the tile's offset on screen shrinks to nothing along an eased curve
-  (Straight in: over the whole leg; Center first: over its first part), so
-  panning starts and ends at rest and nothing jolts where legs meet.
-- Bounds: the view never shows beyond what it started with (the mosaic, at
-  a leg's start): the pan waits where centering the tile early would (see
-  `_max_pan`).
+  (natural log of zoom per second), so the zoom takes log(end / start) / rate.
+- Straight in: the zoom is even (it goes on at the same speed from leg to
+  leg), and the tile's offset on screen shrinks to nothing along an eased
+  curve over the whole leg, so panning starts and ends at rest and nothing
+  jolts where legs meet. The view never shows beyond what it started with
+  (the mosaic, at a leg's start): the pan waits where centering the tile
+  early would (see `_max_pan`).
+- Center first: the view pans, not zooming, until the tile is in the middle
+  (beyond the mosaic's edge if need be), then zooms straight in, easing in
+  and out (the zoom rests where legs meet). The pan takes CENTER_SHARE of the
+  zoom's time per half view the tile is off (`pan_share`).
 - Turn: the view turns with the tile (photos in a pile lie at angles), so it
   ends upright on screen, as the next mosaic starts.
 
@@ -27,7 +31,7 @@ from dataclasses import dataclass
 import numpy as np
 
 STRAIGHT, CENTER_FIRST = "straight", "center"
-CENTER_SHARE = 0.35  # Center first: the share of a leg the tile takes to reach the middle
+CENTER_SHARE = 0.35  # Center first: a pan of half the view takes this share of the zoom's time
 MIN_SECONDS = 0.5  # the shortest leg (a view already about as close as the tile)
 
 
@@ -44,6 +48,11 @@ def _smooth(u):
     """Smoothstep: 0 to 1 with zero slope at both ends."""
     u = np.clip(u, 0.0, 1.0)
     return u * u * (3 - 2 * u)
+
+
+def _unsmooth(y: float) -> float:
+    """The u in [0, 1] where _smooth(u) is y (in [0, 1])."""
+    return 0.5 - math.sin(math.asin(1 - 2 * y) / 3)
 
 
 def _angle_between(a: float, b: float) -> float:
@@ -65,29 +74,42 @@ class FlowPath:
         self.turn = _angle_between(self.r0, float(rotation))
         self.path = path
         self.span = math.log(self.z1 / self.z0)  # log zoom it covers
-        self.seconds = max(self.span / rate, MIN_SECONDS) if rate > 0 else MIN_SECONDS
         # How far the tile is from the middle, as a share of the start view's half-size
         # (the farther axis); below 1 - k1 so the pan can always finish.
         half = np.asarray(viewport, np.float64) / (2 * self.z0)
         offset = np.abs(self.target - self.c0) / half
         self.k1 = self.z0 / self.z1  # the end view's size relative to the start's
         self.reach = float(min(offset.max(), max(1 - self.k1, 0.0))) if self.k1 < 1 else 0.0
+        self.pan_share = 0.0  # Center first: the share of the leg that pans (not zooming)
+        if path == CENTER_FIRST:
+            pan = CENTER_SHARE * float(offset.max())  # the pan's time over the zoom's
+            self.pan_share = pan / (1 + pan)
+        self.seconds = self.duration(rate)
+
+    def duration(self, rate: float) -> float:
+        """How long the leg takes at this zoom rate (Time per mosaic may change mid-leg)."""
+        zoom = max(self.span / rate, MIN_SECONDS) if rate > 0 else MIN_SECONDS
+        return zoom / (1 - self.pan_share)
 
     def at(self, u: float) -> View:
         """The view at u (0 to 1) of the leg."""
         u = float(np.clip(u, 0.0, 1.0))
-        k = (self.z0 / self.z1) ** u  # the view's size relative to the start's
-        pan = min(self._wanted_pan(u), self._max_pan(k))
-        along = 1 - (1 - pan) * k  # share of the way from the start's center to the tile
+        zoomed = self._zoomed(u)
+        k = (self.z0 / self.z1) ** zoomed  # the view's size relative to the start's
+        if self.path == CENTER_FIRST:  # the pan, all before the zoom
+            along = float(_smooth(u / self.pan_share)) if self.pan_share > 0 else 1.0
+        else:  # the share of the tile's offset on screen gone, the view kept in bounds
+            pan = min(float(_smooth(u)), self._max_pan(k))
+            along = 1 - (1 - pan) * k  # share of the way from the start's center to the tile
         center = self.c0 + (self.target - self.c0) * along
-        rotation = self.r0 + self.turn * float(_smooth(u))
+        rotation = self.r0 + self.turn * float(_smooth(zoomed))
         return View((float(center[0]), float(center[1])), self.z0 / k, rotation)
 
-    def _wanted_pan(self, u: float) -> float:
-        """How much of the tile's offset on screen is gone at u (1: in the middle)."""
+    def _zoomed(self, u: float) -> float:
+        """The share of the leg's log zoom done at u."""
         if self.path == CENTER_FIRST:
-            return float(_smooth(u / CENTER_SHARE))
-        return float(_smooth(u))
+            return float(_smooth((u - self.pan_share) / (1 - self.pan_share)))
+        return u
 
     def _max_pan(self, k: float) -> float:
         """The most of it that can be gone with the view (k the start's size) still
@@ -102,12 +124,15 @@ class FlowPath:
         does at the start)."""
         if self.z0 >= self.z1:
             return 0.0
-        return float(np.clip(1 - math.log(share) / math.log(self.z0 / self.z1), 0.0, 1.0))
+        zoomed = float(np.clip(1 - math.log(share) / math.log(self.z0 / self.z1), 0.0, 1.0))
+        if self.path != CENTER_FIRST or zoomed <= 0:
+            return zoomed
+        return self.pan_share + (1 - self.pan_share) * _unsmooth(zoomed)
 
     def tile_share(self, u: float) -> float:
         """How much of the view the tile fills at u (its zoom over the end's): 1 at the end."""
         u = float(np.clip(u, 0.0, 1.0))
-        return (self.z0 / self.z1) ** (1 - u)
+        return (self.z0 / self.z1) ** (1 - self._zoomed(u))
 
 
 def flow_rate(columns: int, seconds: float) -> float:

@@ -90,7 +90,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from skitter.core.dive_path import MIN_SECONDS, FlowPath, View, flow_rate
+from skitter.core.dive_path import CENTER_FIRST, MIN_SECONDS, FlowPath, View, flow_rate
 from skitter.core.dive_styles import DiveStyle, DiveTiles, dive_seed, pick_style
 from skitter.core.easing import ease_in_out_cubic
 from skitter.core.infinite import (
@@ -1164,7 +1164,7 @@ class InfiniteWindow(QWidget):
             self._creep(dt)
             return
         rate = flow_rate(int(self.settings.columns), float(self.settings.flow_seconds))
-        per_second = 1.0 / max(flow.path.span / rate if rate > 0 else 0.0, MIN_SECONDS)
+        per_second = 1.0 / flow.path.duration(rate)
         first, _ = self._flow_shares(flow.path)
         flow.hold = flow.path.u_at_share(first)
         ready = flow.photo is not None and flow.layer is not None
@@ -1378,7 +1378,9 @@ class InfiniteWindow(QWidget):
                                  f"{flow.seconds:.2f} s")  # fmt: skip
         self._last_zoom, self._last_clock = float(canvas.camera.zoom), over
         if not self.auto:  # by hand: the view creeps on, for the next tile to be picked
-            speed, self._flow = flow.speed, None
+            # Center first's zoom is at rest as it arrives: the creep starts from rest too.
+            speed = 0.0 if flow.path.path == CENTER_FIRST else flow.speed
+            self._flow = None
             self._creep_speed = speed
             self._creep(over)
             self.status.setText(CREEP_STATUS)

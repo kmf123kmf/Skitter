@@ -173,8 +173,9 @@ class InfiniteSettings(Configurable):
         "straight", "Path", choices=[(STRAIGHT, "Straight in"), (CENTER_FIRST, "Center first")],
         under="motion", when=lambda s: s.motion == "flow",
         help="Continuously: Straight in moves toward the tile while zooming all the way; "
-             "Center first brings it to the middle early, then zooms straight in. Either way "
-             "the view stays on the mosaic and only waits to center a tile near its edge.",
+             "the view stays on the mosaic and only waits to center a tile near its edge. Center "
+             "first pans the tile to the middle without zooming (past the mosaic's edge if "
+             "need be), then zooms straight in, coming to rest as each tile fills the view.",
     )  # fmt: skip
     flow_mosaic = FloatParam(
         35.0, "Mosaic appears at", min=5.0, max=100.0, step=5.0, decimals=0,

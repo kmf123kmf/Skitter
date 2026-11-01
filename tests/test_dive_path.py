@@ -23,37 +23,53 @@ def screen_offset(view: View, point) -> np.ndarray:
 
 @pytest.mark.parametrize("path", [STRAIGHT, CENTER_FIRST])
 @pytest.mark.parametrize("target", [(2000, 1333), (3700, 300), (150, 2500), (2600, 1500)])
-def test_a_leg_zooms_evenly_onto_its_tile_and_never_past_the_start_view(path, target):
+def test_a_leg_ends_on_its_tile_at_rest(path, target):
     flow = leg(target, path=path)
     start, end = flow.at(0.0), flow.at(1.0)
     assert start.center == pytest.approx(flow.start.center) and start.zoom == flow.z0
     assert end.center == pytest.approx(target) and end.zoom == pytest.approx(flow.z1)
 
-    u = np.linspace(0, 1, 401)
-    views = [flow.at(x) for x in u]
+    # The tile's offset on screen starts and ends at rest: no jolt where legs meet (finely
+    # sampled: a tile near the middle pans briefly).
+    views = [flow.at(x) for x in np.linspace(0, 1, 4001)]
+    offsets = np.array([screen_offset(v, target) for v in views])
+    speed = np.linalg.norm(np.diff(offsets, axis=0), axis=1)
+    rest = 0.05 * speed.max() + 0.5  # px a step (a tile in the middle pans under 1 px)
+    assert speed[0] < rest and speed[-1] < rest
+
+
+@pytest.mark.parametrize("target", [(2000, 1333), (3700, 300), (150, 2500), (2600, 1500)])
+def test_straight_in_zooms_evenly_and_never_past_the_start_view(target):
+    flow = leg(target)
+    views = [flow.at(x) for x in np.linspace(0, 1, 401)]
     logs = np.log([v.zoom for v in views])
     np.testing.assert_allclose(np.diff(logs), np.diff(logs)[0], rtol=1e-9)  # an even zoom
-
-    # Never beyond the start view (the whole mosaic).
     half0 = np.asarray(VIEWPORT) / (2 * flow.z0)
-    for view in views:
+    for view in views:  # never beyond the start view (the whole mosaic)
         half = np.asarray(VIEWPORT) / (2 * view.zoom)
         lo, hi = np.asarray(view.center) - half, np.asarray(view.center) + half
         assert np.all(lo >= flow.c0 - half0 - 1e-6) and np.all(hi <= flow.c0 + half0 + 1e-6)
 
-    # The tile's offset on screen starts and ends at rest: no jolt where legs meet.
+
+@pytest.mark.parametrize("target", [(3700, 300), (2600, 1500)])
+def test_center_first_pans_without_zooming_then_zooms_on_the_middle(target):
+    flow = leg(target, path=CENTER_FIRST)
+    u = np.linspace(0, 1, 801)
+    views = [flow.at(x) for x in u]
+    zooms = np.array([v.zoom for v in views])
+    panning = u <= flow.pan_share
+    assert 0 < flow.pan_share < 1
+    np.testing.assert_allclose(zooms[panning], flow.z0)  # the pan: no zoom
     offsets = np.array([screen_offset(v, target) for v in views])
-    speed = np.linalg.norm(np.diff(offsets, axis=0), axis=1)
-    assert speed[0] < 0.05 * speed.max() + 1e-3 and speed[-1] < 0.05 * speed.max() + 1e-3
-
-
-def test_center_first_brings_the_tile_to_the_middle_sooner():
-    target = (2600, 1500)  # near enough the middle for the view to center it early
-    straight, first = leg(target), leg(target, path=CENTER_FIRST)
-    at = 0.4
-    off_straight = np.linalg.norm(screen_offset(straight.at(at), target))
-    off_first = np.linalg.norm(screen_offset(first.at(at), target))
-    assert off_first < 0.05 * off_straight
+    np.testing.assert_allclose(offsets[~panning], 0.0, atol=1e-6)  # the zoom: on the middle
+    logs = np.diff(np.log(zooms[~panning]))
+    assert logs.min() >= 0 and logs[-1] < 0.05 * logs.max()  # coming to rest at the end
+    # A tile farther off pans longer; the leg lasts its zoom's time plus the pan's.
+    assert (
+        leg((3700, 300), path=CENTER_FIRST).pan_share
+        > leg((2600, 1500), path=CENTER_FIRST).pan_share
+    )
+    assert flow.seconds == pytest.approx(leg(target).seconds / (1 - flow.pan_share))
 
 
 def test_a_leg_turns_with_its_tile_and_lasts_by_its_zoom():
@@ -71,3 +87,7 @@ def test_a_leg_turns_with_its_tile_and_lasts_by_its_zoom():
     for share in (0.1, 0.35, 1.0):
         assert flow.tile_share(flow.u_at_share(share)) == pytest.approx(share)
     assert flow.u_at_share(1e-6) == 0.0  # already larger at the start
+    first = leg((3000, 600), path=CENTER_FIRST)  # its zoom eased, after the pan
+    for share in (0.1, 0.35, 1.0):
+        assert first.u_at_share(share) > first.pan_share
+        assert first.tile_share(first.u_at_share(share)) == pytest.approx(share)
