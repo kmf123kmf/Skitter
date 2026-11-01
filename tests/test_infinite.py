@@ -574,6 +574,46 @@ def test_a_dive_waits_for_matching_on_the_photo(window, qapp):
     assert win.level.number == 2 and win.dive is None
 
 
+def test_a_dive_makes_the_next_levels_tile_layer_while_it_moves(window, qapp):
+    """Matched before the dive ends, the next level's thumbnails are packed and its tile
+    layer built in the background and staged: arriving only puts it in (made then, it
+    stalled a frame about 50 ms). Stopping mid-dive lets go of it."""
+    win = window
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    win.dive_into(0)
+    dive = win.dive
+    wait_for_level(win, qapp)  # matched: the layer is made meanwhile
+    deadline = time.perf_counter() + 10
+    while dive.layer is None and time.perf_counter() < deadline:
+        qapp.processEvents()
+    assert dive.matched is not None and dive.textures is not None and dive.layer is not None
+    layer, textures = dive.layer, dive.textures
+    arrived = []
+    arrive = win._arrive
+
+    def watched(level):
+        arrive(level)
+        arrived.append((win.tile_layer, win.textures))
+
+    win._arrive = watched
+    run_animations(win.canvas, 5.0)
+    assert win.level is dive.matched and arrived[0] == (layer, textures)
+
+    # Stopped mid-dive, what it made goes.
+    win.dive_into(0)
+    dive = win.dive
+    wait_for_level(win, qapp)
+    deadline = time.perf_counter() + 10
+    while dive.layer is None and time.perf_counter() < deadline:
+        qapp.processEvents()
+    layer = dive.layer
+    win.stop()
+    assert dive.layer is None and dive.textures is None
+    assert layer not in win.canvas._staging and layer not in win.canvas.layers
+
+
 def test_a_random_mosaic_start_fills_the_view_and_dives_once_prepared(window, qapp):
     win = window
     win.settings.update(start="mosaic")

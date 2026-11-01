@@ -218,6 +218,7 @@ def test_zoom_detail_survives_new_layers_blending_and_full_pages(
     # view are put back from memory, without reading their photos again.
     reads.clear()
     step._on_textures_changed()
+    assert zoom.sharpened == 0 and zoom._timer.isActive()  # looked at a moment later
     zoom.wait()
     layer = step._tile_layer
     assert layer.instances["layer"][tile] >= layer.first_detail and reads == []

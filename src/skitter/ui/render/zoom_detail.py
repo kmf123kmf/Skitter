@@ -18,7 +18,11 @@ None of it holds up the UI thread, however fast the view zooms and pans:
 - crops read are kept in memory (CROP_CACHE_BYTES beyond those on the pages),
   so zooming back in reads nothing again;
 - uploads go out a frame at a time, at most UPLOAD_BYTES a frame, each tile
-  switching over in the frame its crop is uploaded.
+  switching over in the frame its crop is uploaded (all of a frame's tiles in
+  one go: a view of a whole mosaic may put hundreds of small crops up at once);
+- a new layer (empty pages) is looked at UPDATE_S after it shows, not in the
+  frame that shows it, which has work enough; new instances of the same layer
+  go back onto their crops at once.
 
 When the crops in view would need more texels than the pages hold
 (PAGE_FILL of all but one page), every tile in view gets the same lower
@@ -264,7 +268,11 @@ class ZoomDetail(QObject):
                                 half[:, 0] * s + half[:, 1] * c], axis=1)  # fmt: skip
         slots = np.unique(scene.slot)
         self._paths = dict(zip(slots.tolist(), library.paths(slots), strict=True))
-        self.update()
+        if layer_changed:  # empty pages: looked at a few frames later (the module docstring)
+            self._want, self._uploads = {}, []  # the last layer's
+            self._timer.start()
+        else:  # new instances: tiles back on their crops now, not blurred a moment
+            self.update()
 
     def _detach(self) -> None:
         self._layer = self._scene = None
@@ -356,7 +364,7 @@ class ZoomDetail(QObject):
             entry.tiles = np.asarray(entry.tiles, np.int64)
         self._want = want
 
-        uploads, reads, shown = [], [], False
+        uploads, reads, on_pages = [], [], []
         for key, entry in sorted(want.items(), key=lambda item: item[1].priority):
             crop = self._crops.get(key)
             if crop is None:
@@ -364,13 +372,13 @@ class ZoomDetail(QObject):
                 continue
             self._crops.move_to_end(key)
             if crop.page >= 0:
-                shown |= self._show_crop(key, crop, entry)
+                on_pages.append((crop, entry))
             elif crop.image is not None:
                 uploads.append(key)
         self._reader.ask(reads)
         self._uploads = uploads
         self._trim()
-        if shown:
+        if self._show_crops(on_pages):
             self.canvas.update()
         self._start_uploads()
 
@@ -397,8 +405,8 @@ class ZoomDetail(QObject):
     def _upload_frame(self, _elapsed: float) -> bool:
         """Put crops on the pages for the next frame, up to UPLOAD_BYTES; False when done
         (a canvas animation: called every frame)."""
-        spent, shown = 0, False
-        while self._uploads and self._layer is not None and (spent < UPLOAD_BYTES or not shown):
+        spent, placed = 0, []
+        while self._uploads and self._layer is not None and (spent < UPLOAD_BYTES or not placed):
             key = self._uploads.pop(0)
             crop, entry = self._crops.get(key), self._want.get(key)
             if crop is None or entry is None or crop.image is None or crop.page >= 0:
@@ -406,8 +414,8 @@ class ZoomDetail(QObject):
             if not self._place(key, crop):
                 continue  # no room: the tiles keep what they show
             spent += crop.image.nbytes
-            shown |= self._show_crop(key, crop, entry)
-        if shown:
+            placed.append((crop, entry))
+        if self._layer is not None and self._show_crops(placed):
             self._trim()
             self.canvas.update()
         self._uploading = bool(self._uploads) and self._layer is not None
@@ -432,7 +440,7 @@ class ZoomDetail(QObject):
             other = self._crops[k]
             ih, iw = other.image.shape[:2]
             if self._allocate(victim, k, other, iw, ih):
-                self._show_crop(k, other, self._want[k])
+                self._show_crops([(other, self._want[k])])
             elif k not in self._uploads:
                 self._uploads.append(k)
         return self._allocate(victim, key, crop, w, h)
@@ -467,19 +475,28 @@ class ZoomDetail(QObject):
                 kept.append(key)
         return kept
 
-    def _show_crop(self, key: tuple, crop: _Crop, entry: _Want) -> bool:
-        """Point the entry's tiles at the crop; True if any changed."""
-        tiles = entry.tiles[self._crop_of[entry.tiles] != crop.id]
-        if not len(tiles):
+    def _show_crops(self, items: list[tuple[_Crop, _Want]]) -> bool:
+        """Point each entry's tiles at its crop, where the crop is now (one that left its
+        page meanwhile is skipped); True if any tile changed."""
+        rows = []  # (tiles, page, x, y, w, h, crop id, density)
+        for crop, entry in items:
+            if crop.page < 0:
+                continue
+            tiles = entry.tiles[self._crop_of[entry.tiles] != crop.id]
+            if len(tiles):
+                h, w = crop.image.shape[:2]
+                rows.append((tiles, crop.page, crop.x, crop.y, w, h, crop.id, entry.density))
+        if not rows:
             return False
-        h, w = crop.image.shape[:2]
-        origin = np.tile([crop.x, crop.y], (len(tiles), 1)).astype(np.float64)
-        size = np.tile([w, h], (len(tiles), 1)).astype(np.float64)
+        tiles = np.concatenate([row[0] for row in rows])
+        counts = [len(row[0]) for row in rows]
+        each = np.repeat(np.array([row[1:] for row in rows], np.float64), counts, axis=0)
         instances = self._layer.instances
-        instances["layer"][tiles] = self._layer.first_detail + crop.page
-        instances["uv"][tiles] = texel_uv(origin, size, self._side, self._scene.mirrored[tiles])
-        self._crop_of[tiles] = crop.id
-        self._density[tiles] = entry.density
+        instances["layer"][tiles] = self._layer.first_detail + each[:, 0]
+        instances["uv"][tiles] = texel_uv(each[:, 1:3], each[:, 3:5], self._side,
+                                          self._scene.mirrored[tiles])  # fmt: skip
+        self._crop_of[tiles] = each[:, 5].astype(np.int64)
+        self._density[tiles] = each[:, 6]
         self._layer.mark_dirty()
         return True
 

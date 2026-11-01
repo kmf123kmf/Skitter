@@ -118,7 +118,7 @@ from skitter.ui.canvas import MosaicCanvas
 from skitter.ui.jobs import Job
 from skitter.ui.library_panel import LibraryPanel
 from skitter.ui.render.sprites import SpriteLayer, make_instances
-from skitter.ui.render.tile_textures import TileTextures, thumbnail_atlas
+from skitter.ui.render.tile_textures import TileTextures, detail_request, thumbnail_atlas
 from skitter.ui.render.zoom_detail import DETAIL_PAGES, DETAIL_SIDE, ZoomDetail
 from skitter.ui.steps.base import side_panel, view_and_panel
 from skitter.ui.steps.tile_picker import upper_closure
@@ -203,6 +203,10 @@ class _Dive:
                                cam.turn((0.0, 1.0)))  # fmt: skip
         self.matched: Level | None = None  # the next level, once matched
         self.done = False  # the animation has finished
+        # The next level's, made while the dive goes on (see _dive_matched).
+        self.textures: TileTextures | None = None
+        self.layer: SpriteLayer | None = None  # staged
+        self.layer_pages: np.ndarray | None = None  # the textures' pages it was built from
 
 
 class _Flow:
@@ -534,6 +538,8 @@ class InfiniteWindow(QWidget):
             self._job.wait()
             self._job = None
         self._drop_loop()
+        if self.dive is not None:
+            self._discard_dive(self.dive)
         self.dive = None
         self._fade_token = None
         self._queued = None
@@ -633,7 +639,7 @@ class InfiniteWindow(QWidget):
         elif self.dive.done:
             self._arrive(level)
         else:
-            self.dive.matched = level
+            self._dive_matched(level)
         self._refresh()
 
     def _on_failed(self, message: str) -> None:
@@ -654,6 +660,9 @@ class InfiniteWindow(QWidget):
 
     def _clear_level(self) -> None:
         self._swap_waiting = False  # that level's tiles
+        if self._tile_swap is not None:
+            self.canvas.unstage(self._tile_swap)
+            self._tile_swap = None
         self.zoom_detail.show(None, None, None)
         if self.tile_layer is not None:
             self.canvas.remove_layer(self.tile_layer)
@@ -665,13 +674,20 @@ class InfiniteWindow(QWidget):
 
     def _arrive(self, level: Level) -> None:
         """Move to a level: the photo covers its canvas as it covered the tile (or the
-        view, at the start), the view refits to it, and it fades into the mosaic."""
-        self.dive = None
+        view, at the start), the view refits to it, and it fades into the mosaic. Its tile
+        layer: the one the dive made for it, if it did."""
+        dive, self.dive = self.dive, None
         width, height = float(level.ctx.width), float(level.ctx.height)
         photo = self.photo_layer.instances
         photo["pos"], photo["size"], photo["rotation"] = (width / 2, height / 2), (width, height), 0
         self.photo_layer.mark_dirty()
-        self._show_level(level)
+        textures = layer = None
+        if dive is not None and dive.textures is not None:
+            textures, layer = dive.textures, dive.layer  # still staging: the rest goes up now
+            textures.changed.disconnect(self._dive_textures_ready)
+        self._show_level(level, textures, layer)
+        if layer is not None and dive.layer_pages is not textures.pages:
+            self._on_textures_changed()  # its full-size tiles came while it was built
         self._loop_arrived(level)
         self.status.setText("Ready.")
         show_progress(self.progress, 1.0)
@@ -710,10 +726,8 @@ class InfiniteWindow(QWidget):
         auto-dive zooms in, once it rests: uploading them stalls a frame)."""
         if self._approaching:
             self._swap_waiting = True
-        elif self._flow_token is not None:  # moving on: built aside and staged, then swapped
-            self._build_layer(self.textures, None)
-        elif self.tile_layer is not None and self.dive is None:
-            self._new_tile_layer()
+        elif self.tile_layer is not None and (self._flow_token is not None or self.dive is None):
+            self._build_layer(self.textures, None)  # built aside and staged, then swapped
 
     def _end_approach(self) -> None:
         self._approaching = False
@@ -793,7 +807,7 @@ class InfiniteWindow(QWidget):
         self._show_photo(picture, tiles["pos"][index], size, tiles["rotation"][index], 0.0)
         self._locked = True
         if next_level is not None:
-            self.dive.matched = next_level
+            self._dive_matched(next_level)
         elif self._job is not None:  # preparing (a random mosaic's start): match once ready
             self._queued = picture, lure, tile
             self.status.setText("Preparing tiles: this dive matches once they are ready…")
@@ -844,6 +858,59 @@ class InfiniteWindow(QWidget):
         zoom = dive.zoom0 * (dive.zoom1 / dive.zoom0) ** m  # geometric: even zoom speed
         # The tile moves on screen from where it was to the middle as the view zooms.
         canvas.set_view(dive.center - dive.screen0 * (1 - m) / zoom, zoom)
+
+    def _dive_matched(self, level: Level) -> None:
+        """The dive's next level is made: while the dive goes on, its thumbnails are packed
+        and its tile layer built (in the background) and staged, so arriving only swaps it
+        in (made then, it stalled a frame about 50 ms)."""
+        dive, library = self.dive, self.infinite.library
+        dive.matched = level
+
+        def work(progress, cancelled):
+            return thumbnail_atlas(level.scene, library), detail_request(level.scene, library)
+
+        def packed(made) -> None:
+            if self.dive is not dive:
+                return  # arrived (its tiles made then) or stopped meanwhile
+            atlas, request = made
+            dive.textures = TileTextures(level.scene, library, self, pool=self._pool,
+                                         atlas=atlas, request=request)  # fmt: skip
+            dive.textures.changed.connect(self._dive_textures_ready)
+            self._build_layer(dive.textures, None, dive)
+
+        self._layer_job(work, packed)
+
+    def _dive_textures_ready(self) -> None:
+        """The dive's next level's full-size crops are in: build its tile layer from them."""
+        dive = self.dive
+        if dive is not None and dive.textures is not None:
+            self._build_layer(dive.textures, None, dive)
+
+    def _discard_dive(self, dive: _Dive) -> None:
+        """Let go of what a dive made for its next level, not to be shown."""
+        if dive.layer is not None:
+            self.canvas.unstage(dive.layer)
+        if dive.textures is not None:
+            dive.textures.changed.disconnect(self._dive_textures_ready)
+            dive.textures.close()
+        dive.textures = dive.layer = None
+
+    def _swap_when_staged(self, layer: SpriteLayer) -> None:
+        """Stage the shown level's new tile layer and swap it in once it is up (and no dive
+        or zoom-in moves the tiles)."""
+        self._tile_swap = layer
+        self.canvas.stage(layer)
+
+        def step(t: float) -> bool:
+            if self._tile_swap is not layer:
+                return False  # swapped or dropped meanwhile
+            if not self.canvas.staged(layer) or self.dive is not None or self._approaching:
+                return True
+            self._tile_swap = None
+            self._new_tile_layer(layer)
+            return False
+
+        self.canvas.add_animation(step)
 
     # Auto-dive
 
@@ -1082,20 +1149,21 @@ class InfiniteWindow(QWidget):
             level = infinite.level(picture, progress, cancelled, self.detail_reported.emit,
                                    DIVE_THREADS, None, tile)  # fmt: skip
             atlas = thumbnail_atlas(level.scene, infinite.library)
-            return level, display_copy(picture, longest), atlas
+            request = detail_request(level.scene, infinite.library)
+            return level, display_copy(picture, longest), (atlas, request)
 
         def done(result) -> None:
             self._job = None
             if self._flow is flow:
                 flow.next, flow.picture, atlas = result
                 flow.seconds = time.perf_counter() - self._job_started
-                self._flow_prepare(flow, atlas)
+                self._flow_prepare(flow, *atlas)
                 self.status.setText("Auto-dive." if self.auto else "Diving.")
             self._refresh()
 
         self._start_job(work, "flow", "Making the next mosaic…", done)
 
-    def _flow_prepare(self, flow: _Flow, atlas) -> None:
+    def _flow_prepare(self, flow: _Flow, atlas, request) -> None:
         """The next level is made: its photo's layer and its textures (reading full-size
         crops), its tile layer from the thumbnails (built in the background), all staged."""
         scene, i = flow.level.scene, flow.index
@@ -1105,7 +1173,7 @@ class InfiniteWindow(QWidget):
         flow.photo = SpriteLayer(flow.picture, photo)
         self.canvas.stage(flow.photo)
         flow.textures = TileTextures(flow.next.scene, self.infinite.library, self,
-                                     pool=self._pool, atlas=atlas)  # fmt: skip
+                                     pool=self._pool, atlas=atlas, request=request)  # fmt: skip
         flow.textures.changed.connect(self._flow_textures_ready)
         self._build_layer(flow.textures, flow)
 
@@ -1115,11 +1183,12 @@ class InfiniteWindow(QWidget):
         if flow is not None and flow.textures is not None:
             self._build_layer(flow.textures, flow)
 
-    def _build_layer(self, textures: TileTextures, flow: _Flow | None) -> None:
+    def _build_layer(self, textures: TileTextures, flow: _Flow | None,
+                     dive: _Dive | None = None) -> None:  # fmt: skip
         """Build a tile layer from the textures' pages as they are, in the background (the
         pages are copied out to RGBA there), then stage it: for the leg's next level (the
-        first: shown inside the tile; full-size ones swap in) or the shown one (flow
-        None, or the leg moved on meanwhile: it swaps in once staged)."""
+        first: shown inside the tile; full-size ones swap in), the dive's (dive) or the
+        shown one (flow None, or the leg moved on meanwhile: it swaps in once staged)."""
         pages, instances = textures.pages, textures.instances()
 
         def work(progress, cancelled):
@@ -1129,22 +1198,34 @@ class InfiniteWindow(QWidget):
         def built(layer: SpriteLayer) -> None:
             if textures.pages is not pages:  # newer pages: their own layer follows
                 return
-            if flow is not None and self._flow is flow and flow.textures is textures:
+            if dive is not None:
+                if self.dive is not dive or dive.textures is not textures:
+                    return  # arrived meanwhile (its tiles made then) or stopped
+                if dive.layer is not None:
+                    self.canvas.unstage(dive.layer)
+                dive.layer, dive.layer_pages = layer, pages
+            elif flow is not None and self._flow is flow and flow.textures is textures:
                 if flow.layer is None:
                     flow.layer = layer
                 else:
                     flow.full = layer
             elif self.textures is textures and self._flow_token is not None:
                 self._tile_swap = layer
-            elif self.textures is textures and self.dive is None and self.tile_layer is not None:
-                self._new_tile_layer(layer)  # the creep came to rest meanwhile: in now
+            elif self.textures is textures and self.tile_layer is not None:
+                if self._tile_swap is not None:
+                    self.canvas.unstage(self._tile_swap)
+                self._swap_when_staged(layer)  # in steps, or the creep at rest meanwhile
                 return
             else:
                 return
             self.canvas.stage(layer)
 
+        self._layer_job(work, built)
+
+    def _layer_job(self, work, done) -> None:
+        """Run work(progress, cancelled) in the background, then done(its result) here."""
         job = Job(work)
-        job.finished.connect(built)
+        job.finished.connect(done)
 
         def stopped() -> None:
             if job in self._layer_jobs:
@@ -1594,6 +1675,9 @@ class InfiniteWindow(QWidget):
     def shutdown(self) -> None:
         """Stop all background work (the window is closing)."""
         self.stop()
+        for job in list(self._layer_jobs):  # their signals come while this window is here
+            job.cancel()
+            job.wait()
         self.zoom_detail.shutdown()
 
     def closeEvent(self, event) -> None:

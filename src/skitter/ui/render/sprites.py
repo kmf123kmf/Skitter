@@ -59,7 +59,9 @@ def make_instances(count: int) -> np.ndarray:
     return instances
 
 
-STAGE_BYTES = 8 * 2**20  # texture bytes a staged layer uploads a frame (SpriteRenderer.stage)
+# Texture bytes a staged layer uploads a frame (SpriteRenderer.stage): about 1 ms at 144 Hz,
+# where 8 MB with the frame's other work dropped frames (an Infinite Mosaic photo is 5 MB).
+STAGE_BYTES = 4 * 2**20
 
 
 def to_rgba(textures: np.ndarray) -> np.ndarray:

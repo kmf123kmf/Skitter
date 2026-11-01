@@ -289,6 +289,12 @@ def thumbnail_atlas(scene: MosaicScene, library: TileLibrary):
     return build_atlas(library.thumbs, library.thumb_size, scene.slot)
 
 
+def detail_request(scene: MosaicScene, library: TileLibrary) -> DetailRequest:
+    """The full-size crops TileTextures reads for a scene (from the library's paths and
+    thumbnails: make it in the background where that would stall)."""
+    return DetailRequest.for_scene(scene, TileFiles.read(library, scene.slot), boost=True)
+
+
 class TileTextures(QObject):
     """The textures of a scene's tiles: thumbnails at once, full-size crops when read."""
 
@@ -299,11 +305,13 @@ class TileTextures(QObject):
     def __init__(
         self, scene: MosaicScene, library: TileLibrary, parent=None,
         picture: np.ndarray | None = None, pool=None, atlas=None,
+        request: DetailRequest | None = None,
     ):  # fmt: skip
         """picture: (H, W, 4) the source picture, for blended tiles (see `picture`).
         pool: a process pool kept running to read crops with (see render_crops).
         atlas: the scene's thumbnails, packed (`thumbnail_atlas`; made here if not given:
-        it reads a thumbnail per photo, so make it in the background where that stalls)."""
+        it reads a thumbnail per photo, so make it in the background where that stalls);
+        request: the full-size crops to read (`detail_request`; likewise)."""
         super().__init__(parent)
         self._pool = pool
         self.scene = scene
@@ -322,7 +330,7 @@ class TileTextures(QObject):
         self._atlas = thumbnail_atlas(scene, library) if atlas is None else atlas
         self.pages: np.ndarray = self._atlas.pages
         self.layer, self.uv = self._atlas.locate(scene.slot, scene.rect, scene.mirrored)
-        self._load_detail(library)
+        self._load_detail(library if request is None else request)
 
     @property
     def loading(self) -> bool:
@@ -371,9 +379,11 @@ class TileTextures(QObject):
         self.status = text
         self.status_changed.emit(text)
 
-    def _load_detail(self, library: TileLibrary) -> None:
+    def _load_detail(self, source: "TileLibrary | DetailRequest") -> None:
+        """Read the full-size crops in the background (source: the library, or the request
+        made from it already)."""
         scene = self.scene
-        request = DetailRequest.for_scene(scene, TileFiles.read(library, scene.slot), boost=True)
+        request = detail_request(scene, source) if isinstance(source, TileLibrary) else source
         job = Job(lambda progress, cancelled: request.build(progress, cancelled, pool=self._pool),
                   parent=self)  # fmt: skip
         job.progress.connect(lambda message, _: self._set_status(message))
