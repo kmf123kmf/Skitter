@@ -291,3 +291,39 @@ def test_texels_turn_square_by_their_own_magnification(gl):
     detail.write_detail(0, 0, 0, halves(2)[0])
     detail.instances["layer"] = detail.first_detail
     assert set(draw(gl, detail, pixelate=4.0)[:, 0].tolist()) == {0, 255}  # not the 127s
+
+
+def test_released_texture_stacks_are_reused_by_layers_of_their_size(gl):
+    from skitter.ui.render.sprites import (
+        SPARE_TEXTURES,
+        SpriteLayer,
+        SpriteRenderer,
+        make_instances,
+    )
+
+    renderer = SpriteRenderer(gl)
+    big = np.zeros((1, 1024, 1024, 4), np.uint8)  # 4 MB: worth keeping
+
+    def staged(textures):
+        layer = SpriteLayer(textures, make_instances(1))
+        while not renderer.stage(layer):
+            pass
+        return layer, renderer._layers[layer].texture
+
+    first, texture = staged(big)
+    renderer.release(first)
+    again, reused = staged(big.copy())
+    assert reused is texture  # mipmaps and all: building them again costs well under 1 ms
+    fewer, two_pages = staged(np.zeros((2, 1024, 1024, 4), np.uint8))
+    renderer.release(fewer)
+    again, reused = staged(big.copy())  # one page in a stack of two (the other unused)
+    assert reused is two_pages
+    small, tiny = staged(np.zeros((1, 64, 64, 4), np.uint8))
+    renderer.release(small)
+    assert tiny not in renderer._spare_textures  # too small to be worth keeping
+    renderer.release(again)
+    for side in range(SPARE_TEXTURES):  # newer ones push the oldest out
+        layer, _ = staged(np.zeros((1, 1024, 1032 + side * 8, 4), np.uint8))
+        renderer.release(layer)
+    assert texture not in renderer._spare_textures
+    assert len(renderer._spare_textures) == SPARE_TEXTURES

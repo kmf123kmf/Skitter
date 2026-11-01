@@ -753,6 +753,44 @@ def test_continuous_auto_dive_zooms_on_from_mosaic_to_mosaic_seamlessly(window, 
     assert win.canvas.pixelate_above == 4.0
 
 
+def test_continuous_dives_keep_the_last_mosaic_until_the_new_one_covers_the_view(window, qapp):
+    """Center first pans beyond the mosaic's edge (a corner tile's), not zooming: the last
+    mosaic's tiles there stay as they were, and fade only once the new one covers the view."""
+    win = window
+    win.settings.update(motion="flow", flow_seconds=2.0, flow_path="center")
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+
+    def pick():  # a corner tile (panned to past the edge), then the middle one (covered)
+        scene, ctx = win.level.scene, win.level.ctx
+        if win.level.number % 2:
+            return 0
+        return int(np.argmin(np.linalg.norm(scene.center - (ctx.width / 2, ctx.height / 2),
+                                            axis=1)))  # fmt: skip
+
+    win.pick_tile = pick
+    win.auto_button.click()
+    seen = {"uncovered": False, "faded": False}
+    end = time.perf_counter() + 30
+    while time.perf_counter() < end and win.level.number < 4:
+        qapp.processEvents()
+        run_animations(win.canvas, 0.05)
+        if win._job is not None and not win._job.running:
+            win._job.wait()
+        last = win._last_layer
+        if last is None:
+            continue
+        if not win._level_covers_view():
+            np.testing.assert_array_equal(last.instances["alpha"], win._last_alpha)
+            seen["uncovered"] = True
+        elif np.any(last.instances["alpha"] < win._last_alpha):
+            seen["faded"] = True
+    assert win.level.number >= 4 and all(seen.values())
+    switch_motion(win, "steps")
+
+
 def test_continuous_auto_dive_makes_the_next_level_ahead_and_stages_it(window, qapp):
     """While the view heads for the tile, its mosaic's textures load and its tile layer and
     photo go up to the GPU (staged), so the switch costs no frame; stopping lets go of them."""

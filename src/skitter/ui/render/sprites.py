@@ -41,6 +41,14 @@ _INSTANCE_ATTRIBUTES = (
 # stack costs a frame about 45 ms when first written (the driver allocating 144 MB at
 # 3 x 4096^2), every time a view replaces its tile layer (each Infinite Mosaic level).
 SPARE_DETAILS = 1
+# Texture stacks kept from released layers, for later layers of the same size to take: the
+# driver allocates a stack's mipmaps the first time they're built, about 35 ms a 4096^2 page
+# (built again: under 1 ms), every time an Infinite Mosaic level brings its full-size tiles.
+# Kept: the latest SPARE_TEXTURES of at least SPARE_TEXTURE_BYTES (a level releases its
+# photo, thumbnail and full-size layers as the next one makes its own); a layer takes one of
+# its page size with enough pages.
+SPARE_TEXTURES = 3
+SPARE_TEXTURE_BYTES = 4 * 2**20
 
 
 def make_instances(count: int) -> np.ndarray:
@@ -165,17 +173,30 @@ def _load_shader(name: str) -> str:
 
 class _GpuLayer:
     def __init__(self, ctx: moderngl.Context, program: moderngl.Program, quad, layer,
-                 spare_details: dict | None = None, staged: bool = False):  # fmt: skip
+                 spare_details: dict | None = None, staged: bool = False,
+                 spare_textures: list | None = None):  # fmt: skip
         """spare_details: detail page stacks of released layers, by (side, pages), to take
-        instead of allocating (see SpriteRenderer). staged: the textures go up a strip at
-        a time (`stage`), not all at once."""
+        instead of allocating (see SpriteRenderer); spare_textures: texture stacks of
+        released layers, to take one of the same size. staged: the textures go up a strip
+        at a time (`stage`), not all at once."""
         count, h, w, _ = layer.textures.shape
         max_layers = ctx.info["GL_MAX_ARRAY_TEXTURE_LAYERS"]
         if count > max_layers:
             raise ValueError(f"{count} textures exceeds the GPU limit of {max_layers} per layer")
+        self.spare_textures = [] if spare_textures is None else spare_textures
         data = None if staged else layer.textures.tobytes()
-        self.texture = ctx.texture_array((w, h, count), 4, data)
-        self.texture.repeat_x = self.texture.repeat_y = False
+        # A spare of this page size with enough pages (the fewest): levels' full-size tiles
+        # take one page or two. Its old texels show nowhere: drawn once written (staged).
+        fits = [t for t in self.spare_textures if t.size[:2] == (w, h) and t.size[2] >= count]
+        spare = min(fits, key=lambda t: t.size[2], default=None)
+        if spare is not None:
+            self.spare_textures.remove(spare)
+            self.texture = spare
+            if data is not None:
+                spare.write(data, viewport=(0, 0, 0, w, h, count))
+        else:
+            self.texture = ctx.texture_array((w, h, count), 4, data)
+            self.texture.repeat_x = self.texture.repeat_y = False
         rows = max(1, min(h, STAGE_BYTES // (4 * w)))
         # Strips (page, first row, rows) still to upload (staged).
         self.pending = [(p, y, min(rows, h - y)) for p in range(count)
@@ -278,7 +299,13 @@ class _GpuLayer:
 
     def release(self) -> None:
         self._release_buffers()
-        self.texture.release()
+        w, h, count = self.texture.size
+        if w * h * count * 4 >= SPARE_TEXTURE_BYTES:  # for a later layer of its size
+            self.spare_textures.append(self.texture)
+            if len(self.spare_textures) > SPARE_TEXTURES:
+                self.spare_textures.pop(0).release()
+        else:
+            self.texture.release()
         if self.detail is not None:
             side, _, pages = self.detail.size
             spares = self.spare_details.setdefault((side, pages), [])
@@ -308,6 +335,7 @@ class SpriteRenderer:
         self._no_picture = ctx.texture((1, 1), 4, bytes(4))  # bound when a layer has none
         self._no_detail = ctx.texture_array((1, 1, 1), 3, bytes(3))
         self._spare_details: dict = {}  # (side, pages) -> detail stacks to reuse (_GpuLayer)
+        self._spare_textures: list = []  # texture stacks to reuse, oldest first (_GpuLayer)
         corners = np.array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5], dtype="f4")
         self.quad = ctx.buffer(corners.tobytes())
         self._layers: dict[SpriteLayer, _GpuLayer] = {}
@@ -326,7 +354,8 @@ class SpriteRenderer:
         gpu = self._layers.get(layer)
         if gpu is None:
             gpu = self._layers[layer] = _GpuLayer(self.ctx, self.program, self.quad, layer,
-                                                  self._spare_details, staged=True)  # fmt: skip
+                                                  self._spare_details, staged=True,
+                                                  spare_textures=self._spare_textures)  # fmt: skip
             layer.patches.clear()  # the whole is going up
         return gpu.stage(layer.textures, STAGE_BYTES)
 
@@ -336,7 +365,8 @@ class SpriteRenderer:
         gpu = self._layers.get(layer)
         if gpu is None:
             gpu = self._layers[layer] = _GpuLayer(self.ctx, self.program, self.quad, layer,
-                                                  self._spare_details)  # fmt: skip
+                                                  self._spare_details,
+                                                  spare_textures=self._spare_textures)  # fmt: skip
             layer.patches.clear()  # just uploaded whole
         if gpu.pending:  # drawn before it was all staged: the rest now
             gpu.stage(layer.textures, float("inf"))

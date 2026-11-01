@@ -136,8 +136,8 @@ START_TIP = "Start a session from a random photo of the library."
 # Continuous auto-dive. As the tile it heads for grows, the tile's photo fades in over it,
 # then fades into its own mosaic, drawn inside it: each over FADE_ZOOM of zoom, done when
 # the tile fills Mosaic appears at of the view. After the switch, the last mosaic (around
-# and under the new one: its gaps, the view's margins) fades out over LAST_OUT_ZOOM, ending
-# once the new one covers the view. A leg
+# and under the new one) stays until the new one covers the view, then fades out of its gaps
+# over LAST_OUT_ZOOM. A leg
 # slows to a stop (over EASE_SECONDS) where the photo would start to show if the next
 # mosaic isn't made by then. Continuously by hand, the view creeps in between legs, at the
 # same rate, slowing to a stop CREEP_ROOM of zoom before a base tile would start to show
@@ -293,7 +293,7 @@ class InfiniteWindow(QWidget):
         self._creep_left = 0.0  # its log zoom to go, as of the last frame
         self._last_layer: SpriteLayer | None = None  # the last level's, fading after a switch
         self._last_alpha: np.ndarray | None = None  # its tiles' opacity as the switch left it
-        self._last_zoom = 1.0  # the view's zoom at the switch
+        self._last_zoom: float | None = None  # the view's zoom once the new level covered it
         self._last_clock = 0.0  # seconds since
         self._tile_swap: SpriteLayer | None = None  # full-size tiles, staging, to swap in
         self._layer_jobs: list[Job] = []  # building tile layers in the background
@@ -1237,18 +1237,17 @@ class InfiniteWindow(QWidget):
         self._refresh()
 
     def _flow_leftovers(self, zoom: float) -> None:
-        """The last level fading (by the view's zoom since the switch, or as if it had
-        zoomed on at the rate if slower: by hand the creep may stop), full-size tiles
-        swapped in once staged."""
+        """The last level fading once this one covers the view (until then its tiles show
+        around it: the view's margins, or beyond its edge as Center first pans), by the
+        view's zoom since, or as if it had zoomed on at the rate if slower (by hand the
+        creep may stop); full-size tiles swapped in once staged."""
         canvas, last = self.canvas, self._last_layer
-        if last is not None:  # until this level covers the view (its margins), at least
+        if last is not None and self._last_zoom is None and self._level_covers_view():
+            self._last_zoom, self._last_clock = zoom, 0.0
+        if last is not None and self._last_zoom is not None:  # under it: its gaps
             rate = flow_rate(int(self.settings.columns), float(self.settings.flow_seconds))
-            z0 = self._last_zoom
-            canvas_size = np.array([self.level.ctx.width, self.level.ctx.height], np.float64)
-            cover = float(np.max(canvas.camera.viewport / (canvas_size * z0)))
-            zoomed = max(math.log(max(zoom / z0, 1.0)), rate * self._last_clock)
-            fading = max(math.log(max(cover, 1.0)) - math.log(LAST_OUT_ZOOM), 0.0)
-            gone = (zoomed - fading) / math.log(LAST_OUT_ZOOM)
+            zoomed = max(math.log(max(zoom / self._last_zoom, 1.0)), rate * self._last_clock)
+            gone = zoomed / math.log(LAST_OUT_ZOOM)
             last.instances["alpha"] = self._last_alpha * (1.0 - _fade(gone))
             last.mark_dirty()
             if gone >= 1.0:
@@ -1258,6 +1257,15 @@ class InfiniteWindow(QWidget):
         if swap is not None and canvas.staged(swap):
             self._tile_swap = None
             self._new_tile_layer(swap)
+
+    def _level_covers_view(self) -> bool:
+        """Every corner of the view lies on the level's canvas."""
+        cam, ctx = self.canvas.camera, self.level.ctx
+        w, h = cam.viewport
+        corners = np.array([cam.screen_to_world(x, y) for x, y in ((0, 0), (w, 0), (0, h), (w, h))])
+        return bool(
+            np.all(corners >= -1e-6) and np.all(corners <= (ctx.width + 1e-6, ctx.height + 1e-6))
+        )
 
     def _flow_frame(self) -> None:
         """Show the leg at its progress: the view; the last level fading; the tile's photo
@@ -1376,7 +1384,7 @@ class InfiniteWindow(QWidget):
         self.zoom_detail.show(layer, level.scene, self.infinite.library)
         self.level_label.setText(f"Level {level.number}: {len(level.scene):,} tiles, made in "
                                  f"{flow.seconds:.2f} s")  # fmt: skip
-        self._last_zoom, self._last_clock = float(canvas.camera.zoom), over
+        self._last_zoom, self._last_clock = None, over  # fading once the new one covers
         if not self.auto:  # by hand: the view creeps on, for the next tile to be picked
             # Center first's zoom is at rest as it arrives: the creep starts from rest too.
             speed = 0.0 if flow.path.path == CENTER_FIRST else flow.speed
