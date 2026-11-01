@@ -1629,3 +1629,39 @@ def test_what_would_lose_the_recording_asks_first(window, qapp):
     win._on_double_click(float(sx), float(sy))  # the recorded way: replayed, not asked
     assert asked[-1] == "Dive" and len(asked) == 5 and win.dive is not None
     answer["go"] = True
+
+
+def test_a_continuous_replay_plays_the_recording_along_its_way(window, qapp):
+    """Dives move Continuously: the live legs replay the recording, each heading for the
+    tile it went into, its level made again from the record (nothing matched)."""
+    win = window
+    win.settings.update(start="mosaic", motion="flow", flow_seconds=2.0)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    win.start_recording()
+    win.set_auto(True)
+    run_auto(win, qapp, 30.0, until=lambda: len(win.record.levels) >= 3)
+    win.set_auto(False)
+    run_auto(win, qapp, 15.0, until=lambda: not win.busy)  # its leg under way lands
+    win.stop_recording()
+    record, matched = win.record, win.infinite.levels
+    first, last = record.recording
+    picks = list(record.picks[first:last])
+    assert last - first >= 2
+
+    seen = []
+
+    def done() -> bool:
+        if not seen or seen[-1] != win._pos:  # (the last lands as the replay ends)
+            seen.append(win._pos)
+        return win._replay is None
+
+    win.replay_action.trigger()
+    assert win._replay is not None and win._replay.timeline is None and win.busy
+    run_auto(win, qapp, 40.0, until=done)
+    assert win._replay is None and win._pos == last and "done" in win.status.text()
+    assert win.infinite.levels == matched  # made again from the record, nothing matched
+    assert seen[seen.index(first) :] == list(range(first, last + 1))  # from its first shown
+    assert record.recording == (first, last) and record.picks[first:last] == picks

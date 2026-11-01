@@ -71,9 +71,12 @@ recording; the record keeps every level either way, for loops). A dive that
 would cut into it (diving elsewhere from a mosaic it went on from) asks first,
 as do ending the session, a new start and a new recording over one with dives.
 
-Replay (P) plays the recording: its timeline (core/dive_motion.py's
-DiveTimeline: in steps, with the dive settings as they are then) drives the
-view, the tiles, the photo and the outline frame by frame (`_replay_frame`).
+Replay (P) plays the recording with the dive settings as they are then. In
+steps its timeline (core/dive_motion.py's DiveTimeline) drives the view, the
+tiles, the photo and the outline frame by frame (`_replay_frame`).
+Continuously, the live legs play it (`_replay_flow`): each leg heads for the
+tile the record went into, and its level is made again from the record, as a
+leg along the recorded way always does (by hand or auto-dive's too).
 Each level is made again from the record in the background, with its tile
 layer and photo staged, while the one before it plays; one not made in time
 holds the replay before its dive. Esc, a click or the wheel stop it; stopped
@@ -263,10 +266,12 @@ class _Made:
 
 class _Replay:
     """A replay under way: its timeline, its clock, and the levels made for it (by record
-    index: the one shown, the next)."""
+    index: the one shown, the next). A continuous one (live legs) has no timeline: span,
+    the recording's (first, last) level, says where it starts and ends."""
 
-    def __init__(self, timeline: DiveTimeline):
+    def __init__(self, timeline: DiveTimeline | None, span: tuple[int, int] = (0, 0)):
         self.timeline = timeline
+        self.span = span
         self.t = 0.0
         self.made: dict[int, _Made] = {}
         self.shown = -1  # the record index on screen (-1: the session's own view still)
@@ -887,7 +892,7 @@ class InfiniteWindow(QWidget):
         index = self.tile_at(*self.canvas.camera.screen_to_world(sx, sy))
         if index >= 0:
             flow = self.settings.motion == "flow"
-            cut = self.record.cut_by(self._pos, index, replays=not flow)
+            cut = self.record.cut_by(self._pos, index)
             if cut and not self._may_lose_recording(
                     "Dive", "This dive leaves the recorded way.", cut):  # fmt: skip
                 return
@@ -1025,10 +1030,6 @@ class InfiniteWindow(QWidget):
         on = bool(on) and self.running
         if on:
             self._end_replay("Replay stopped.")
-        if on and not self.auto and self._continuous and not self._may_lose_recording(
-                "Auto-Dive", "Continuous dives from here leave the recorded way.",
-                self.record.cut_by(self._pos, -1, replays=False)):  # fmt: skip
-            on = False
         if on == self.auto:
             self._refresh()
             return
@@ -1148,11 +1149,12 @@ class InfiniteWindow(QWidget):
         """Start the never-ending zoom from the view as it is (see core/dive_path.py):
         auto-dive's legs, a leg onto tile index (a double-click), or by hand the creep
         (from rest: speed is a leg's, as a share of the rate)."""
-        self._drop_loop()  # loops are made in steps (for now)
+        if self._replay is None:  # a replay leaves the record as it is
+            self._drop_loop()  # loops are made in steps (for now)
         token = self._flow_token = object()
         self._flow_last = None
         self.canvas.pixelate_above = None  # tiles grow far past their texels: smooth them
-        if self.auto or index is not None:
+        if self._legs_go_on or index is not None:
             self._flow_leg(self.level, index, speed)
         else:
             self._creep_speed = 0.0
@@ -1219,11 +1221,14 @@ class InfiniteWindow(QWidget):
 
     def _flow_leg(self, level: Level, index: int | None = None, speed: float = 1.0) -> None:
         """A leg through level, from the view as it is (moving at speed) onto tile index (by
-        hand: double-clicked), or one picked now."""
+        hand: double-clicked), or auto-dive's next (the record's, where it goes on from
+        here). Along the recorded way its level is made again; else it is recorded."""
         if index is None:
-            index = self.pick_tile()
-        self.record.branch(self._pos, index)  # legs are recorded, never replayed (for now)
-        self._next = -1
+            index = self._next_tile()
+        record = self.record
+        self._next = record.leads_to(self._pos, index)
+        if self._next < 0:
+            record.branch(self._pos, index)
         scene, cam, settings = level.scene, self.canvas.camera, self.settings
         size = scene.size[index].astype(np.float64)
         _, end_zoom = cam.fit_params(0, 0, *size, margin=self.canvas.fit_margin)
@@ -1249,11 +1254,16 @@ class InfiniteWindow(QWidget):
         path = infinite.library.paths([tile.slot])[0]  # here: the database is this thread's
         ratio = self.canvas.devicePixelRatioF()
         longest = round(PHOTO_DISPLAY * max(self.canvas.camera.viewport) * ratio)
+        recorded = self.record.levels[self._next] if self._next >= 0 else None
 
         def work(progress, cancelled):
-            picture = infinite.picture(tile, path)
-            level = infinite.level(picture, progress, cancelled, self.detail_reported.emit,
-                                   DIVE_THREADS, None, tile)  # fmt: skip
+            if recorded is not None:  # along the recorded way: made again, nothing matched
+                level = infinite.rebuild(recorded, path)
+                picture = level.picture
+            else:
+                picture = infinite.picture(tile, path)
+                level = infinite.level(picture, progress, cancelled, self.detail_reported.emit,
+                                       DIVE_THREADS, None, tile)  # fmt: skip
             atlas = thumbnail_atlas(level.scene, infinite.library)
             request = detail_request(level.scene, infinite.library)
             return level, display_copy(picture, longest), (atlas, request)
@@ -1564,7 +1574,11 @@ class InfiniteWindow(QWidget):
         self.level_label.setText(f"Level {level.number}: {len(level.scene):,} tiles, made in "
                                  f"{flow.seconds:.2f} s")  # fmt: skip
         self._last_zoom, self._last_clock = None, over  # fading once the new one covers
-        if not self.auto:  # by hand: the view creeps on, for the next tile to be picked
+        replay = self._replay
+        if replay is not None and replay.timeline is None and self._pos >= replay.span[1]:
+            self._end_replay("Replay done: dive on from here.")  # its last level: at rest
+            return
+        if not self._legs_go_on:  # by hand: the view creeps on, for the next tile to be picked
             # Center first's zoom is at rest as it arrives: the creep starts from rest too.
             speed = 0.0 if flow.path.path == CENTER_FIRST else flow.speed
             self._flow = None
@@ -1685,6 +1699,12 @@ class InfiniteWindow(QWidget):
             self._pos = record.add(level)
         self._next = -1
         record.reached(self._pos)
+        replay = self._replay
+        if replay is not None and replay.timeline is None:  # a continuous replay's progress
+            first, last = replay.span
+            show_progress(self.replay_progress, (self._pos - first) / max(last - first, 1))
+            self.replay_label.setText(f"Replay: mosaic {self._pos - first + 1} of "
+                                      f"{last - first + 1}")  # fmt: skip
         self._show_recording()
         if record.home is None or self._pos < record.loop_start:
             return
@@ -1805,6 +1825,9 @@ class InfiniteWindow(QWidget):
         self.set_auto(False)
         self._cancel_auto_step()  # a creep's too
         self.record.stop_recording()
+        if self.settings.motion == "flow":
+            self._replay_flow()
+            return
         settings = self.settings.copy()  # as they are now: changes apply to the next replay
         timeline = DiveTimeline(self.record, settings, self.canvas.camera.viewport.copy(),
                                 span=self.record.recording)  # fmt: skip
@@ -1829,6 +1852,38 @@ class InfiniteWindow(QWidget):
             return self._replay_frame(replay, dt)
 
         self.canvas.add_animation(step)
+        self._refresh()
+
+    @property
+    def _legs_go_on(self) -> bool:
+        """Continuously, each leg's end starts the next: auto-dive, or a replay."""
+        return self.auto or self._replay is not None and self._replay.timeline is None
+
+    def _replay_flow(self) -> None:
+        """Replay the recording continuously: its first level made again and shown, then
+        the live legs along the recorded way (each next tile the record's) to its last."""
+        record = self.record
+        first, last = record.recording
+        replay = self._replay = _Replay(None, (first, last))
+        self._remove_highlight()
+        self.status.setText("Replay: making the first mosaic…")
+        self.replay_label.setText(f"Replay: mosaic 1 of {last - first + 1}")
+        show_progress(self.replay_progress, 0.0)
+        infinite, entry = self.infinite, record.levels[first]
+        path = None if entry.source is None else infinite.library.paths([entry.source.slot])[0]
+
+        def done(level: Level) -> None:
+            if self._replay is not replay:
+                return  # stopped meanwhile
+            if self.photo_layer is not None:
+                self.canvas.remove_layer(self.photo_layer)
+                self.photo_layer = None
+            self._show_level(level)
+            self._pos, self._next = first, -1
+            self.status.setText("Replaying the recording (P or Esc stops).")
+            self._start_flow()
+
+        self._layer_job(lambda progress, cancelled: infinite.rebuild(entry, path), done)
         self._refresh()
 
     def _replay_frame(self, replay: _Replay, dt: float) -> bool:
@@ -2006,6 +2061,19 @@ class InfiniteWindow(QWidget):
         if replay is None:
             return
         self._replay = None
+        if replay.timeline is None:  # continuous: the legs stop, at rest on the mosaic shown
+            self._stop_flow()
+            level = self.level
+            if level is not None and self._pos >= replay.span[0]:
+                self.canvas.camera.rotation = 0.0
+                self.canvas.fit_to(0, 0, float(level.ctx.width), float(level.ctx.height))
+                self.canvas.pixelate_above = PIXELATE_ABOVE
+            self.replay_label.setText("")
+            self._show_recording()
+            self._auto_next()  # by hand, the creep (it says how to go on)
+            creep = self.status.text() == CREEP_STATUS
+            self.status.setText(f"{message} {CREEP_STATUS}" if creep else message)
+            return
         for pos in [p for p in replay.made if p != replay.shown]:
             self._discard_made(replay.made.pop(pos))
         self._remove_highlight()
