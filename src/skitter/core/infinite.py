@@ -24,14 +24,23 @@ it, later levels only search. Measured on 200,000 photos (2026-10-30): the
 first level takes about 25 s (describing the tiles, building the index);
 later ones well under the dive at 40 columns.
 
-Loops (auto-dive's Loop setting): a dive returns, within a range of dives,
-to the picture it started from (`Loop`). Home is the first tile dived into.
+Every session is recorded (`DiveRecord`): its levels as plain data
+(`RecordedLevel`: the matched result and the tile each is of, no picture)
+and the tile dived into from each. A dive the record has is replayed: its
+level is made again from the record (`InfiniteSession.rebuild`: the picture
+read again from its photo, nothing matched); any other dive is recorded from
+there on, what followed it dropped. Nothing in a record refers to the live
+session, so a record can be replayed (or, later, saved) as it is.
+
+Loops (the Loop setting): a dive returns, within a range of dives, to the
+picture it started from. Home is the first tile dived into with Loop on.
 Each level from the bottom of the range on is matched with a lure
 (`Lure`): after the search, home's exact crop is costed against every
 region that shows whole, inside the canvas; where it fits at most Closing
 fit worse than the region's own best, it is pinned there (so it looks as if
 it had been matched), and at the top of the range at its best region
-regardless (`level`, `Level.home`). Diving into it closes the loop: the
+regardless (`level`, `Level.home`). Matching may also put home's exact crop
+somewhere by itself: that counts too. Diving into it closes the loop: the
 next level is the loop's first, which every pass then replays as recorded
 (its levels and the tiles dived into), so one pass can be rendered as a
 seamless video.
@@ -317,6 +326,43 @@ class Level:
     home: int = -1  # scene index of the lure's tile, placed (see Lure; -1: none)
     home_fit: float = float("nan")  # its error there over the spot's best's (1: the best)
     variety: np.ndarray | None = None  # (n,) each tile's, scene order (see Looks.variety)
+    home_tint: float | None = None  # home's own tint strength (Lure.tint; None: the level's)
+    blank: float | None = None  # not a tile's: the aspect of the blank canvas it covers
+
+    def recorded(self) -> "RecordedLevel":
+        return RecordedLevel(self.number, self.source, self.result, self.home, self.home_fit,
+                             self.home_tint, self.blank)  # fmt: skip
+
+
+@dataclass(frozen=True)
+class RecordedLevel:
+    """A level as a record keeps it: plain data, enough to make it again
+    (InfiniteSession.rebuild), and nothing of the live session."""
+
+    number: int
+    source: "TileView | None"  # the tile it is the mosaic of (None: a blank canvas's)
+    result: MatchResult
+    home: int = -1  # see Level
+    home_fit: float = float("nan")
+    home_tint: float | None = None
+    blank: float | None = None  # the blank canvas's aspect (a random mosaic's)
+
+
+def tint_home(scene: MosaicScene, result: MatchResult, home: int, tint: float | None) -> None:
+    """Give home (scene index; -1: none) its own tint strength (None: the level's)."""
+    if home < 0 or tint is None:
+        return
+    mean = result.tile_mean[scene.region[home]]
+    scene.tint_shift[home] = tint * (scene.target_color[home] - mean)
+    scene.tile_color[home] = mean + scene.tint_shift[home]
+
+
+def find_tile(scene: MosaicScene, tile: TileView) -> int:
+    """The first scene index showing exactly this crop (photo, window, mirroring), or -1."""
+    same = (scene.slot == tile.slot) & (scene.mirrored == tile.mirrored)
+    same &= np.all(np.abs(scene.rect - np.asarray(tile.rect)) < 1e-5, axis=1)
+    hits = np.flatnonzero(same)
+    return int(hits[0]) if len(hits) else -1
 
 
 @dataclass(frozen=True)
@@ -505,7 +551,7 @@ class InfiniteSession:
         )  # fmt: skip
         scene = MosaicScene.from_result(result, ctx)
         scene.visible_share  # noqa: B018 (auto-dive asks; at the start, not mid-animation)
-        return Level(0, ctx.picture, ctx, result, scene)  # its variety: in `prepare`
+        return Level(0, ctx.picture, ctx, result, scene, blank=aspect)  # variety: `prepare`
 
     def prepare(
         self,
@@ -607,12 +653,33 @@ class InfiniteSession:
             number = self.levels
         home = np.flatnonzero(scene.region == region) if region >= 0 else ()
         home = int(home[0]) if len(home) else -1
-        if home >= 0 and lure.tint is not None:  # its own tint (the arrays are its scene's)
-            mean = result.tile_mean[region]
-            scene.tint_shift[home] = lure.tint * (scene.target_color[home] - mean)
-            scene.tile_color[home] = mean + scene.tint_shift[home]
+        tint = None
+        if home >= 0:
+            tint = lure.tint
+            tint_home(scene, result, home, tint)
+        elif lure is not None:  # matching put home's exact crop somewhere by itself
+            home = find_tile(scene, lure.tile)
+            fit = 1.0 if home >= 0 else fit  # the best there is, there
         variety = self.variety(scene)  # auto-dive's weights: here, not on the UI thread
-        return Level(number, picture, ctx, result, scene, timings, source, home, fit, variety)
+        return Level(number, picture, ctx, result, scene, timings, source, home, fit, variety,
+                     tint)  # fmt: skip
+
+    def rebuild(self, entry: RecordedLevel, path: str | None = None) -> Level:
+        """A recorded level again, matching nothing: its picture read again from its photo
+        (path: the photo's, given, it may run off the library's thread), its scene from the
+        result. Its number is the recorded one (no level is added to the session)."""
+        if entry.source is None:
+            picture = blank_picture(entry.blank or self.layout.tile_aspect, 256)
+        else:
+            picture = self.picture(entry.source, path)
+        ctx = SliceContext(picture, self.layout)
+        scene = MosaicScene.from_result(entry.result, ctx)
+        scene.visible_share  # noqa: B018 (as `level` does: not on the UI thread)
+        scene.overlaps  # noqa: B018
+        tint_home(scene, entry.result, entry.home, entry.home_tint)
+        return Level(entry.number, picture, ctx, entry.result, scene, {}, entry.source,
+                     entry.home, entry.home_fit, self.variety(scene), entry.home_tint,
+                     entry.blank)  # fmt: skip
 
     def look_ahead(
         self,
@@ -699,35 +766,62 @@ class Lure:
 
 
 @dataclass
-class Loop:
-    """A cycle of levels coming back to its first (see the module docstring).
-
-    levels[i] is the loop's level i + 1 (levels[0]: the mosaic of home); picks[i] the
-    tile dived into from it. While recording, each new level is matched with lure();
-    once a level holds home (Level.home) diving into it closes the loop, and from then
-    on every pass replays levels and picks as recorded.
+class DiveRecord:
+    """A session's dives (see the module docstring): levels[i] and the tile picks[i]
+    dived into from it (the last level's pick, once chosen). With a loop, levels from
+    loop_start on are the loop's (levels[loop_start]: the mosaic of home); closed, a dive
+    into home from the last leads back to levels[loop_start], and every pass replays
+    them as recorded.
     """
 
-    home: TileView
-    levels: list[Level] = field(default_factory=list)
+    levels: list[RecordedLevel] = field(default_factory=list)
     picks: list[int] = field(default_factory=list)
+    home: TileView | None = None  # the loop's (None: no loop)
+    loop_start: int = -1
     closed: bool = False
     passes: int = 0  # times the loop has come back to its first level
 
+    def add(self, level: Level) -> int:
+        """Record the level arrived at (after its pick); its index."""
+        self.levels.append(level.recorded())
+        return len(self.levels) - 1
+
+    def leads_to(self, pos: int, index: int) -> int:
+        """The recorded level a dive from levels[pos] into tile index leads to (-1: none,
+        it would be a new one)."""
+        if pos < 0 or pos >= len(self.picks) or self.picks[pos] != index:
+            return -1
+        if pos + 1 < len(self.levels):
+            return pos + 1
+        return self.loop_start if self.closed else -1
+
+    def branch(self, pos: int, index: int) -> None:
+        """A new dive from levels[pos] into tile index: what followed levels[pos] goes (a
+        loop that started later too; a closed one is open again)."""
+        del self.levels[pos + 1 :], self.picks[pos:]
+        self.picks.append(index)
+        self.closed = False
+        if self.loop_start > pos:
+            self.end_loop()
+
+    def start_loop(self, home: TileView, start: int) -> None:
+        """A loop from home, levels[start] (the next to arrive) being its mosaic."""
+        self.home, self.loop_start, self.closed, self.passes = home, start, False, 0
+
+    def end_loop(self) -> None:
+        """Forget the loop (the levels stay recorded)."""
+        self.home, self.loop_start, self.closed, self.passes = None, -1, False, 0
+
     def lure(self, settings: "InfiniteSettings") -> Lure | None:
-        """The lure for matching the loop's next level (None: before the range)."""
-        number = len(self.levels) + 1
+        """The lure for matching the next level (None: no loop, or before its range)."""
+        if self.home is None:
+            return None
+        number = len(self.levels) - self.loop_start + 1  # within the loop
         low, high = settings.loop_dives
         if number < low:
             return None
         return Lure(self.home, settings.loop_fit / 100.0, force=number >= high,
                     tint=settings.loop_tint / 100.0)  # fmt: skip
-
-    @property
-    def closing(self) -> int:
-        """Index of the level holding home (where the loop closes), or -1."""
-        last = self.levels[-1] if self.levels else None
-        return len(self.levels) - 1 if last is not None and last.home >= 0 else -1
 
 
 __all__ = [
@@ -735,7 +829,7 @@ __all__ = [
     "DIVE",
     "DIVE_THREADS",
     "LIVE",
-    "Loop",
+    "DiveRecord",
     "Lure",
     "MATCHING",
     "MOSAIC",
@@ -744,6 +838,7 @@ __all__ = [
     "InfiniteSession",
     "InfiniteSettings",
     "Level",
+    "RecordedLevel",
     "TileView",
     "blank_picture",
     "centered_crop",

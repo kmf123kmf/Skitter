@@ -99,6 +99,7 @@ class MosaicCanvas(QOpenGLWidget):
         self._animations: list[tuple[Animation, float | None]] = []
         self._released: list[SpriteLayer] = []
         self._staging: list[SpriteLayer] = []  # going up to the GPU a bit each frame (stage)
+        self._reserve: list = []  # (renderer method, its arguments) to run on the next paint
         self._view_token: object | None = None
         self._fbo: moderngl.Framebuffer | None = None
         self._drag_pos: QPointF | None = None
@@ -134,6 +135,20 @@ class MosaicCanvas(QOpenGLWidget):
         if layer not in self._staging and layer not in self.layers:
             self._staging.append(layer)
             self.update()
+
+    def reserve_details(self, side: int, pages: int, count: int) -> None:
+        """Ready count detail page stacks of this size on the next frame, for tile layers
+        to take later without stalling (SpriteRenderer.reserve_details): call it while
+        nothing moves."""
+        self._reserve.append(("reserve_details", (side, pages, count)))
+        self.update()
+
+    def reserve_textures(self, sizes) -> None:
+        """Ready texture stacks of these sizes, (w, h, pages) each, on the next frame, for
+        layers to take later without stalling (SpriteRenderer.reserve_textures): call it
+        while nothing moves."""
+        self._reserve.append(("reserve_textures", (list(sizes),)))
+        self.update()
 
     def unstage(self, layer: SpriteLayer) -> None:
         """Drop a staged layer that won't be added after all (its GPU memory goes)."""
@@ -309,6 +324,9 @@ class MosaicCanvas(QOpenGLWidget):
         for layer in self._released:
             self.renderer.release(layer)
         self._released.clear()
+        for name, args in self._reserve:
+            getattr(self.renderer, name)(*args)
+        self._reserve.clear()
         for layer in list(self._staging):
             if self.renderer.stage(layer):
                 self._staging.remove(layer)

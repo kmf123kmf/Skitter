@@ -11,9 +11,9 @@ from PySide6.QtWidgets import QApplication
 
 from skitter.core.infinite import (
     SOURCE_PX_PER_TILE,
+    DiveRecord,
     InfiniteSession,
     InfiniteSettings,
-    Loop,
     Lure,
     TileView,
     centered_crop,
@@ -242,14 +242,17 @@ def test_a_loop_lures_home_back_within_its_range(library):
                                 loop_fit=10.0, loop_tint=60.0)  # fmt: skip
     session = InfiniteSession(library, settings, seed=7)
     home = session.random_tile()
-    loop = Loop(home)
-    assert loop.lure(settings) is None  # level 1: before the range
+    record = DiveRecord()
+    assert record.lure(settings) is None  # no loop
+    record.start_loop(home, 0)
+    assert record.lure(settings) is None  # level 1: before the range
     first = session.level(session.picture(home), source=home)
-    loop.levels.append(first)
-    lure = loop.lure(settings)  # level 2: in the range, not forced
+    record.add(first)
+    lure = record.lure(settings)  # level 2: in the range, not forced
     assert (lure.tile, lure.tolerance, lure.force, lure.tint) == (home, 0.1, False, 0.6)
-    loop.levels += [first, first]
-    assert loop.lure(settings).force  # level 4: the top, home placed whatever it takes
+    record.add(first)
+    record.add(first)
+    assert record.lure(settings).force  # level 4: the top, home placed whatever it takes
 
     # Forced, home is placed with its exact crop, tinted by its own strength.
     scene = first.scene
@@ -268,6 +271,18 @@ def test_a_loop_lures_home_back_within_its_range(library):
     strict = session.level(picture, lure=Lure(home, 0.0), source=tile)
     assert loose.home >= 0 and (strict.home < 0) == (strict.home_fit > 1.0)
 
+    # Made again from the record, it is the same level: nothing matched, nothing counted.
+    counted = session.levels
+    again = session.rebuild(level.recorded())
+    assert session.levels == counted and again.number == level.number
+    assert again.source == tile and again.home == level.home
+    np.testing.assert_array_equal(again.picture, level.picture)
+    for name in ("slot", "rect", "center", "size", "rotation", "tint_shift", "tile_color"):
+        np.testing.assert_array_equal(getattr(again.scene, name), getattr(level.scene, name))
+    start = session.random_mosaic(1.5)  # a blank canvas's, not a tile's
+    np.testing.assert_array_equal(session.rebuild(start.recorded()).scene.center,
+                                  start.scene.center)  # fmt: skip
+
     # Looking ahead: candidates' levels, home placed first, then by fit; numbered 0 until
     # shown.
     paths = library.paths(scene.slot[[1, 2, 5]])
@@ -279,6 +294,132 @@ def test_a_loop_lures_home_back_within_its_range(library):
     assert keys == sorted(keys) and all(lv.number == 0 for _, lv in ahead)
     numbered = session.number(ahead[0][1])
     assert numbered.number == session.levels
+
+
+def test_a_record_replays_its_dives_and_records_others_from_there():
+    from skitter.core.infinite import RecordedLevel
+
+    def level(n):
+        return RecordedLevel(n, None, None)
+
+    record = DiveRecord([level(1)])
+    assert record.leads_to(0, 4) == -1  # nothing recorded from it yet
+    record.branch(0, 4)
+    record.levels.append(level(2))
+    assert record.leads_to(0, 4) == 1 and record.leads_to(0, 5) == -1
+    record.branch(1, 7)
+    record.start_loop(TileView(9, (0.0, 0.0, 1.0, 1.0)), 2)  # home: levels[2] its mosaic
+    record.levels.append(level(3))
+    record.branch(2, 3)  # the dive into home
+    record.closed = True
+    assert record.leads_to(2, 3) == 2  # back to the loop's first level
+    # Another dive from level 2 drops what followed it, the loop with it.
+    record.branch(1, 8)
+    assert [lv.number for lv in record.levels] == [1, 2] and record.picks == [4, 8]
+    assert record.home is None and not record.closed
+
+
+def test_find_tile_matches_the_exact_crop_only(library):
+    from skitter.core.infinite import find_tile
+
+    session = InfiniteSession(library, InfiniteSettings(columns=6, max_uses=0), seed=3)
+    scene = session.random_mosaic(1.0).scene
+    tile = TileView(int(scene.slot[2]), tuple(float(v) for v in scene.rect[2]))
+    assert find_tile(scene, tile) == int(
+        np.flatnonzero(
+            (scene.slot == tile.slot) & np.all(np.abs(scene.rect - tile.rect) < 1e-5, axis=1)
+        )[0]
+    )
+    assert find_tile(scene, TileView(tile.slot, tile.rect, mirrored=True)) == -1
+    assert find_tile(scene, TileView(tile.slot, (0.0, 0.0, 0.5, 0.5))) == -1
+
+
+# A record's dives as a timeline (core/dive_motion.py)
+
+
+def screen_rect(frame, pos, size):
+    """(offset of its middle from the view's, size), on screen px, of a world rect."""
+    return (np.asarray(pos) - frame.center) * frame.zoom, np.asarray(size) * frame.zoom
+
+
+def made_record(session):
+    """A record of three levels made by diving into each one's tile 0, its loop (from the
+    second) closed by diving from the third into tile 1, with the levels made."""
+    tile = session.random_tile()
+    record, levels = DiveRecord(), []
+    for k in range(3):
+        level = session.level(session.picture(tile), source=tile)
+        levels.append(level)
+        record.add(level)
+        if k == 0:
+            record.branch(0, 0)
+            record.start_loop(
+                TileView(int(level.scene.slot[0]), tuple(float(v) for v in level.scene.rect[0])), 1
+            )
+        else:
+            record.branch(k, 0 if k < 2 else 1)
+        scene = level.scene
+        pick = record.picks[-1]
+        tile = TileView(int(scene.slot[pick]), tuple(float(v) for v in scene.rect[pick]),
+                        bool(scene.mirrored[pick]))  # fmt: skip
+    record.closed = True
+    return record, levels
+
+
+def test_a_timeline_plays_a_record_seamlessly_from_level_to_level(library):
+    from skitter.core.dive_motion import DiveTimeline
+
+    settings = InfiniteSettings(columns=6, max_uses=0, fade_seconds=0.5, dwell_seconds=1.0,
+                                approach_seconds=1.0, pause_seconds=0.5, dive_seconds=1.5,
+                                approach_tiles=3.0, highlight=True)  # fmt: skip
+    session = InfiniteSession(library, settings, seed=5)
+    record, levels = made_record(session)
+    viewport = (1200.0, 800.0)
+    timeline = DiveTimeline(record, settings, viewport)
+    # Each level's 4.5 s, then the loop's way back lands on its first, at rest (1.5 s).
+    assert [s.position for s in timeline.steps] == [0, 1, 2, 1]
+    assert [s.pick for s in timeline.steps] == [0, 0, 1, -1]
+    assert timeline.duration == pytest.approx(3 * 4.5 + 1.5)
+
+    def frame(t):
+        return timeline.frame(t, levels[timeline.position_at(t)])
+
+    for step in timeline.steps[:-1]:
+        t0 = step.start
+        level = levels[step.position]
+        arrival = frame(t0)
+        assert arrival.phase == "fade" and arrival.photo.alpha == 1.0
+        canvas = np.array([level.ctx.width, level.ctx.height])
+        np.testing.assert_allclose(screen_rect(arrival, arrival.photo.pos, arrival.photo.size)[1],
+                                   canvas * min(1200 / canvas[0], 800 / canvas[1]))  # fmt: skip
+        # Phase to phase, the view never jumps.
+        for edge in (0.5, 1.5, 2.5, 3.0):
+            a, b = frame(t0 + edge - 1e-6), frame(t0 + edge + 1e-6)
+            np.testing.assert_allclose(a.center, b.center, atol=1e-2)
+            assert a.zoom == pytest.approx(b.zoom, rel=1e-4)
+        approaching = frame(t0 + 2.0)
+        assert approaching.highlight == step.pick and approaching.highlight_alpha == 1.0
+        # The dive ends with its photo filling the view as the next level's arrival does.
+        end, after = frame(t0 + 4.5 - 1e-9), frame(t0 + 4.5)
+        assert end.phase == "dive" and end.photo.level == step.next == after.position
+        np.testing.assert_allclose(end.photo.pos, levels[step.position].scene.center[step.pick])
+        (off_a, size_a) = screen_rect(end, end.photo.pos, end.photo.size)
+        (off_b, size_b) = screen_rect(after, after.photo.pos, after.photo.size)
+        np.testing.assert_allclose(off_a, 0.0, atol=1e-3)
+        np.testing.assert_allclose(off_b, 0.0, atol=1e-3)
+        np.testing.assert_allclose(size_a, size_b, rtol=1e-3)
+        assert end.photo.alpha == 1.0 and end.photo.rotation == pytest.approx(0.0)
+    rest = frame(timeline.duration + 5.0)  # past the end: at rest on the last
+    assert rest.position == 1 and rest.phase == "dwell" and rest.photo is None
+
+    # One pass of the closed loop: it ends where it starts.
+    loop = DiveTimeline(record, settings, viewport, loop=True)
+    assert [s.position for s in loop.steps] == [1, 2] and loop.duration == pytest.approx(9.0)
+    first, again = loop.frame(0.0, levels[1]), loop.frame(loop.duration, levels[1])
+    assert first.position == again.position == 1 and first.phase == again.phase == "fade"
+    np.testing.assert_allclose(first.center, again.center)
+    with pytest.raises(ValueError):
+        DiveTimeline(DiveRecord(), settings, viewport, loop=True)
 
 
 def test_levels_can_search_with_fewer_threads(library):
@@ -1125,17 +1266,19 @@ def test_auto_dive_loops_back_home_and_replays_each_pass(window, qapp):
     win.set_settings(win.settings)
     win.start_button.click()
     win.set_auto(True)
-    run_auto(win, qapp, 30.0, until=lambda: win.loop is not None and win.loop.closed
-             and win._loop_pos == 0 and not win.busy)  # fmt: skip
-    loop = win.loop
-    assert loop is not None and loop.closed, win.level_label.text()
-    n = len(loop.levels)
-    assert 2 <= n <= 3 and len(loop.picks) == n
-    closing = loop.levels[-1]
-    assert closing.home >= 0 and loop.picks[-1] == closing.home
-    assert closing.scene.slot[closing.home] == loop.home.slot  # home came back
-    assert loop.levels[0].source == loop.home
-    assert win.level is loop.levels[0] and loop.passes == 1  # back at the first level
+    record = win.record
+    run_auto(win, qapp, 30.0, until=lambda: record.closed and win._pos == record.loop_start
+             and not win.busy)  # fmt: skip
+    assert record.closed, win.level_label.text()
+    first = record.loop_start  # the levels before it: the start's, before the loop
+    loop = record.levels[first:]
+    assert 2 <= len(loop) <= 3 and len(record.picks[first:]) == len(loop)
+    closing = loop[-1]
+    assert closing.home >= 0 and record.picks[-1] == closing.home
+    again = win.infinite.rebuild(closing)
+    assert again.scene.slot[closing.home] == record.home.slot  # home came back
+    assert loop[0].source == record.home
+    assert win.level.number == loop[0].number and record.passes == 1  # back at the first
     assert "Loop of" in win.level_label.text()
 
     # Every pass replays the same levels and tiles: nothing is matched again.
@@ -1145,19 +1288,105 @@ def test_auto_dive_loops_back_home_and_replays_each_pass(window, qapp):
     def seen():
         if not visited or visited[-1] is not win.level:
             visited.append(win.level)
-        return loop.passes >= 2 and win._loop_pos == 0
+        return record.passes >= 2 and win._pos == first
 
     run_auto(win, qapp, 30.0, until=seen)
-    assert loop.passes == 2 and win.infinite.levels == matched
-    assert [id(lv) for lv in visited] == [id(lv) for lv in loop.levels + loop.levels[:1]]
+    assert record.passes == 2 and win.infinite.levels == matched
+    assert [lv.number for lv in visited] == [lv.number for lv in loop + loop[:1]]
 
-    # A dive by hand leaves the loop.
+    # A dive by hand elsewhere records from there on: the loop is open again.
     win.set_auto(False)
     run_auto(win, qapp, 10.0, until=lambda: not win.busy)
-    scene = win.level.scene
-    sx, sy = win.canvas.camera.world_to_screen(*scene.center[0])
+    pick = record.picks[win._pos]
+    other = next(i for i in range(len(win.level.scene)) if i != pick)
+    sx, sy = win.canvas.camera.world_to_screen(*win.level.scene.center[other])
     win._on_double_click(float(sx), float(sy))
-    assert win.loop is None and win.dive is not None
+    assert not record.closed and record.picks[win._pos] == other and win.dive is not None
+    assert len(record.levels) == win._pos + 1 and record.home is not None
+
+
+def test_dives_by_hand_are_recorded_and_find_home_to_close_a_loop(window, qapp):
+    win = window
+    win.settings.update(loop=True, loop_dives=(2, 2), fade_seconds=0.05)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+
+    def dive(index):
+        sx, sy = win.canvas.camera.world_to_screen(*win.level.scene.center[index])
+        win._on_double_click(float(sx), float(sy))
+        run_animations(win.canvas, 2.0)  # the dive
+        wait_for_level(win, qapp)  # matched, or made again from the record
+        run_animations(win.canvas, 2.0)  # the photo fades into the mosaic
+
+    record = win.record
+    assert len(record.levels) == 1 and win._pos == 0  # the start
+    dive(0)  # home
+    assert record.home is not None and record.loop_start == 1 and win._pos == 1
+    dive(0)  # the loop's level 2, the top of its range: home placed whatever it takes
+    level = win.level
+    assert level.home >= 0 and win._highlight is not None  # outlined, for the hand to find
+    matched = win.infinite.levels
+    dive(level.home)  # back to the loop's first level, made again from the record
+    assert record.closed and win._pos == 1 and record.passes == 1
+    assert win.infinite.levels == matched and win.level.number == record.levels[1].number
+    dive(record.picks[1])  # where the record went: replayed
+    assert win._pos == 2 and win.infinite.levels == matched
+
+
+def test_the_timeline_dives_where_auto_dive_does_live(window, qapp):
+    """A record's timeline, from the same functions as the live window: each dive starts
+    from the view the live approach ended on, and lands where the live dive did."""
+    from skitter.core.dive_motion import DiveTimeline
+
+    win = window
+    win.settings.update(start="mosaic", dwell_seconds=0.0, approach_seconds=0.2,
+                        pause_seconds=0.0, dive_seconds=0.3, fade_seconds=0.05,
+                        approach_tiles=2.0)  # fmt: skip
+    win.set_settings(win.settings)
+    win.start_button.click()
+    starts, landings = [], []  # (record position, view center, zoom)
+    dive_into, arrive = win.dive_into, win._arrive
+
+    def diving(index, *args, **kwargs):
+        cam = win.canvas.camera
+        starts.append((win._pos, index, cam.center.copy(), float(cam.zoom)))
+        dive_into(index, *args, **kwargs)
+
+    def arriving(level):
+        cam = win.canvas.camera
+        landings.append((win._pos, cam.center.copy(), float(cam.zoom)))  # the dive's end
+        arrive(level)
+
+    win.dive_into, win._arrive = diving, arriving
+    win.set_auto(True)
+    run_auto(win, qapp, 30.0, until=lambda: len(win.record.levels) >= 3)
+    win.set_auto(False)
+    run_auto(win, qapp, 10.0, until=lambda: not win.busy)
+    record, settings = win.record, win.settings
+    timeline = DiveTimeline(record, settings, win.canvas.camera.viewport)
+    lead = sum(
+        float(getattr(settings, name))
+        for name in ("fade_seconds", "dwell_seconds", "approach_seconds", "pause_seconds")
+    )
+    checked = 0
+    for (pos, index, center, zoom), (_, end_center, end_zoom) in zip(starts, landings,
+                                                                    strict=False):  # fmt: skip
+        if pos + 1 >= len(record.levels):
+            continue  # its level isn't recorded yet
+        step = timeline.steps[pos]
+        assert step.position == pos and step.pick == index
+        level = win.infinite.rebuild(record.levels[pos])
+        start = timeline.frame(step.start + lead, level)
+        assert start.phase == "dive"
+        np.testing.assert_allclose(start.center, center, rtol=1e-5)
+        assert start.zoom == pytest.approx(zoom, rel=1e-5)
+        end = timeline.frame(step.start + lead + float(settings.dive_seconds) - 1e-9, level)
+        np.testing.assert_allclose(end.center, end_center, rtol=1e-4)
+        assert end.zoom == pytest.approx(end_zoom, rel=1e-4)
+        checked += 1
+    assert checked >= 2
 
 
 def test_input_on_the_mosaic_or_esc_stops_auto_dive(window, qapp):

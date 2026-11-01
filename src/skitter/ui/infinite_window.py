@@ -52,7 +52,7 @@ appears (core/dive_path.py's FlowPath: one leg per mosaic), while that
 tile's photo is read and its mosaic made in the background (`_flow_match`),
 its layers built and staged to the GPU ahead (`_flow_prepare`,
 `_build_layer`). As the tile grows its photo fades in over it, then into
-its own mosaic, drawn inside it (its tiles placed on the tile, `_moved`),
+its own mosaic, drawn inside it (its tiles placed on the tile, `moved`),
 done when the tile fills Mosaic appears at of the view. When the tile
 fills the view that mosaic takes over in its own world, looking just the
 same (`_flow_arrive`); the last one goes into that world too, under it,
@@ -60,14 +60,20 @@ and fades out. A mosaic not made in time slows the zoom to a stop where
 its photo would start to show, until it is. Loops are made in steps only
 (for now).
 
-With Loop on, auto-dive comes back to where it started (core/infinite.py's
-Loop): the first tile it dives into is home; from the bottom of the range
-on, while each mosaic dwells, several tiles' mosaics are made ahead
-(`_look_ahead`) and it dives into the one home fits best, already matched;
-once a level holds home it heads there, and that dive lands on the loop's
-first level. From then on every pass replays the same levels and tiles, so
-one pass is a seamless loop. A manual dive, Stop, New Start or turning Loop
-off drops the loop.
+Every session is recorded (`record`, core/infinite.py's DiveRecord), dives by
+hand and auto-dive's alike. In steps a dive the record has is replayed: its
+level made again from the record, nothing matched (`_dive`); any other is
+recorded from there on. Stop and New Start begin a new record.
+
+With Loop on, dives come back to where they started: the first tile dived
+into is home; from the bottom of the range on each level lures it back, and
+where a level holds it, it is outlined once the mosaic shows (by hand: find
+it). Auto-dive, while each mosaic dwells, makes several tiles' mosaics ahead
+(`_look_ahead`) and dives into the one home fits best, already matched; once
+a level holds home it heads there. The dive into home lands on the loop's
+first level, and from then on every pass replays the same levels and tiles,
+so one pass is a seamless loop. Diving elsewhere opens it again from there;
+turning Loop off forgets it (its levels stay recorded).
 """
 
 import json
@@ -90,8 +96,20 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from skitter.core.dive_motion import (
+    FADE_ZOOM,
+    DiveMotion,
+    approach_zoom,
+    fade,
+    fade_out,
+    flow_fades,
+    flow_shares,
+    glide,
+    last_fade,
+    moved,
+)
 from skitter.core.dive_path import CENTER_FIRST, MIN_SECONDS, FlowPath, View, flow_rate
-from skitter.core.dive_styles import DiveStyle, DiveTiles, dive_seed, pick_style
+from skitter.core.dive_styles import DiveStyle, dive_seed, pick_style
 from skitter.core.easing import ease_in_out_cubic
 from skitter.core.infinite import (
     AUTO,
@@ -100,11 +118,12 @@ from skitter.core.infinite import (
     LIVE,
     MATCHING,
     MOSAIC,
+    DiveRecord,
     InfiniteSession,
     InfiniteSettings,
     Level,
-    Loop,
     Lure,
+    RecordedLevel,
     TileView,
     display_copy,
     pick_weights,
@@ -117,8 +136,14 @@ from skitter.ui import preferences
 from skitter.ui.canvas import MosaicCanvas
 from skitter.ui.jobs import Job
 from skitter.ui.library_panel import LibraryPanel
+from skitter.ui.render.atlas import PAGE as ATLAS_PAGE
 from skitter.ui.render.sprites import SpriteLayer, make_instances
-from skitter.ui.render.tile_textures import TileTextures, detail_request, thumbnail_atlas
+from skitter.ui.render.tile_textures import (
+    DETAIL_PAGE,
+    TileTextures,
+    detail_request,
+    thumbnail_atlas,
+)
 from skitter.ui.render.zoom_detail import DETAIL_PAGES, DETAIL_SIDE, ZoomDetail
 from skitter.ui.steps.base import side_panel, view_and_panel
 from skitter.ui.steps.tile_picker import upper_closure
@@ -127,23 +152,17 @@ from skitter.ui.widgets.param_form import ParamForm
 
 SETTINGS_KEY = "infinite/settings"  # preferences: the last session's settings (JSON)
 PLAN_KEY = "infinite/plan"  # and its slicers' settings
-PHOTO_IN = 0.2  # share of the dive over which the photo fades in over its tile
 WHOLE = 0.98  # a tile showing this much of itself lies on top (auto-dive prefers those)
 PIXELATE_ABOVE = 4.0  # texels this large show as squares (not while diving: tiles blow up)
 LIBRARY_TAB = 1  # the panel's tabs: Settings, Library
 LIBRARY_LOCKED = "A session searches the photos it started with: stop it to change them."
 START_TIP = "Start a session from a random photo of the library."
-# Continuous auto-dive. As the tile it heads for grows, the tile's photo fades in over it,
-# then fades into its own mosaic, drawn inside it: each over FADE_ZOOM of zoom, done when
-# the tile fills Mosaic appears at of the view. After the switch, the last mosaic (around
-# and under the new one) stays until the new one covers the view, then fades out of its gaps
-# over LAST_OUT_ZOOM. A leg
-# slows to a stop (over EASE_SECONDS) where the photo would start to show if the next
-# mosaic isn't made by then. Continuously by hand, the view creeps in between legs, at the
-# same rate, slowing to a stop CREEP_ROOM of zoom before a base tile would start to show
-# its photo, so a leg into one has time to make its mosaic.
-FADE_ZOOM = 1.8
-LAST_OUT_ZOOM = 1.6
+# Continuous auto-dive (the fades: core/dive_motion.py). After the switch, the last mosaic
+# (around and under the new one) stays until the new one covers the view, then fades out of
+# its gaps. A leg slows to a stop (over EASE_SECONDS) where the photo would start to show if
+# the next mosaic isn't made by then. Continuously by hand, the view creeps in between legs,
+# at the same rate, slowing to a stop CREEP_ROOM of zoom before a base tile would start to
+# show its photo, so a leg into one has time to make its mosaic.
 EASE_SECONDS = 1.0
 CREEP_ROOM = FADE_ZOOM
 CREEP_STATUS = "Double-click a tile to head into it (drag to steer)."
@@ -182,25 +201,14 @@ def save_settings(settings: InfiniteSettings, plan: SlicingPlan) -> None:
     prefs.setValue(PLAN_KEY, json.dumps(plan.to_dict()))
 
 
-class _Dive:
-    """What a dive into tile `index` starts from."""
+class _Dive(DiveMotion):
+    """A dive into tile `index` (its motion: core/dive_motion.py), and what it makes."""
 
     def __init__(self, index: int, layer: SpriteLayer, canvas: MosaicCanvas, end_zoom: float,
                  style: DiveStyle, seed: int):  # fmt: skip
-        tiles = layer.instances
-        self.index = index
-        self.pos = tiles["pos"].astype(np.float64)
-        self.center = self.pos[index].copy()
-        self.rotation = float(tiles["rotation"][index])
-        self.offset = tiles["offset"][index].copy()
-        self.size = tiles["size"][index].copy()
         cam = canvas.camera
-        self.zoom0, self.zoom1 = float(cam.zoom), float(end_zoom)
-        self.screen0 = (self.center - cam.center) * cam.zoom  # the tile's offset on screen
-        self.style = style  # how the other tiles leave
-        self.tiles = DiveTiles(self.pos, tiles["size"], tiles["rotation"], tiles["alpha"], index,
-                               cam.viewport / self.zoom0, cam.viewport / self.zoom1, seed,
-                               cam.turn((0.0, 1.0)))  # fmt: skip
+        super().__init__(layer.instances, index, cam.center, cam.zoom, cam.viewport,
+                         cam.turn((0.0, 1.0)), end_zoom, style, seed)  # fmt: skip
         self.matched: Level | None = None  # the next level, once matched
         self.done = False  # the animation has finished
         # The next level's, made while the dive goes on (see _dive_matched).
@@ -235,25 +243,6 @@ class _Flow:
         self.inside: np.ndarray | None = None  # the next level's tiles within its canvas
 
 
-def _fade(x: float) -> float:
-    """0 to 1, eased, for x from 0 to 1 (clamped)."""
-    return float(ease_in_out_cubic(min(max(x, 0.0), 1.0)))
-
-
-def _moved(instances: np.ndarray, origin, to, scale: float, turn: float) -> np.ndarray:
-    """Sprite instances moved from one world to another: what was at origin goes to `to`,
-    scaled and turned (radians) about it."""
-    moved = instances.copy()
-    c, s = math.cos(turn), math.sin(turn)
-    offset = (instances["pos"].astype(np.float64) - origin) * scale
-    moved["pos"] = np.asarray(to) + np.stack(
-        [c * offset[:, 0] - s * offset[:, 1], s * offset[:, 0] + c * offset[:, 1]], axis=1
-    )
-    moved["size"] = instances["size"] * scale
-    moved["rotation"] = instances["rotation"] + turn
-    return moved
-
-
 class InfiniteWindow(QWidget):
     """Infinite Mosaic, on the app session's library (and its matcher's indexes)."""
 
@@ -276,9 +265,9 @@ class InfiniteWindow(QWidget):
         self._job_started = 0.0
         # A dive's (picture, lure, tile), matched once prepared
         self._queued: tuple[np.ndarray, Lure | None, TileView] | None = None
-        self.loop: Loop | None = None  # auto-dive's loop, recording or replaying
-        self._loop_pos = -1  # the shown level's index in loop.levels (-1: not in it)
-        self._loop_next = -1  # where the dive under way lands in it (-1: a new level)
+        self.record = DiveRecord()  # the session's dives (see the module docstring)
+        self._pos = -1  # the shown level's index in record.levels (-1: none yet)
+        self._next = -1  # where the dive under way lands in it (-1: a new level)
         self._ahead: list[tuple[int, Level]] | None = None  # look-ahead's, for self.level
         # Jobs have no parent (it would keep each, and its inputs, for the window's life):
         # the last two are kept here, so each goes once a later one has started.
@@ -494,6 +483,13 @@ class InfiniteWindow(QWidget):
         self._pool = ProcessPoolExecutor(os.cpu_count())
         for _ in range(os.cpu_count() or 1):  # start the workers while the first level matches
             self._pool.submit(int)
+        # Detail pages for the levels' tile layers, readied before anything moves: one made
+        # mid-dive stalled a frame about 45 ms (see sprites.SPARE_DETAILS).
+        self.canvas.reserve_details(DETAIL_SIDE, DETAIL_PAGES, 3)
+        # Likewise the stacks of levels' tile layers: two for full-size tiles (1 or 2 pages:
+        # a 1-page layer takes a 2-page stack), one for thumbnails (see sprites.SPARE_TEXTURES).
+        full, thumbs = (DETAIL_PAGE, DETAIL_PAGE, 2), (ATLAS_PAGE, ATLAS_PAGE, 1)
+        self.canvas.reserve_textures([full, full, thumbs])
         self.new_start()
 
     def new_start(self) -> None:
@@ -501,7 +497,7 @@ class InfiniteWindow(QWidget):
         if not self.can_start_anew:
             return
         self._cancel_auto_step()
-        self._drop_loop()
+        self._new_record()
         if self.settings.start == "mosaic":
             self._start_mosaic()
         else:
@@ -511,11 +507,13 @@ class InfiniteWindow(QWidget):
     def _start_photo(self) -> None:
         self._clear_level()
         self.level = None
-        picture = self.infinite.picture(self.infinite.random_tile())
+        tile = self.infinite.random_tile()
+        picture = self.infinite.picture(tile)
         width, height = CANVAS_WIDTH, CANVAS_WIDTH * picture.shape[0] / picture.shape[1]
         self._show_photo(picture, (width / 2, height / 2), (width, height), 0.0, 1.0)
         self.canvas.fit_to(0, 0, width, height)
-        self._match(picture, "first", "Preparing tiles (the first level takes longest)…")
+        self._match(picture, "first", "Preparing tiles (the first level takes longest)…",
+                    None, tile)  # fmt: skip
 
     def _start_mosaic(self) -> None:
         if self.photo_layer is not None:
@@ -524,6 +522,7 @@ class InfiniteWindow(QWidget):
         width, height = self.canvas.width(), self.canvas.height()
         level = self.infinite.random_mosaic(width / height if width > 0 and height > 0 else 1.5)
         self._show_level(level)
+        self._record_arrived(level)
         self.level_label.setText(f"Random mosaic: {len(level.scene):,} tiles")
         if self._job is None:  # once prepared, only its variety is new (the rest is cached)
             self._prepare()
@@ -537,7 +536,7 @@ class InfiniteWindow(QWidget):
             self._job.cancel()
             self._job.wait()
             self._job = None
-        self._drop_loop()
+        self._new_record()
         if self.dive is not None:
             self._discard_dive(self.dive)
         self.dive = None
@@ -688,7 +687,7 @@ class InfiniteWindow(QWidget):
         self._show_level(level, textures, layer)
         if layer is not None and dive.layer_pages is not textures.pages:
             self._on_textures_changed()  # its full-size tiles came while it was built
-        self._loop_arrived(level)
+        self._record_arrived(level)
         self.status.setText("Ready.")
         show_progress(self.progress, 1.0)
         self._show_sub(False)
@@ -744,15 +743,16 @@ class InfiniteWindow(QWidget):
         def step(t: float) -> bool:
             if self._fade_token is not token:
                 return False
-            e = 1.0 if duration <= 0 else min(t / duration, 1.0)
-            layer.instances["alpha"] = 1.0 - e
+            alpha = fade_out(t, duration)
+            layer.instances["alpha"] = alpha
             layer.mark_dirty()
-            if e < 1.0:
+            if alpha > 0:
                 return True
             layer.visible = False
             self._fade_token = None
             self._locked = False
             self._refresh()
+            self._mark_home()
             self._auto_next()
             return False
 
@@ -775,11 +775,10 @@ class InfiniteWindow(QWidget):
             return
         index = self.tile_at(*self.canvas.camera.screen_to_world(sx, sy))
         if index >= 0:
-            self._drop_loop()  # loops are auto-dive's: a dive by hand leaves it
             if self.settings.motion == "flow":
                 self._flow_into(index)
             else:
-                self.dive_into(index)
+                self._dive(index)
 
     def tile_view(self, index: int) -> TileView:
         """Tile index of the shown level, as a TileView."""
@@ -787,11 +786,12 @@ class InfiniteWindow(QWidget):
         return TileView(int(scene.slot[index]), tuple(float(v) for v in scene.rect[index]),
                         bool(scene.mirrored[index]))  # fmt: skip
 
-    def dive_into(self, index: int, next_level: Level | None = None,
-                  lure: Lure | None = None) -> None:  # fmt: skip
+    def dive_into(self, index: int, next_level: Level | None = None, lure: Lure | None = None,
+                  recorded: RecordedLevel | None = None) -> None:  # fmt: skip
         """Dive into tile index of the level: its photo becomes the next one. next_level:
-        already made (a loop's, a look-ahead's): shown when the dive ends, nothing is
-        matched. Else it is matched meanwhile, with lure (a loop's home) if given."""
+        already made (a look-ahead's): shown when the dive ends, nothing is matched;
+        recorded: made again meanwhile from the record (replaying), nothing matched. Else it
+        is matched meanwhile, with lure (a loop's home) if given. The record is _dive's."""
         infinite = self.infinite
         tile = self.tile_view(index)
         picture = infinite.picture(tile)
@@ -808,6 +808,8 @@ class InfiniteWindow(QWidget):
         self._locked = True
         if next_level is not None:
             self._dive_matched(next_level)
+        elif recorded is not None:
+            self._rebuild(recorded)
         elif self._job is not None:  # preparing (a random mosaic's start): match once ready
             self._queued = picture, lure, tile
             self.status.setText("Preparing tiles: this dive matches once they are ready…")
@@ -835,29 +837,12 @@ class InfiniteWindow(QWidget):
     def _dive_frame(self, e: float) -> None:
         """The dive at e (0 to 1): the tile straightens, untints and fills the view while
         the other tiles leave the view (Tiles leave by: the dive's style)."""
-        dive, canvas = self.dive, self.canvas
-        m = float(ease_in_out_cubic(e))
-        tiles = self.tile_layer.instances
-        frame = dive.style.frame(dive.tiles, e)
-        tiles["pos"], tiles["size"] = frame.pos, frame.size
-        tiles["rotation"], tiles["alpha"] = frame.rotation, frame.alpha
-        if frame.shade is not None:
-            tiles["tint"][:, :3] = 0.0
-            tiles["tint"][:, 3] = frame.shade
-            tiles["tint"][dive.index] = 0.0
-        i = dive.index
-        tiles["pos"][i], tiles["size"][i] = dive.center, dive.size
-        tiles["alpha"][i] = dive.tiles.alpha[i]
-        tiles["rotation"][i] = dive.rotation * (1 - m)
-        tiles["offset"][i] = dive.offset * (1 - m)
+        view = self.dive.frame(e, self.tile_layer.instances)
         self.tile_layer.mark_dirty()
         photo = self.photo_layer.instances
-        photo["rotation"] = dive.rotation * (1 - m)
-        photo["alpha"] = min(e / PHOTO_IN, 1.0)
+        photo["rotation"], photo["alpha"] = view.photo_rotation, view.photo_alpha
         self.photo_layer.mark_dirty()
-        zoom = dive.zoom0 * (dive.zoom1 / dive.zoom0) ** m  # geometric: even zoom speed
-        # The tile moves on screen from where it was to the middle as the view zooms.
-        canvas.set_view(dive.center - dive.screen0 * (1 - m) / zoom, zoom)
+        self.canvas.set_view(view.center, view.zoom)
 
     def _dive_matched(self, level: Level) -> None:
         """The dive's next level is made: while the dive goes on, its thumbnails are packed
@@ -1000,9 +985,10 @@ class InfiniteWindow(QWidget):
         cam = canvas.camera
         center = self.level.scene.center[index].astype(np.float64)
         tile_width = float(self.level.ctx.tile_size[0])
-        across = cam.viewport[0] / (float(settings.approach_tiles) * tile_width)
         zoom0 = float(cam.zoom)
-        zoom1 = float(np.clip(max(across, zoom0), cam.min_zoom, cam.max_zoom))  # never out
+        zoom1 = approach_zoom(float(cam.viewport[0]), tile_width, float(settings.approach_tiles),
+                              zoom0)  # fmt: skip
+        zoom1 = float(np.clip(zoom1, cam.min_zoom, cam.max_zoom))
         screen0 = (center - cam.center) * zoom0
         duration = float(settings.approach_seconds)
         if settings.highlight:
@@ -1014,9 +1000,7 @@ class InfiniteWindow(QWidget):
             if token is not self._auto_token:
                 return False  # stopped: the view stays where it got to
             e = 1.0 if duration <= 0 else min(t / duration, 1.0)
-            m = float(ease_in_out_cubic(e))
-            zoom = zoom0 * (zoom1 / zoom0) ** m
-            canvas.set_view(center - screen0 * (1 - m) / zoom, zoom)
+            canvas.set_view(*glide(center, screen0, zoom0, zoom1, float(ease_in_out_cubic(e))))
             if self._highlight is not None:
                 self._highlight.instances["alpha"] = min(1.0, 2 * e)
                 self._highlight.mark_dirty()
@@ -1033,10 +1017,7 @@ class InfiniteWindow(QWidget):
         if token is not self._auto_token or self.busy or self.level is None:
             return
         self._auto_token = None
-        if self.settings.loop:
-            self._loop_dive(index)
-        else:
-            self.dive_into(index)
+        self._dive(index)
 
     # Continuous auto-dive
 
@@ -1118,6 +1099,8 @@ class InfiniteWindow(QWidget):
         hand: double-clicked), or one picked now."""
         if index is None:
             index = self.pick_tile()
+        self.record.branch(self._pos, index)  # legs are recorded, never replayed (for now)
+        self._next = -1
         scene, cam, settings = level.scene, self.canvas.camera, self.settings
         size = scene.size[index].astype(np.float64)
         _, end_zoom = cam.fit_params(0, 0, *size, margin=self.canvas.fit_margin)
@@ -1269,16 +1252,8 @@ class InfiniteWindow(QWidget):
         self._flow_frame()
 
     def _flow_shares(self, path: FlowPath) -> tuple[float, float]:
-        """The tile's shares of the view where its photo starts to fade in, and where its
-        mosaic has taken over (Mosaic appears at). A tile already larger than the first at
-        the leg's start (few columns, a large tile) starts there, its mosaic later."""
-        last = float(self.settings.flow_mosaic) / 100
-        first = last / FADE_ZOOM**2
-        start = path.tile_share(0.0)
-        if start > first:
-            first, last = start, min(max(last, start * FADE_ZOOM**2), 1.0)
-            first = min(first, last / 1.01)  # some zoom for the fades, however little
-        return first, last
+        """core/dive_motion.py's flow_shares at this session's Mosaic appears at."""
+        return flow_shares(path, float(self.settings.flow_mosaic) / 100)
 
     def _creep(self, dt: float) -> None:
         """By hand, between legs: the view zooms on in about its middle (dragging steers
@@ -1327,9 +1302,8 @@ class InfiniteWindow(QWidget):
             self._last_zoom, self._last_clock = zoom, 0.0
         if last is not None and self._last_zoom is not None:  # under it: its gaps
             rate = flow_rate(int(self.settings.columns), float(self.settings.flow_seconds))
-            zoomed = max(math.log(max(zoom / self._last_zoom, 1.0)), rate * self._last_clock)
-            gone = zoomed / math.log(LAST_OUT_ZOOM)
-            last.instances["alpha"] = self._last_alpha * (1.0 - _fade(gone))
+            gone = last_fade(zoom / self._last_zoom, self._last_clock, rate)
+            last.instances["alpha"] = self._last_alpha * (1.0 - fade(gone))
             last.mark_dirty()
             if gone >= 1.0:
                 canvas.remove_layer(last)
@@ -1362,11 +1336,7 @@ class InfiniteWindow(QWidget):
             self._flow_full_in(flow)
         if flow.photo is None or flow.layer is None:
             return
-        first, done = self._flow_shares(path)
-        share = math.log(path.tile_share(u))
-        step = math.log(done / first) / 2  # each fade's zoom (FADE_ZOOM, if there's room)
-        photo_in = _fade((share - math.log(first)) / step)
-        mosaic_in = _fade((share - math.log(first) - step) / step)
+        photo_in, mosaic_in = flow_fades(path, u, float(self.settings.flow_mosaic) / 100)
         if photo_in <= 0:
             return
         if not flow.placed:
@@ -1393,7 +1363,7 @@ class InfiniteWindow(QWidget):
         flow.inside = np.all(lo >= -1e-6, axis=1) & (hi[:, 0] <= ctx.width + 1e-6) & (
             hi[:, 1] <= ctx.height + 1e-6)  # fmt: skip
         layer = flow.layer
-        layer.instances = _moved(layer.instances, (ctx.width / 2, ctx.height / 2),
+        layer.instances = moved(layer.instances, (ctx.width / 2, ctx.height / 2),
                                  scene.center[i], scale, float(scene.rotation[i]))  # fmt: skip
         layer.instances["alpha"] = 0.0
         layer.mark_dirty()
@@ -1437,7 +1407,7 @@ class InfiniteWindow(QWidget):
         # This level's tiles go into the next one's world, around and under its tiles.
         self.zoom_detail.show(None, None, None)
         last = self.tile_layer
-        last.instances = _moved(last.instances, scene.center[i], center, scale, -turn)
+        last.instances = moved(last.instances, scene.center[i], center, scale, -turn)
         last.mark_dirty()
         self._last_layer, self._last_alpha = last, last.instances["alpha"].copy()
         if self.textures is not None:
@@ -1455,6 +1425,7 @@ class InfiniteWindow(QWidget):
         layer.instances["alpha"] = native["alpha"]
         layer.mark_dirty()
         self.level, self.textures, self.tile_layer = level, textures, layer
+        self._record_arrived(level)
         textures.changed.connect(self._on_textures_changed)
         if flow.full is not None:  # its full-size tiles, staging: swapped in once up
             self._tile_swap = flow.full
@@ -1479,21 +1450,59 @@ class InfiniteWindow(QWidget):
         self._flow.u = over / max(self._flow.path.seconds, MIN_SECONDS)
         self._flow_frame()
 
-    # Loops
+    # The record and loops
+
+    def _rebuild(self, entry: RecordedLevel) -> None:
+        """Make a recorded level again in the background (replaying a dive: nothing is
+        matched; its photo is read again)."""
+        infinite = self.infinite
+        path = None if entry.source is None else infinite.library.paths([entry.source.slot])[0]
+
+        def work(progress, cancelled):
+            return infinite.rebuild(entry, path)
+
+        self._start_job(work, "dive", "Replaying the next level…", self._on_matched)
+
+    def _dive(self, index: int) -> None:
+        """Dive (in steps) into tile index of the shown level, as the record has it: a dive
+        it recorded is replayed; any other is recorded from here on (what followed goes).
+        With Loop on, the first recorded so is home's; in the loop's range levels lure it
+        back, and diving into it closes the loop."""
+        record, pos = self.record, self._pos
+        then = record.leads_to(pos, index)
+        if then >= 0:
+            self._next = then
+            self.dive_into(index, recorded=record.levels[then])
+            return
+        closing = self._recording() and index == self.level.home
+        record.branch(pos, index)
+        self._next = -1
+        if self.settings.loop and record.home is None:  # the loop starts: this tile is home
+            record.start_loop(self.tile_view(index), pos + 1)
+        elif closing:  # home: back to the loop's first level
+            record.closed = True
+            self._next = record.loop_start
+            self.dive_into(index, recorded=record.levels[record.loop_start])
+            return
+        ahead = dict(self._ahead or ())
+        if index in ahead:
+            self.dive_into(index, next_level=self.infinite.number(ahead[index]))
+        else:
+            self.dive_into(index, lure=record.lure(self.settings))
 
     def _recording(self) -> bool:
         """A loop is being recorded from the shown level (its latest)."""
-        loop = self.loop
-        return (loop is not None and not loop.closed
-                and self._loop_pos == len(loop.levels) - 1 >= 0)  # fmt: skip
+        record = self.record
+        return (record.home is not None and not record.closed
+                and record.loop_start <= self._pos == len(record.levels) - 1)  # fmt: skip
 
     def _next_tile(self) -> int:
         """Auto-dive's next tile: a loop's (replayed, home, or the look-ahead's best), or
         one picked in view."""
-        loop = self.loop
-        if self.settings.loop and loop is not None and self._loop_pos >= 0:
-            if loop.closed:
-                return loop.picks[self._loop_pos]
+        record, pos = self.record, self._pos
+        if self.settings.loop and record.home is not None and pos >= record.loop_start:
+            if record.closed and pos < len(record.picks):
+                return record.picks[pos]
             if self.level.home >= 0:
                 return self.level.home  # home is back: diving there closes the loop
             if self._ahead is not None:
@@ -1503,11 +1512,11 @@ class InfiniteWindow(QWidget):
     def _look_ahead(self) -> None:
         """While recording a loop in its range: match several candidate tiles' mosaics
         (in the background) to dive into the one home fits best."""
-        loop = self.loop
+        record = self.record
         if (not self.settings.loop or not self._recording() or self._ahead is not None
                 or self.level.home >= 0 or self._job is not None):  # fmt: skip
             return
-        lure = loop.lure(self.settings)
+        lure = record.lure(self.settings)
         if lure is None:  # before the range: dives are as usual
             return
         picks: list[int] = []
@@ -1528,69 +1537,56 @@ class InfiniteWindow(QWidget):
 
         def done(results) -> None:
             self._job = None
-            if self.level is level and self.loop is loop:
+            if self.level is level and self.record is record:
                 self._ahead = results
             self._refresh()
 
         self._start_job(work, "ahead", "Auto-dive: looking ahead…", done)
 
-    def _loop_dive(self, index: int) -> None:
-        """Auto-dive's dive with Loop on: start the loop, record it, close it, or replay."""
-        loop = self.loop
-        if loop is None or self._loop_pos < 0:  # it starts: this tile is home
-            self.loop = loop = Loop(self.tile_view(index))
-            self._loop_pos, self._loop_next = -1, -1
-            self.dive_into(index, lure=loop.lure(self.settings))  # level 1 (1: itself)
-            return
-        pos = self._loop_pos
-        if loop.closed:  # replaying
-            self._loop_next = (pos + 1) % len(loop.levels)
-            self.dive_into(index, next_level=loop.levels[self._loop_next])
-            return
-        loop.picks.append(index)
-        if index == self.level.home:  # home: back to the loop's first level
-            loop.closed = True
-            self._loop_next = 0
-            self.dive_into(index, next_level=loop.levels[0])
-            return
-        ahead = dict(self._ahead or ())
-        self._loop_next = -1
-        if index in ahead:
-            self.dive_into(index, next_level=self.infinite.number(ahead[index]))
-        else:
-            self.dive_into(index, lure=loop.lure(self.settings))
-
-    def _loop_arrived(self, level: Level) -> None:
-        """Keep the loop's books on arriving at a level (and say where it is)."""
+    def _record_arrived(self, level: Level) -> None:
+        """Keep the record's books on arriving at a level (and say where a loop is)."""
         self._ahead = None
-        loop = self.loop
-        if loop is None:
+        record = self.record
+        if self._next >= 0:  # a recorded level, again
+            if record.closed and self._next == record.loop_start and self._next <= self._pos:
+                record.passes += 1  # come round
+            self._pos = self._next
+        else:  # a new one
+            self._pos = record.add(level)
+        self._next = -1
+        if record.home is None or self._pos < record.loop_start:
             return
-        if self._loop_next >= 0:  # a level of the loop, again
-            self._loop_pos = self._loop_next
-            if self._loop_pos == 0:
-                loop.passes += 1
-        else:  # recorded now
-            loop.levels.append(level)
-            self._loop_pos = len(loop.levels) - 1
-        self._loop_next = -1
-        n = len(loop.levels)
-        if loop.closed:
-            text = f"Loop of {n} dives: level {self._loop_pos + 1} (pass {loop.passes + 1})"
+        n, at = len(record.levels) - record.loop_start, self._pos - record.loop_start + 1
+        if record.closed:
+            text = f"Loop of {n} dives: level {at} (pass {record.passes + 1})"
         else:
             text = f"Loop: level {n}, recording"
             if level.home >= 0:
                 text += f"; home is back (fits {level.home_fit - 1:+.0%} on its spot's best)"
         self.level_label.setText(text)
 
+    def _mark_home(self) -> None:
+        """Outline home where the shown level holds it while a loop is being recorded."""
+        level = self.level
+        if self._recording() and level is not None and level.home >= 0 and self._highlight is None:
+            self._show_highlight(level.home)
+            self._highlight.instances["alpha"] = 1.0
+            self._highlight.mark_dirty()
+
     def _drop_loop(self) -> None:
+        """Forget the loop (its levels stay recorded)."""
         if self._job is not None and self._job_kind == "ahead":
             self._job.cancel()
             self._job.wait()
             self._job = None
-        self.loop = None
-        self._loop_pos = self._loop_next = -1
+        self.record.end_loop()
         self._ahead = None
+
+    def _new_record(self) -> None:
+        """Begin a new record (a new start, or the session's end)."""
+        self._drop_loop()
+        self.record = DiveRecord()
+        self._pos = self._next = -1
 
     def _show_highlight(self, index: int) -> None:
         self._remove_highlight()

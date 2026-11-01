@@ -1,13 +1,13 @@
 # Agent notes
 
 ## Environment
-- Python 3.11–3.14 only (faiss-cpu lacks 3.15 wheels). The venv is `.venv` (Python 3.11).
-- PowerShell: run tools from the venv directly, e.g. `.venv\Scripts\python.exe -m pytest -q`.
+- Python 3.11–3.14 only (faiss-cpu lacks 3.15 wheels). The venv in use is `.venv314` (Python 3.14): run, test and measure there. `.venv` (Python 3.11) is the oldest supported version, kept for checking it still works.
+- PowerShell: run tools from the venv directly, e.g. `.venv314\Scripts\python.exe -m pytest -q`.
 
 ## Verify
-- `.venv\Scripts\python.exe -m pytest -q -n 8` (headless; Qt runs offscreen; in parallel with pytest-xdist, about 45 s; about 110 s without `-n`). Tests run in separate worker processes, so each must set up its own state (no reliance on test order); a worker runs many tests, so `gc.get_objects()` counts include other tests' objects (filter to your own).
-- `.venv\Scripts\ruff.exe check .` and `.venv\Scripts\ruff.exe format --check .`
-- Matching at scale: `.venv\Scripts\python.exe scripts\bench_matching.py`
+- `.venv314\Scripts\python.exe -m pytest -q` (headless; Qt runs offscreen; about 125 s). `-n 8` runs it in parallel (about 55 s) where pytest-xdist is installed: `.venv` has it, `.venv314` doesn't yet. Tests run in separate worker processes, so each must set up its own state (no reliance on test order); a worker runs many tests, so `gc.get_objects()` counts include other tests' objects (filter to your own).
+- `.venv314\Scripts\ruff.exe check .` and `.venv314\Scripts\ruff.exe format --check .`
+- Matching at scale: `.venv314\Scripts\python.exe scripts\bench_matching.py`
 
 ## Conventions
 - `skitter.core` must not import Qt. Long core operations take `progress`/`cancelled` callbacks; the UI runs them via `Session` + `ui/jobs.Job`.

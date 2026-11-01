@@ -328,3 +328,53 @@ def test_released_texture_stacks_are_reused_by_layers_of_their_size(gl):
         renderer.release(layer)
     assert texture not in renderer._spare_textures
     assert len(renderer._spare_textures) == SPARE_TEXTURES
+
+
+def test_reserved_detail_stacks_are_readied_and_taken_by_layers(gl):
+    from skitter.ui.render.camera import Camera2D
+    from skitter.ui.render.sprites import SpriteLayer, SpriteRenderer, make_instances
+
+    renderer = SpriteRenderer(gl)
+    camera = Camera2D()
+    camera.viewport[:] = (64, 64)
+    renderer.set_camera(camera)
+    warmed = []
+    warm = renderer._warm
+    renderer._warm = lambda texture: (warmed.append(texture), warm(texture))
+    renderer.reserve_details(8, 1, 2)
+    renderer.reserve_details(8, 1, 2)  # already there: nothing more
+    assert len(warmed) == 2 and renderer._spare_details[(8, 1)] == warmed
+
+    layers = []
+    for _ in range(2):  # sharpened layers take them, none made while drawing
+        layer = SpriteLayer(halves(2), make_instances(1), detail_pages=1, detail_side=8)
+        layer.write_detail(0, 0, 0, halves(2)[0])
+        renderer.render(layer)
+        layers.append(layer)
+    assert {renderer._layers[layer].detail for layer in layers} == set(warmed)
+    for layer in layers:
+        renderer.release(layer)
+    assert sorted(map(id, renderer._spare_details[(8, 1)])) == sorted(map(id, warmed))
+
+
+def test_reserved_texture_stacks_are_taken_by_layers_with_as_many_pages_or_fewer(gl):
+    from skitter.ui.render.sprites import (
+        SPARE_TEXTURES,
+        SpriteLayer,
+        SpriteRenderer,
+        make_instances,
+    )
+
+    renderer = SpriteRenderer(gl)
+    renderer.reserve_textures([(1024, 1024, 2)])
+    reserved = renderer._spare_textures[0]
+    layer = SpriteLayer(np.zeros((1, 1024, 1024, 4), np.uint8), make_instances(1))
+    while not renderer.stage(layer):
+        pass
+    assert renderer._layers[layer].texture is reserved  # one page in a stack of two
+    renderer.release(layer)
+    for k in range(SPARE_TEXTURES):  # smaller ones released after it: they go first
+        small = SpriteLayer(np.zeros((1, 1024 + 8 * k, 1024, 4), np.uint8), make_instances(1))
+        renderer.stage(small)
+        renderer.release(small)
+    assert reserved in renderer._spare_textures

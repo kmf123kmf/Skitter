@@ -38,15 +38,33 @@ _INSTANCE_ATTRIBUTES = (
 
 
 # Detail page stacks kept from released layers, per size, for later layers to take: a new
-# stack costs a frame about 45 ms when first written (the driver allocating 144 MB at
-# 3 x 4096^2), every time a view replaces its tile layer (each Infinite Mosaic level).
-SPARE_DETAILS = 1
+# stack costs a frame about 45 ms when first drawn (the driver readying 144 MB at
+# 3 x 4096^2, however it is first used), every time a view replaces its tile layer (each
+# Infinite Mosaic level). A continuous dive has up to three layers with a stack at once
+# (the last level's, fading; the shown one's; its full-size tiles'): with one spare it made
+# a new stack every other level, with two still now and then. So the Infinite Mosaic
+# reserves three when a session starts (`reserve_details`, while nothing moves), and as many
+# are kept.
+SPARE_DETAILS = 3
+# A draw that covers no pixels with a texture bound: the driver readies the texture there
+# (reserve_details), not in the first frame that shows it.
+_WARM_VERTEX = """#version 330
+in vec2 in_corner;
+void main() { gl_Position = vec4(in_corner + 4.0, 0.0, 1.0); }  // off the view
+"""
+_WARM_FRAGMENT = """#version 330
+uniform sampler2DArray u_texture;
+out vec4 color;
+void main() { color = texture(u_texture, vec3(0.5)); }
+"""
 # Texture stacks kept from released layers, for later layers of the same size to take: the
 # driver allocates a stack's mipmaps the first time they're built, about 35 ms a 4096^2 page
 # (built again: under 1 ms), every time an Infinite Mosaic level brings its full-size tiles.
-# Kept: the latest SPARE_TEXTURES of at least SPARE_TEXTURE_BYTES (a level releases its
-# photo, thumbnail and full-size layers as the next one makes its own); a layer takes one of
-# its page size with enough pages.
+# Kept: SPARE_TEXTURES of at least SPARE_TEXTURE_BYTES, the smallest dropped first (a level
+# releases its photo, thumbnail and full-size layers as the next one makes its own: a photo
+# is cheap to make again); a layer takes one of its page size with enough pages. The
+# Infinite Mosaic reserves the stacks its levels take when a session starts
+# (`reserve_textures`): made mid-dive, they stalled a frame 20-58 ms.
 SPARE_TEXTURES = 3
 SPARE_TEXTURE_BYTES = 4 * 2**20
 
@@ -173,6 +191,28 @@ def _load_shader(name: str) -> str:
     return files("skitter").joinpath(f"resources/shaders/{name}").read_text()
 
 
+def _texture_stack(ctx: moderngl.Context, w: int, h: int, count: int, data=None):
+    stack = ctx.texture_array((w, h, count), 4, data)
+    stack.repeat_x = stack.repeat_y = False
+    return stack
+
+
+def _keep(spares: list, texture: moderngl.TextureArray) -> None:
+    """Keep a texture stack for later layers; past SPARE_TEXTURES the smallest goes."""
+    spares.append(texture)
+    if len(spares) > SPARE_TEXTURES:
+        smallest = min(spares, key=lambda t: t.size[0] * t.size[1] * t.size[2])
+        spares.remove(smallest)
+        smallest.release()
+
+
+def _detail_stack(ctx: moderngl.Context, side: int, pages: int) -> moderngl.TextureArray:
+    stack = ctx.texture_array((side, side, pages), 3)
+    stack.repeat_x = stack.repeat_y = False
+    stack.filter = (moderngl.LINEAR, moderngl.LINEAR)
+    return stack
+
+
 class _GpuLayer:
     def __init__(self, ctx: moderngl.Context, program: moderngl.Program, quad, layer,
                  spare_details: dict | None = None, staged: bool = False,
@@ -197,8 +237,7 @@ class _GpuLayer:
             if data is not None:
                 spare.write(data, viewport=(0, 0, 0, w, h, count))
         else:
-            self.texture = ctx.texture_array((w, h, count), 4, data)
-            self.texture.repeat_x = self.texture.repeat_y = False
+            self.texture = _texture_stack(ctx, w, h, count, data)
         rows = max(1, min(h, STAGE_BYTES // (4 * w)))
         # Strips (page, first row, rows) still to upload (staged).
         self.pending = [(p, y, min(rows, h - y)) for p in range(count)
@@ -264,9 +303,7 @@ class _GpuLayer:
             if spares:  # a released layer's: its old texels show nowhere until rewritten
                 self.detail = spares.pop()
             else:
-                self.detail = self.ctx.texture_array((side, side, pages), 3)
-                self.detail.repeat_x = self.detail.repeat_y = False
-                self.detail.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                self.detail = _detail_stack(self.ctx, side, pages)
         for page, x, y, image in layer.detail_writes:
             h, w = image.shape[:2]
             data = np.ascontiguousarray(image, dtype=np.uint8)
@@ -303,9 +340,7 @@ class _GpuLayer:
         self._release_buffers()
         w, h, count = self.texture.size
         if w * h * count * 4 >= SPARE_TEXTURE_BYTES:  # for a later layer of its size
-            self.spare_textures.append(self.texture)
-            if len(self.spare_textures) > SPARE_TEXTURES:
-                self.spare_textures.pop(0).release()
+            _keep(self.spare_textures, self.texture)
         else:
             self.texture.release()
         if self.detail is not None:
@@ -336,10 +371,12 @@ class SpriteRenderer:
         self.program["u_detail"] = 2
         self._no_picture = ctx.texture((1, 1), 4, bytes(4))  # bound when a layer has none
         self._no_detail = ctx.texture_array((1, 1, 1), 3, bytes(3))
+        self._warm_program = ctx.program(vertex_shader=_WARM_VERTEX, fragment_shader=_WARM_FRAGMENT)
         self._spare_details: dict = {}  # (side, pages) -> detail stacks to reuse (_GpuLayer)
         self._spare_textures: list = []  # texture stacks to reuse, oldest first (_GpuLayer)
         corners = np.array([-0.5, -0.5, 0.5, -0.5, -0.5, 0.5, 0.5, 0.5], dtype="f4")
         self.quad = ctx.buffer(corners.tobytes())
+        self._warm_vao = None  # made when first needed (_warm)
         self._layers: dict[SpriteLayer, _GpuLayer] = {}
         # Output linear light instead of sRGB (offscreen rendering into float buffers).
         self.linear_output = False
@@ -401,6 +438,36 @@ class SpriteRenderer:
         program["u_pixelate"] = float(pixelate)
         program["u_detail_from"] = -1.0 if texture_gpu.detail is None else float(texture_gpu.pages)
         gpu.render(len(layer.instances), texture_gpu.texture)
+
+    def reserve_details(self, side: int, pages: int, count: int) -> None:
+        """Have count detail page stacks of this size ready for layers to take, each
+        readied by a draw (about 45 ms each: call it while nothing moves)."""
+        spares = self._spare_details.setdefault((side, pages), [])
+        while len(spares) < min(count, SPARE_DETAILS):
+            stack = _detail_stack(self.ctx, side, pages)
+            self._warm(stack)
+            spares.append(stack)
+
+    def reserve_textures(self, sizes) -> None:
+        """Have texture stacks of these sizes, (w, h, pages) each, ready for layers to take
+        (one with more pages does): mipmaps allocated and each readied by a draw (tens of
+        ms each: call it while nothing moves)."""
+        spares = self._spare_textures
+        for w, h, count in sizes:
+            stack = _texture_stack(self.ctx, w, h, count)
+            stack.build_mipmaps()  # the driver allocates them here
+            stack.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
+            stack.anisotropy = 8.0
+            self._warm(stack)
+            _keep(spares, stack)
+
+    def _warm(self, texture: moderngl.TextureArray) -> None:
+        """Ready a new texture with a draw that covers no pixels (see _WARM_VERTEX)."""
+        if self._warm_vao is None:
+            self._warm_vao = self.ctx.vertex_array(self._warm_program,
+                                                   [(self.quad, "2f", "in_corner")])  # fmt: skip
+        texture.use(0)
+        self._warm_vao.render(moderngl.TRIANGLE_STRIP, vertices=4)
 
     def release(self, layer: SpriteLayer) -> None:
         gpu = self._layers.pop(layer, None)
