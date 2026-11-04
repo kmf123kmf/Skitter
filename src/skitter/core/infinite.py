@@ -112,7 +112,7 @@ from skitter.core.tiles.ingest import load_thumbnail
 from skitter.core.tiles.library import TileLibrary
 from skitter.core.tiles.render import render_crops_or_thumbs
 
-MOSAIC = ("start", "tile_aspect", "columns", "slicer")  # InfiniteSettings by group
+MOSAIC = ("tile_aspect", "columns", "slicer")  # InfiniteSettings by group
 MATCHING = ("tint", "tint_strength", "max_uses", "min_spacing", "mirror")
 MOTION = ("motion",)  # shown on the panel, not in a form
 DIVE = ("flow_seconds", "flow_path", "flow_mosaic", "dive_seconds", "dive_style", "fade_seconds")
@@ -133,15 +133,6 @@ class InfiniteSettings(Configurable):
     window shows them in groups: MOSAIC, MATCHING, AUTO, DIVE, LOOP and AUTO_LOOP; MOTION is
     a choice on its panel."""
 
-    start = ChoiceParam(
-        "photo", "Start with",
-        choices=[("photo", "Random photo"), ("mosaic", "Random mosaic"),
-                 ("image", "Chosen image")],
-        help="Random photo: a library photo, matched as the first mosaic (the first level "
-             "takes longest). Random mosaic: the view filled with random photos in the "
-             "layout, at once; dive into one to begin. Chosen image: an image of yours, "
-             "cropped to the tile shape, becomes the first mosaic and its home.",
-    )  # fmt: skip
     tile_aspect = ChoiceParam(
         1.0, "Tile shape", choices=list(TILE_ASPECTS),
         help="Shape of every tile, and so of every mosaic: a tile you dive into becomes "

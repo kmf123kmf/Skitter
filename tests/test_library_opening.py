@@ -89,13 +89,13 @@ def test_infinite_start_goes_ahead_once_the_library_is_open(qapp):
     session = Session()
     win = InfiniteWindow(session)
     win.show()
-    win.start_button.click()  # nothing open yet: it opens, then starts
-    assert session.library_opening and "Opening the library" in win.status.text()
-    assert not win.start_button.isEnabled() and not win.running
+    win.start_buttons["photo"].click()  # nothing open yet: it opens, then starts
+    assert session.library_opening and "Opening the library" in win.setup_status.text()
+    assert not win.start_buttons["photo"].isEnabled() and not win.running
     opening_job(session).wait()
     # The (empty, test) library is open: Start went ahead, and says what it needs.
-    assert not win._start_when_open and "no photos" in win.status.text()
-    assert win.start_button.isEnabled()
+    assert win._start_when_open is None and "No photos" in win.library_label.text()
+    assert not win.start_buttons["photo"].isEnabled()  # nothing to start with
     win.close()
     session.shutdown()
     session.library.close()
