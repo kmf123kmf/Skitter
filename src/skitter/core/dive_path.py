@@ -10,10 +10,16 @@ mosaic's leg, from where the view starts (`View`) to the tile filling it:
   (natural log of zoom per second), so the zoom takes log(end / start) / rate.
 - Straight in: the zoom is even (it goes on at the same speed from leg to
   leg), and the tile's offset on screen shrinks to nothing along an eased
-  curve over the whole leg, so panning starts and ends at rest and nothing
-  jolts where legs meet. The view never shows beyond what it started with
+  curve over the whole leg. That curve never shows beyond what it started with
   (the mosaic, at a leg's start): the pan waits where centering the tile
-  early would (see `_max_pan`).
+  early would (see `_max_pan`), easing into that limit (`_soft_min`).
+  A tile off the middle keeps its place on screen at first, so the view
+  itself sets off at once, at the tile's offset per unit of log zoom. Left to
+  that, the view would stop dead on each tile and leap off to the next: once
+  the next tile is known, `leave` has the leg end moving at that speed, still
+  landing exactly on its tile (it passes through, coming in from the far
+  side, past the mosaic's edge if need be), so the view's motion carries
+  through where legs meet.
 - Center first: the view pans, not zooming, until the tile is in the middle
   (beyond the mosaic's edge if need be), then zooms straight in, easing in
   and out (the zoom rests where legs meet). The pan takes CENTER_SHARE of the
@@ -33,6 +39,9 @@ import numpy as np
 STRAIGHT, CENTER_FIRST = "straight", "center"
 CENTER_SHARE = 0.35  # Center first: a pan of half the view takes this share of the zoom's time
 MIN_SECONDS = 0.5  # the shortest leg (a view already about as close as the tile)
+EDGE_ROOM = 0.995  # of a tile on the edge's way: released just before the end, to land at rest
+CARRY_FROM = 0.5  # `leave`: where along a leg it starts bending the view toward the next tile
+CARRY_LATEST = 0.9  # too late to bend it past here: the leg ends at rest
 
 
 @dataclass(frozen=True)
@@ -55,6 +64,14 @@ def _unsmooth(y: float) -> float:
     return 0.5 - math.sin(math.asin(1 - 2 * y) / 3)
 
 
+def _soft_min(a: float, b: float, width: float) -> float:
+    """min(a, b), rounded off where they are within width of each other: no kink."""
+    if width <= 0:
+        return min(a, b)
+    h = max(width - abs(a - b), 0.0) / width
+    return min(a, b) - h * h * width / 4
+
+
 def _angle_between(a: float, b: float) -> float:
     """b - a, the short way round."""
     return (b - a + math.pi) % (2 * math.pi) - math.pi
@@ -74,12 +91,16 @@ class FlowPath:
         self.turn = _angle_between(self.r0, float(rotation))
         self.path = path
         self.span = math.log(self.z1 / self.z0)  # log zoom it covers
+        self.heading: np.ndarray | None = None  # see `leave`
+        self.carry_from = 1.0
         # How far the tile is from the middle, as a share of the start view's half-size
-        # (the farther axis); below 1 - k1 so the pan can always finish.
-        half = np.asarray(viewport, np.float64) / (2 * self.z0)
+        # (the farther axis); well below 1 - k1 so the pan is done waiting in time to come
+        # to rest on a tile on the edge, not arrive still catching up.
+        half = self.half0 = np.asarray(viewport, np.float64) / (2 * self.z0)
         offset = np.abs(self.target - self.c0) / half
         self.k1 = self.z0 / self.z1  # the end view's size relative to the start's
-        self.reach = float(min(offset.max(), max(1 - self.k1, 0.0))) if self.k1 < 1 else 0.0
+        room = EDGE_ROOM * max(1 - self.k1, 0.0)
+        self.reach = float(min(offset.max(), room)) if self.k1 < 1 else 0.0
         self.pan_share = 0.0  # Center first: the share of the leg that pans (not zooming)
         if path == CENTER_FIRST:
             pan = CENTER_SHARE * float(offset.max())  # the pan's time over the zoom's
@@ -99,11 +120,37 @@ class FlowPath:
         if self.path == CENTER_FIRST:  # the pan, all before the zoom
             along = float(_smooth(u / self.pan_share)) if self.pan_share > 0 else 1.0
         else:  # the share of the tile's offset on screen gone, the view kept in bounds
-            pan = min(float(_smooth(u)), self._max_pan(k))
+            limit = self._max_pan(k)  # (its rounding gone by the ends: they stay exact)
+            width = 2 * u * (1 - u) ** 2 if limit < 1 else 0.0
+            pan = max(_soft_min(float(_smooth(u)), limit, width), 0.0)
             along = 1 - (1 - pan) * k  # share of the way from the start's center to the tile
-        center = self.c0 + (self.target - self.c0) * along
+        center = self.c0 + (self.target - self.c0) * along + self._carried(u, k)
         rotation = self.r0 + self.turn * float(_smooth(zoomed))
         return View((float(center[0]), float(center[1])), self.z0 / k, rotation)
+
+    def leave(self, heading, from_u: float = 0.0) -> None:
+        """End the leg moving on: heading is the next leg's tile's offset from the middle
+        as this leg's tile fills the view (screen px, that tile upright), which is how far
+        the view moves per unit of log zoom as the next leg sets off. from_u: where the leg
+        has got to (what is behind it stays as it was). Straight in only (Center first
+        rests where legs meet); past CARRY_LATEST it ends at rest after all. Coming in from
+        the far side of a tile on the mosaic's edge shows a little past it, for a while."""
+        from_u = max(from_u, CARRY_FROM)
+        if self.path != STRAIGHT or self.span <= 0 or from_u >= CARRY_LATEST:
+            return
+        self.heading, self.carry_from = np.asarray(heading, np.float64), from_u
+
+    def _carried(self, u: float, k: float) -> np.ndarray:
+        """How far `leave` has the view from the eased course at u (world units; k the
+        view's size relative to the start's). A curve that starts flat and ends at 0 with
+        slope -1, so the tile's offset goes through nothing at the speed asked for."""
+        if self.heading is None or u <= self.carry_from:
+            return np.zeros(2)
+        window = 1 - self.carry_from
+        e = (u - self.carry_from) / window
+        x, y = self.heading * (self.span * window * e**3 * (1 - e))
+        c, s = math.cos(self.r0 + self.turn), math.sin(self.r0 + self.turn)
+        return -np.array([c * x - s * y, s * x + c * y]) * k / self.z0
 
     def _zoomed(self, u: float) -> float:
         """The share of the leg's log zoom done at u."""

@@ -969,7 +969,7 @@ def test_continuous_dives_keep_the_last_mosaic_until_the_new_one_covers_the_view
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
 
-    def pick():  # a corner tile (panned to past the edge), then the middle one (covered)
+    def pick(level=None):  # a corner tile (panned to past the edge), then the middle (covered)
         scene, ctx = win.level.scene, win.level.ctx
         if win.level.number % 2:
             return 0
@@ -1101,7 +1101,7 @@ def test_continuous_auto_dive_heads_for_tiles_on_top_and_lifts_what_lies_on_one(
     over = upper_closure(scene, covered)[1:]
     assert len(over)
     pick = win.pick_tile
-    win.pick_tile = lambda: covered
+    win.pick_tile = lambda level=None: covered
     win.auto_button.click()
     win.pick_tile = pick
     flow = win._flow
@@ -1209,6 +1209,32 @@ def test_continuous_by_hand_creeps_in_and_dives_where_double_clicked(window, qap
     switch_motion(win, "steps")
     assert win._flow is None and win._flow_token is None and not win.busy
     assert not filtered(QEvent.Type.Wheel) and win.canvas.pixelate_above == 4.0
+
+
+def test_continuous_auto_dive_picks_the_next_tile_early_and_heads_on_through_the_join(window, qapp):
+    win = window
+    win.settings.update(motion="flow", flow_seconds=2.0)
+    win.set_settings(win.settings)
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    win.auto_button.click()
+    flow = win._flow
+    run_auto(win, qapp, 10.0, until=lambda: flow.next is not None)
+    assert flow.after is not None and flow.path.heading is not None  # known well before the end
+    assert flow.next.scene.visible_share[flow.after] >= 0.5 and win.level is flow.level
+    after = flow.after
+    run_auto(win, qapp, 15.0, until=lambda: win.level is flow.next)
+    assert win.level is flow.next and win._flow.index == after  # that is where it goes
+
+    # Stopped first, the view rests by hand as ever; Center first rests where legs meet.
+    win.explore_button.click()
+    run_auto(win, qapp, 15.0, until=lambda: win._flow is None)
+    win.settings.update(flow_path="center")
+    win.auto_button.click()
+    flow = win._flow
+    run_auto(win, qapp, 10.0, until=lambda: flow.next is not None)
+    assert flow.after is None and flow.path.heading is None
 
 
 def test_turning_continuous_auto_dive_off_lets_its_leg_reach_the_mosaic(window, qapp):

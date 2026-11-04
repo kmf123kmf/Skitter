@@ -51,6 +51,84 @@ def test_straight_in_zooms_evenly_and_never_past_the_start_view(target):
         assert np.all(lo >= flow.c0 - half0 - 1e-6) and np.all(hi <= flow.c0 + half0 + 1e-6)
 
 
+def motion(flow: FlowPath, u: float, du: float = 1e-5) -> np.ndarray:
+    """How far the view moves on screen per unit of log zoom at u, for an upright view."""
+    a, b = flow.at(u), flow.at(u + du)
+    return (np.asarray(b.center) - a.center) * a.zoom / (math.log(b.zoom / a.zoom))
+
+
+@pytest.mark.parametrize("rotation", [0.0, 0.5])
+def test_a_leg_carries_the_views_motion_into_the_next_leg(rotation):
+    """Left alone a leg stops dead on its tile, and the next sets off at once."""
+    target, tile = (2600.0, 1500.0), (3000.0, 900.0)
+    upcoming = leg(tile)
+    off = (np.asarray(tile) - upcoming.c0) * upcoming.z0  # as it starts
+    assert motion(upcoming, 0.0) == pytest.approx(off, rel=0.01)
+    plain = leg(target, rotation=rotation)
+    assert np.linalg.norm(motion(plain, 1 - 2e-5)) < 1.0
+
+    flow = leg(target, rotation=rotation)
+    flow.leave(off)
+    end = flow.at(1.0)
+    assert end.center == pytest.approx(target) and end.zoom == pytest.approx(flow.z1)
+    c, s = math.cos(rotation), math.sin(rotation)  # the next mosaic lies as its tile does
+    turned = np.array([c * off[0] - s * off[1], s * off[0] + c * off[1]])
+    assert motion(flow, 1 - 2e-5) == pytest.approx(turned, rel=0.01)
+    for u in (0.0, 0.3, 0.5):  # the first of it is as it was
+        assert flow.at(u).center == pytest.approx(plain.at(u).center)
+    # No sudden moves getting there: it bends smoothly from where it started to.
+    views = [flow.at(x) for x in np.linspace(0.45, 1, 2001)]
+    steps = np.diff([np.asarray(v.center) * v.zoom for v in views], axis=0)
+    assert np.abs(np.diff(steps, axis=0)).max() < 0.02 * np.abs(steps).max()
+
+
+@pytest.mark.parametrize("target", [(3950, 1333), (50, 2600), (3950, 50)])
+def test_a_tile_on_the_edge_is_arrived_at_without_catching_up(target):
+    """Else it lands still moving toward its tile, which nothing carries on."""
+    flow = leg(target)
+    assert np.linalg.norm(motion(flow, 1 - 2e-5)) < 2.0
+
+
+def test_leaving_from_partway_changes_nothing_behind_it():
+    plain, flow = leg((2600, 1500)), leg((2600, 1500))
+    flow.leave((300, 200), 0.7)
+    assert flow.at(0.7).center == pytest.approx(plain.at(0.7).center)
+    assert flow.at(1.0).center == pytest.approx((2600, 1500))
+    late = leg((2600, 1500))
+    late.leave((300, 200), 0.95)  # too late: it ends at rest
+    assert late.heading is None
+
+
+def test_center_first_rests_where_legs_meet_whatever_comes_next():
+    flow = leg((3700, 300), path=CENTER_FIRST)
+    flow.leave((300, 200))
+    assert flow.heading is None
+
+
+@pytest.mark.parametrize("target", [(3950, 1333), (50, 2600), (3950, 50), (2600, 1500)])
+@pytest.mark.parametrize("heading", [(-600, 0), (600, 0), (0, 400), (600, -400), (-600, 400)])
+def test_carrying_on_keeps_the_tile_in_frame_and_mostly_on_the_mosaic(target, heading):
+    """Even at its widest (a tile on the edge, the next at the far side of the mosaic) it
+    is a sliver past the edge: the view is always among the tiles, heading for its tile."""
+    flow = leg(target)
+    flow.leave(heading)
+    assert flow.at(1.0).center == pytest.approx(target)
+    view_half = np.asarray(VIEWPORT) / 2
+    for x in np.linspace(0, 1, 801):
+        view = flow.at(x)
+        assert np.all(np.abs(screen_offset(view, target)) <= view_half)  # the tile: in frame
+        half = view_half / view.zoom
+        lo, hi = np.asarray(view.center) - half, np.asarray(view.center) + half
+        shown = np.minimum(hi, CANVAS) - np.maximum(lo, 0)
+        assert np.prod(shown) >= 0.8 * np.prod(2 * half)  # and most of it is mosaic
+
+
+def test_a_tile_near_the_edge_eases_into_the_limit_on_panning():
+    views = [leg((3900, 1333)).at(x) for x in np.linspace(0, 1, 4001)]
+    steps = np.diff([np.asarray(v.center) * v.zoom for v in views], axis=0)
+    assert np.abs(np.diff(steps, axis=0)).max() < 0.002 * np.abs(steps).max()  # no kink
+
+
 @pytest.mark.parametrize("target", [(3700, 300), (2600, 1500)])
 def test_center_first_pans_without_zooming_then_zooms_on_the_middle(target):
     flow = leg(target, path=CENTER_FIRST)

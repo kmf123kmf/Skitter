@@ -62,7 +62,9 @@ done when the tile fills Mosaic appears at of the view. When the tile
 fills the view that mosaic takes over in its own world, looking just the
 same (`_flow_arrive`); the last one goes into that world too, under it,
 and fades out. A mosaic not made in time slows the zoom to a stop where
-its photo would start to show, until it is.
+its photo would start to show, until it is. Once a leg's mosaic is made, the
+next leg's tile is picked and the view carries on toward it through the switch
+(`_flow_aim`, core/dive_path.py's FlowPath.leave).
 
 Every session keeps its dives (`record`, core/infinite.py's DiveRecord), by
 hand and auto-dive's alike. In steps a dive the record has is replayed: its
@@ -134,7 +136,7 @@ from skitter.core.dive_motion import (
     moved,
     rest_tiles,
 )
-from skitter.core.dive_path import CENTER_FIRST, MIN_SECONDS, FlowPath, View, flow_rate
+from skitter.core.dive_path import CENTER_FIRST, MIN_SECONDS, STRAIGHT, FlowPath, View, flow_rate
 from skitter.core.dive_styles import DiveStyle, dive_seed, pick_style
 from skitter.core.easing import ease_in_out_cubic
 from skitter.core.infinite import (
@@ -313,6 +315,7 @@ class _Flow:
         self.speed = 1.0  # eased down to 0 (and up again) while the next level is not made
         self.hold = 1.0  # where it waits if the next level isn't ready (see _flow_advance)
         self.next: Level | None = None  # the tile's mosaic, once made
+        self.after: int | None = None  # the tile the leg after this one heads for, if known
         self.picture: np.ndarray | None = None  # the tile's photo, as shown (display size)
         self.seconds = 0.0  # how long making it took
         self.waiting = False  # its making waits for the search index (a random mosaic's start)
@@ -1196,15 +1199,27 @@ class InfiniteWindow(QWidget):
         self.status.setText(f"Auto-dive: next dive in {dwell:g} s." if dwell else "Auto-dive.")
         QTimer.singleShot(round(dwell * 1000), self, lambda: self._approach(token))
 
-    def pick_tile(self) -> int:
+    def _whole_view(self, level: Level) -> tuple[np.ndarray, float]:
+        """The center and zoom the view has on level's whole mosaic."""
+        ctx = level.ctx
+        return self.canvas.camera.fit_params(0, 0, float(ctx.width), float(ctx.height),
+                                             margin=self.canvas.fit_margin)  # fmt: skip
+
+    def pick_tile(self, level: Level | None = None) -> int:
         """Auto-dive's next tile: at random among the tiles in view (Next tile: anywhere,
         or among the tenth nearest the middle) that lie on top (a pile's: nothing on them;
         else those mostly shown), varied ones likelier (Favor varied tiles: see
-        core/infinite.py's Looks)."""
-        scene, cam = self.level.scene, self.canvas.camera
+        core/infinite.py's Looks). level: of this mosaic yet to show, whole in view."""
+        cam = self.canvas.camera
+        center, zoom = cam.center, cam.zoom
+        if level is None:
+            level = self.level
+        else:
+            center, zoom = self._whole_view(level)
+        scene = level.scene
         pos = scene.center
-        half = cam.viewport / (2 * cam.zoom)
-        in_view = np.all(np.abs(pos - cam.center) <= half, axis=1)
+        half = cam.viewport / (2 * zoom)
+        in_view = np.all(np.abs(pos - center) <= half, axis=1)
         share = scene.visible_share
         whole, shown = share >= WHOLE, share >= 0.5
         for candidates in (in_view & whole, in_view & shown, in_view, shown):
@@ -1214,9 +1229,9 @@ class InfiniteWindow(QWidget):
         else:
             pool = np.arange(len(scene))
         if self.settings.next_tile == "middle" and len(pool) > 1:
-            distance = np.linalg.norm(pos[pool] - cam.center, axis=1)
+            distance = np.linalg.norm(pos[pool] - center, axis=1)
             pool = pool[np.argsort(distance)[: max(1, len(pool) // 10)]]
-        variety = self.level.variety
+        variety = level.variety
         weights = pick_weights(None if variety is None else variety[pool],
                                float(self.settings.variety) / 100)  # fmt: skip
         return int(self._rng.choice(pool, p=weights))
@@ -1398,10 +1413,22 @@ class InfiniteWindow(QWidget):
                 flow.next, flow.picture, atlas = result
                 flow.seconds = time.perf_counter() - self._job_started
                 self._flow_prepare(flow, *atlas)
+                self._flow_aim(flow)
                 self.status.setText("Auto-dive." if self.auto else "Diving.")
             self._refresh()
 
         self._start_job(work, "flow", "Making the next mosaic…", done)
+
+    def _flow_aim(self, flow: _Flow) -> None:
+        """Its mosaic made, pick the leg after this one's tile, if legs go on Straight in,
+        for the view to carry on toward it where they meet, rather than stop on this one."""
+        if not self._legs_go_on or self.settings.flow_path != STRAIGHT:
+            return
+        level = flow.next
+        pos = self._next if self._next >= 0 else len(self.record.levels)
+        flow.after = self._next_tile(level, pos)
+        center, zoom = self._whole_view(level)
+        flow.path.leave((level.scene.center[flow.after] - center) * zoom, flow.u)
 
     def _flow_prepare(self, flow: _Flow, atlas, request) -> None:
         """The next level is made: its photo's layer and its textures (reading full-size
@@ -1715,7 +1742,7 @@ class InfiniteWindow(QWidget):
             self.status.setText(CREEP_STATUS)
             self._refresh()
             return
-        self._flow_leg(level)
+        self._flow_leg(level, flow.after)
         self._flow.u = over / max(self._flow.path.seconds, MIN_SECONDS)
         self._flow_frame()
 
@@ -1761,11 +1788,11 @@ class InfiniteWindow(QWidget):
             self._next = self.record.loop_start
         return closing
 
-    def _home_tile(self) -> int:
-        """Home's index in the mosaic shown (-1: not there). Looked for, not the level's
-        `home`: that is the home it was matched for, which may have been changed since."""
-        home = self.record.home
-        return -1 if home is None or self.level is None else find_tile(self.level.scene, home)
+    def _home_tile(self, level: Level | None = None) -> int:
+        """Home's index in level (default: the mosaic shown; -1: not there). Looked for, not
+        the level's `home`: that is the home it was matched for, which may have changed."""
+        home, level = self.record.home, self.level if level is None else level
+        return -1 if home is None or level is None else find_tile(level.scene, home)
 
     def _loop_open(self) -> bool:
         """A loop is under way from the shown level (its latest)."""
@@ -1773,11 +1800,12 @@ class InfiniteWindow(QWidget):
         return (record.home is not None and not record.closed
                 and record.loop_start <= self._pos == len(record.levels) - 1)  # fmt: skip
 
-    def _next_tile(self) -> int:
-        """Auto-dive's next tile: the record's, where it goes on from here (replayed: a
-        recording is never cut); a loop's (home, or the look-ahead's best); or one picked in
-        view."""
-        record, pos = self.record, self._pos
+    def _next_tile(self, level: Level | None = None, pos: int | None = None) -> int:
+        """Auto-dive's next tile from level, the record's pos (default: the mosaic shown):
+        the record's, where it goes on from there (replayed: a recording is never cut); a
+        loop's (home, or the look-ahead's best); or one picked in view."""
+        record = self.record
+        pos = self._pos if pos is None else pos
         if 0 <= pos < len(record.picks) and record.leads_to(pos, record.picks[pos]) >= 0:
             return record.picks[pos]
         if record.home is not None and pos >= record.loop_start:
@@ -1785,14 +1813,12 @@ class InfiniteWindow(QWidget):
                 return record.picks[pos]
             # Home is back: diving there closes the loop (not short of the range, should
             # matching have put it here by itself).
-            if (
-                self._home_tile() >= 0
-                and pos - record.loop_start + 1 >= self.settings.loop_dives[0]
-            ):
-                return self._home_tile()
-            if self._ahead is not None:
+            home = self._home_tile(level)
+            if home >= 0 and pos - record.loop_start + 1 >= self.settings.loop_dives[0]:
+                return home
+            if self._ahead is not None and level is None:
                 return self._ahead[0][0]
-        return self.pick_tile()
+        return self.pick_tile(level)
 
     def _look_ahead(self) -> None:
         """While a loop is open, in its range: match several candidate tiles' mosaics (in
