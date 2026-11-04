@@ -24,6 +24,11 @@ it, later levels only search. Measured on 200,000 photos (2026-10-30): the
 first level takes about 25 s (describing the tiles, building the index);
 later ones well under the dive at 40 columns.
 
+A session can also start from an image of the viewer's, cropped to the tile
+shape: `chosen_tile` makes it a photo of the session's alone
+(`TileLibrary.add_session_photo`, its file a temporary one), so home can be it
+and every tile path treats it as any other.
+
 Every session is recorded (`DiveRecord`): its levels as plain data
 (`RecordedLevel`: the matched result and the tile each is of, no picture)
 and the tile dived into from each. A dive the record has is replayed: its
@@ -32,22 +37,25 @@ read again from its photo, nothing matched); any other dive is recorded from
 there on, what followed it dropped. Nothing in a record refers to the live
 session, so a record can be replayed (or, later, saved) as it is.
 
-Loops (the Loop setting): a dive returns, within a range of dives, to the
-picture it started from. Home is the first tile dived into with Loop on.
-Each level from the bottom of the range on is matched with a lure
-(`Lure`): after the search, home's exact crop is costed against every
-region that shows whole, inside the canvas; where it fits at most Closing
-fit worse than the region's own best, it is pinned there (so it looks as if
-it had been matched), and at the top of the range at its best region
-regardless (`level`, `Level.home`). Matching may also put home's exact crop
-somewhere by itself: that counts too. Diving into it closes the loop: the
-next level is the loop's first, which every pass then replays as recorded
+Loops: a dive returns to the picture it started from. Home is a mosaic's
+own tile (Set Home: the mosaic shown, whose picture it is; a chosen image's
+session starts with it set). While home is set, each new level is matched
+with a lure (`Lure`): after the search, home's exact crop is costed against
+every region that shows whole, inside the canvas; where it fits at most Fit
+worse than the region's own best, it is pinned there (so it looks as if it
+had been matched), unless Place home is off. By hand that goes for every
+level, so a loop closes whenever home turns up and the viewer takes it.
+Auto-dive has a range of dives: it lures from the bottom of Close within on,
+and at the top places home at its best region regardless (`level`,
+`Level.home`). Matching may also put home's exact crop somewhere by itself:
+that counts too. Diving into it closes the loop (`DiveRecord.close_loop`):
+the next level is the loop's first, which every pass then replays as recorded
 (its levels and the tiles dived into), so one pass can be rendered as a
 seamless video.
 
 Home gets its own tint (`Lure.tint`, Home tint): matching weighs color by
 what tinting leaves of it, so a full tint lets home go where its structure
-fits, its color pulled to the spot's. In the range, auto-dive looks ahead
+fits, its color pulled to the spot's. In the range, auto-dive in steps looks ahead
 (`look_ahead`): it matches several candidate tiles' pictures, lure and all,
 and dives into the one where home fits best, whose level is then ready.
 Measured on 200,000 photos (2026-10-31), home's error at its best spot over
@@ -64,6 +72,7 @@ slows them all. Measured in the app on 16 cores, 40 columns: searching took
 """
 
 import os
+import tempfile
 from dataclasses import dataclass, field
 
 import faiss
@@ -99,17 +108,19 @@ from skitter.core.slicing.params import (
 )
 from skitter.core.tiles.crops import aspect_classes
 from skitter.core.tiles.descriptors import DIM, LEVEL2, MEAN, TEXTURE, tile_descriptors
+from skitter.core.tiles.ingest import load_thumbnail
 from skitter.core.tiles.library import TileLibrary
 from skitter.core.tiles.render import render_crops_or_thumbs
 
 MOSAIC = ("start", "tile_aspect", "columns", "slicer")  # InfiniteSettings by group
 MATCHING = ("tint", "tint_strength", "max_uses", "min_spacing", "mirror")
-DIVE = ("motion", "flow_seconds", "flow_path", "flow_mosaic", "dive_seconds", "dive_style",
-        "fade_seconds")  # fmt: skip
-AUTO = ("dwell_seconds", "next_tile", "variety", "approach_seconds", "approach_tiles",
-        "pause_seconds", "highlight")  # fmt: skip
-LOOP = ("loop", "loop_dives", "loop_fit", "loop_tint", "look_ahead")
-LIVE = DIVE + AUTO + LOOP  # settings a running session follows as they change
+MOTION = ("motion",)  # shown on the panel, not in a form
+DIVE = ("flow_seconds", "flow_path", "flow_mosaic", "dive_seconds", "dive_style", "fade_seconds")
+AUTO = ("next_tile", "variety", "dwell_seconds", "approach_seconds", "approach_tiles",
+        "highlight", "pause_seconds")  # fmt: skip
+LOOP = ("home_place", "loop_fit", "loop_tint")
+AUTO_LOOP = ("loop_dives", "look_ahead")  # shown in auto-dive only: by hand, the viewer decides
+LIVE = MOTION + DIVE + AUTO + LOOP + AUTO_LOOP  # settings a running session follows as they change
 SOURCE_PX_PER_TILE = 16  # least picture pixels across a base tile (4 per cell: full detail)
 MAX_SOURCE_PX = 4096  # longest side a level's picture is read at
 DIVE_THREADS = max(2, (os.cpu_count() or 4) // 4)  # search threads while the UI animates
@@ -119,13 +130,17 @@ VARIETY_POWER = 4.0  # Favor varied tiles at 100%: picks weighted by variety to 
 
 class InfiniteSettings(Configurable):
     """What every level of a session is made with (fixed while the session runs). The
-    window shows them in three groups: MOSAIC, MATCHING and DIVE."""
+    window shows them in groups: MOSAIC, MATCHING, AUTO, DIVE, LOOP and AUTO_LOOP; MOTION is
+    a choice on its panel."""
 
     start = ChoiceParam(
-        "photo", "Start with", choices=[("photo", "Random photo"), ("mosaic", "Random mosaic")],
+        "photo", "Start with",
+        choices=[("photo", "Random photo"), ("mosaic", "Random mosaic"),
+                 ("image", "Chosen image")],
         help="Random photo: a library photo, matched as the first mosaic (the first level "
              "takes longest). Random mosaic: the view filled with random photos in the "
-             "layout, at once; dive into one to begin.",
+             "layout, at once; dive into one to begin. Chosen image: an image of yours, "
+             "cropped to the tile shape, becomes the first mosaic and its home.",
     )  # fmt: skip
     tile_aspect = ChoiceParam(
         1.0, "Tile shape", choices=list(TILE_ASPECTS),
@@ -164,34 +179,32 @@ class InfiniteSettings(Configurable):
     mirror = BoolParam(False, "Mirrored tiles", help="Also try every crop flipped left to right.")
 
     motion = ChoiceParam(
-        "steps", "Dives move",
-        choices=[("steps", "In steps"), ("flow", "Continuously")],
-        help="In steps: each mosaic shows whole until a tile is dived into (by a double-click, "
-             "or auto-dive zooming in on one). Continuously: one never-ending zoom. By hand "
-             "the view creeps in by itself (drag to steer; the wheel doesn't zoom) and a "
-             "double-click heads on into a tile, its mosaic made on the way; auto-dive picks "
-             "each mosaic's next tile as it appears.",
+        "steps", "Motion", choices=[("steps", "Steps"), ("flow", "Continuous")],
+        help="Steps: each mosaic shows whole until a tile is dived into. Continuous: one "
+             "never-ending zoom. By hand the view creeps in by itself (drag to steer; the "
+             "wheel doesn't zoom) and a double-click heads on into a tile, its mosaic made "
+             "on the way; auto-dive picks each mosaic's next tile as it appears.",
     )  # fmt: skip
     flow_seconds = FloatParam(
         6.5, "Time per mosaic", min=2.0, max=120.0, step=0.5, decimals=1, suffix=" s",
-        under="motion", when=lambda s: s.motion == "flow",
-        help="Continuously: about how long the zoom takes from a whole mosaic onto one of "
-             "its tiles (a base tile; larger tiles take less). Slower is calmer.",
+        when=lambda s: s.motion == "flow",
+        help="About how long the zoom takes from a whole mosaic onto one of its tiles (a "
+             "base tile; larger tiles take less). Slower is calmer.",
     )  # fmt: skip
     flow_path = ChoiceParam(
         "straight", "Path", choices=[(STRAIGHT, "Straight in"), (CENTER_FIRST, "Center first")],
-        under="motion", when=lambda s: s.motion == "flow",
-        help="Continuously: Straight in moves toward the tile while zooming all the way; "
-             "the view stays on the mosaic and only waits to center a tile near its edge. Center "
-             "first pans the tile to the middle without zooming (past the mosaic's edge if "
-             "need be), then zooms straight in, coming to rest as each tile fills the view.",
+        when=lambda s: s.motion == "flow",
+        help="Straight in moves toward the tile while zooming all the way; the view stays "
+             "on the mosaic and only waits to center a tile near its edge. Center first "
+             "pans the tile to the middle without zooming (past the mosaic's edge if need "
+             "be), then zooms straight in, coming to rest as each tile fills the view.",
     )  # fmt: skip
     flow_mosaic = FloatParam(
         35.0, "Mosaic appears at", min=5.0, max=100.0, step=5.0, decimals=0,
-        suffix="% of the view", under="motion", when=lambda s: s.motion == "flow",
-        help="Continuously: how much of the view the tile fills by the time its photo has "
-             "turned into its own mosaic, shown inside it as the view heads on in. Lower "
-             "shows the next mosaic sooner; 100%: as the tile fills the view.",
+        suffix="% of the view", when=lambda s: s.motion == "flow",
+        help="How much of the view the tile fills by the time its photo has turned into "
+             "its own mosaic, shown inside it as the view heads on in. Lower shows the next "
+             "mosaic sooner; 100%: as the tile fills the view.",
     )  # fmt: skip
     dive_seconds = FloatParam(
         1.5, "Dive time", min=0.3, max=10.0, step=0.1, decimals=1, suffix=" s",
@@ -210,83 +223,83 @@ class InfiniteSettings(Configurable):
     )  # fmt: skip
     fade_seconds = FloatParam(
         0.6, "Fade time", min=0.0, max=5.0, step=0.1, decimals=1, suffix=" s",
+        when=lambda s: s.motion == "steps",
         help="How long the photo takes to dissolve into its own mosaic once it is matched.",
     )  # fmt: skip
 
-    dwell_seconds = FloatParam(
-        3.0, "Dwell", min=0.0, max=600.0, step=0.5, decimals=1, suffix=" s",
-        when=lambda s: s.motion == "steps",
-        help="Auto-dive: how long each new mosaic shows whole before the view heads for "
-             "the next tile.",
-    )  # fmt: skip
     next_tile = ChoiceParam(
         "anywhere", "Next tile",
         choices=[("anywhere", "Anywhere in view"), ("middle", "Near the middle")],
-        help="Auto-dive: where the next tile is picked, at random among the tiles in view "
-             "(those mostly hidden under others left out).",
+        help="Where the next tile is picked, at random among the tiles in view (those "
+             "mostly hidden under others left out).",
     )  # fmt: skip
     variety = FloatParam(
         70.0, "Favor varied tiles", min=0.0, max=100.0, step=10.0, decimals=0, suffix="%",
-        help="Auto-dive: how strongly the pick favors tiles with something in them (light "
-             "and dark, detail) and of the library's usual brightness and color. Without it "
-             "a dive into a dark or plain tile tends to lead to more of the same, mosaic "
-             "after mosaic. 0: every tile in view is as likely.",
+        help="How strongly the pick favors tiles with something in them (light and dark, "
+             "detail) and of the library's usual brightness and color. Without it a dive "
+             "into a dark or plain tile tends to lead to more of the same, mosaic after "
+             "mosaic. 0: every tile in view is as likely.",
+    )  # fmt: skip
+    dwell_seconds = FloatParam(
+        3.0, "Hold", min=0.0, max=600.0, step=0.5, decimals=1, suffix=" s",
+        when=lambda s: s.motion == "steps",
+        help="How long each new mosaic shows whole before the view heads for the next tile.",
     )  # fmt: skip
     approach_seconds = FloatParam(
         2.0, "Zoom-in time", min=0.0, max=60.0, step=0.5, decimals=1, suffix=" s",
         when=lambda s: s.motion == "steps",
-        help="Auto-dive: how long the view takes to move to the tile and zoom in on it "
-             "before diving (0: dive straight from where the view is).",
+        help="How long the view takes to move to the tile and zoom in on it before diving "
+             "(0: dive straight from where the view is).",
     )  # fmt: skip
     approach_tiles = FloatParam(
         6.0, "Zoom in to", min=1.0, max=500.0, step=1.0, decimals=1, suffix=" tiles across",
         when=lambda s: s.motion == "steps",
-        help="Auto-dive: how close the view gets before diving, as the number of tiles "
-             "across it. With the zoom-in time this sets how fast the view zooms.",
+        help="How close the view gets before diving, as the number of tiles across it. "
+             "With the zoom-in time this sets how fast the view zooms.",
+    )  # fmt: skip
+    highlight = BoolParam(
+        True, "Highlight the tile", when=lambda s: s.motion == "steps",
+        help="Outline the chosen tile while the view zooms in on it.",
     )  # fmt: skip
     pause_seconds = FloatParam(
         0.5, "Pause on tile", min=0.0, max=30.0, step=0.1, decimals=1, suffix=" s",
         when=lambda s: s.motion == "steps",
-        help="Auto-dive: how long the view rests on the chosen tile before diving into it.",
+        help="How long the view rests on the chosen tile before diving into it.",
     )  # fmt: skip
-    highlight = BoolParam(
-        True, "Highlight the tile", when=lambda s: s.motion == "steps",
-        help="Auto-dive: outline the chosen tile while the view zooms in on it.",
-    )  # fmt: skip
-    loop = BoolParam(
-        False, "Loop", when=lambda s: s.motion == "steps",
-        help="Auto-dive comes back to where it started: the first tile it dives into turns "
-             "up again, placed where it fits, within the range of dives below. After that "
-             "it replays the same dives, again and again.",
-    )  # fmt: skip
-    loop_dives = RangeParam(
-        (3, 6), "Loop within", min=1, max=50, step=1, decimals=0, suffix=" dives", whole=True,
-        under="loop", when=lambda s: s.loop and s.motion == "steps",
-        help="How many dives one pass of the loop takes: it closes as soon as the first tile "
-             "fits naturally (see Closing fit) once the low end is reached, and at the high "
-             "end regardless. 1: the picture contains itself.",
+    home_place = BoolParam(
+        True, "Place home",
+        help="While home is set, put it into each new mosaic where it fits well enough. "
+             "Off, home only shows if matching picks it by itself: rarely, and never a "
+             "chosen image, which isn't among the tiles.",
     )  # fmt: skip
     loop_fit = FloatParam(
-        30.0, "Closing fit", min=0.0, max=500.0, step=5.0, decimals=0, suffix="%",
-        under="loop_dives", when=lambda s: s.loop and s.motion == "steps",
-        help="How much more error than the best tile for its spot the first tile may have "
-             "there for the loop to close early (0: only where it is the best). Larger "
-             "closes sooner but can look placed.",
+        30.0, "Fit", min=0.0, max=500.0, step=5.0, decimals=0, suffix="%",
+        under="home_place", when=lambda s: s.home_place,
+        help="How much more error than the best tile for its spot home may have there "
+             "(0: only where it is the best). Larger brings it back more often but can "
+             "look placed.",
     )  # fmt: skip
     loop_tint = FloatParam(
-        100.0, "Home tint", min=0.0, max=100.0, step=10.0, decimals=0, suffix="%",
-        under="loop_dives", when=lambda s: s.loop and s.motion == "steps",
-        help="How far the first tile's color is pulled to its spot's when it comes back. "
-             "Stronger lets it go where its shapes fit and blend in by color (it loses the "
-             "tint as the view dives in).",
+        100.0, "Tint", min=0.0, max=100.0, step=10.0, decimals=0, suffix="%",
+        under="home_place", when=lambda s: s.home_place,
+        help="How far home's color is pulled to its spot's when it comes back. Stronger "
+             "lets it go where its shapes fit and blend in by color (it loses the tint as "
+             "the view dives in).",
+    )  # fmt: skip
+    loop_dives = RangeParam(
+        (3, 6), "Close within", min=1, max=50, step=1, decimals=0, suffix=" dives", whole=True,
+        under="home_place", when=lambda s: s.home_place,
+        help="How many dives auto-dive takes to get home: it closes the loop as soon as "
+             "home fits once the low end is reached, and at the high end regardless. 1: "
+             "the picture contains itself.",
     )  # fmt: skip
     look_ahead = IntParam(
-        4, "Look ahead", min=1, max=16, suffix=" tiles",
-        under="loop_dives", when=lambda s: s.loop and s.motion == "steps",
-        help="In the loop's range, how many tiles' mosaics are made before each dive, to "
-             "dive into the one the first tile fits best (in the background, while the "
-             "mosaic dwells). More closes the loop sooner and more naturally, but takes "
-             "longer: about half a second each at 40 columns.",
+        4, "Look ahead", min=1, max=16, suffix=" tiles", under="home_place",
+        when=lambda s: s.home_place and s.motion == "steps",
+        help="In that range, how many tiles' mosaics are made before each dive, to dive "
+             "into the one home fits best (in the background, while the mosaic holds). "
+             "More closes the loop sooner and more naturally, but takes longer: about half "
+             "a second each at 40 columns.",
     )  # fmt: skip
 
     @property
@@ -506,6 +519,7 @@ class InfiniteSession:
         self.rng = np.random.default_rng(seed)
         self.levels = 0  # levels made so far
         self._looks: Looks | None = None
+        self._chosen_folder: tempfile.TemporaryDirectory | None = None  # goes with the session
 
     @property
     def looks(self) -> Looks:
@@ -529,6 +543,21 @@ class InfiniteSession:
         crop = centered_crop(int(library.width[slot]), int(library.height[slot]),
                              self.layout.tile_aspect)  # fmt: skip
         return TileView(slot, crop)
+
+    def chosen_tile(self, image: np.ndarray) -> TileView:
+        """(H, W, 4) uint8 an image of the viewer's as a whole-photo tile of this session
+        alone (see the module docstring): transparency flattened onto black, as a tile has
+        no holes, and no larger than a picture is ever read."""
+        if self._chosen_folder is None:
+            self._chosen_folder = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
+        rgba = Image.fromarray(np.ascontiguousarray(image))
+        flat = Image.new("RGB", rgba.size)
+        flat.paste(rgba, mask=rgba.getchannel("A"))
+        flat.thumbnail((MAX_SOURCE_PX, MAX_SOURCE_PX), Image.Resampling.LANCZOS)
+        path = os.path.join(self._chosen_folder.name, f"{len(self.library.status)}.png")
+        flat.save(path, compress_level=1)
+        return TileView(self.library.add_session_photo(path, load_thumbnail(path)),
+                        (0.0, 0.0, 1.0, 1.0))  # fmt: skip
 
     def random_mosaic(self, aspect: float) -> Level:
         """Level 0: random photos (each cropped to its region's shape) in the session's
@@ -638,7 +667,8 @@ class InfiniteSession:
         run = MatchRun(self.matcher, regions, ctx, self.method, None, report, self.efforts)
         run.analyze()
         run.search()
-        region, fit = (-1, float("nan")) if lure is None else self._place(run, lure)
+        placing = lure is not None and lure.place
+        region, fit = self._place(run, lure) if placing else (-1, float("nan"))
         run.pin()
         run.assign()
         report.step("Done", 1.0, "assign")
@@ -759,6 +789,7 @@ class Lure:
     tile: TileView
     tolerance: float  # how much worse than a spot's best it may fit there (0.1: 10%)
     force: bool = False  # place it at its best spot however it fits
+    place: bool = True  # False: only look for it, should matching put it somewhere itself
     # Its own tint strength (None: the level's). Matching weighs color by how much is
     # left after tinting, so a stronger tint lets it go where its structure fits, its
     # color pulled to the spot's (the eye judges a tile at mosaic scale by its color).
@@ -847,31 +878,45 @@ class DiveRecord:
         return self.recorded_dives() if pos < first else last - pos  # before it: all of it
 
     def start_loop(self, home: TileView, start: int) -> None:
-        """A loop from home, levels[start] (the next to arrive) being its mosaic."""
+        """A loop from home, levels[start] (shown, or the next to arrive) being its mosaic."""
         self.home, self.loop_start, self.closed, self.passes = home, start, False, 0
+
+    def close_loop(self) -> None:
+        """A dive into home from the last level: the way back is recorded, and the recording
+        holds the whole loop (with any lead-in it has), so Replay plays it."""
+        self.closed = True
+        first = self.loop_start if self.recording is None else self.recording[0]
+        self.recording = (min(first, self.loop_start), len(self.levels) - 1)
+        self.recording_on = False
 
     def end_loop(self) -> None:
         """Forget the loop (the levels stay recorded)."""
         self.home, self.loop_start, self.closed, self.passes = None, -1, False, 0
 
-    def lure(self, settings: "InfiniteSettings") -> Lure | None:
-        """The lure for matching the next level (None: no loop, or before its range)."""
+    def lure(self, settings: "InfiniteSettings", by_hand: bool = False) -> Lure | None:
+        """The lure for matching the next level (None: no loop, or before its range).
+        by_hand: no range, the viewer closes the loop if and when home turns up (from the
+        loop's second level: a loop of one dive takes asking for, in auto-dive's range)."""
         if self.home is None:
             return None
+        if not settings.home_place:
+            return Lure(self.home, 0.0, place=False)
         number = len(self.levels) - self.loop_start + 1  # within the loop
         low, high = settings.loop_dives
-        if number < low:
+        if number < (2 if by_hand else low):
             return None
-        return Lure(self.home, settings.loop_fit / 100.0, force=number >= high,
+        return Lure(self.home, settings.loop_fit / 100.0, force=not by_hand and number >= high,
                     tint=settings.loop_tint / 100.0)  # fmt: skip
 
 
 __all__ = [
     "AUTO",
+    "AUTO_LOOP",
     "DIVE",
     "DIVE_THREADS",
     "LIVE",
     "LOOP",
+    "MOTION",
     "DiveRecord",
     "Lure",
     "MATCHING",
@@ -886,5 +931,6 @@ __all__ = [
     "blank_picture",
     "centered_crop",
     "centered_crops",
+    "find_tile",
     "picture_size",
 ]

@@ -41,7 +41,7 @@ import numpy as np
 from skitter.core.imaging import IMAGE_EXTENSIONS
 from skitter.core.tiles.ingest import THUMB, Thumbnail, load_thumbnails
 
-OK, FAILED, MISSING = 1, 2, 3
+OK, FAILED, MISSING, SESSION = 1, 2, 3, 4  # SESSION: add_session_photo's, never stored
 _COMMIT_EVERY = 2048
 
 _SCHEMA = """
@@ -460,6 +460,23 @@ class TileLibrary:
 
     def paths(self, slots) -> list[str]:
         return [self._paths[i] for i in np.asarray(slots, dtype=np.int64)]
+
+    def add_session_photo(self, path: str, thumbnail: Thumbnail) -> int:
+        """A photo that isn't the library's, for tiles to show until the library next
+        reloads: its slot (past all others, no row: nothing is stored, nothing searches it,
+        and an update may reuse the slot, so hold the library still while it is in use)."""
+        slot = len(self.status)
+        self._paths.append(path)
+        self.width = np.append(self.width, thumbnail.width)
+        self.height = np.append(self.height, thumbnail.height)
+        height, width = thumbnail.pixels.shape[:2]
+        self.thumb_size = np.vstack([self.thumb_size, [width, height]])
+        self.status = np.append(self.status, np.int8(SESSION))
+        self._row = np.append(self._row, False)
+        self.in_use = np.append(self.in_use, False)
+        self._open_thumbs(slot + 1)
+        self._thumbs[slot, :height, :width] = thumbnail.pixels
+        return slot
 
     def counts(self) -> dict[str, int]:
         return {
