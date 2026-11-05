@@ -225,14 +225,17 @@ class DiveTimeline:
     The whole record from its first level, or span (first, last): its levels from first
     to last (ending at rest on last, or, a closed loop's way back from it in the span,
     once that dive has landed); or with loop, one pass of its closed loop:
-    frame(duration) is then frame(0), for seamless video. viewport: the view's pixels.
+    frame(duration) is then frame(0), for seamless video. With repeat, span's dives and
+    then its closed loop's on and on (time has no end: past duration it goes round from
+    the loop's first level). viewport: the view's pixels.
     """
 
-    def __init__(self, record, settings, viewport, loop: bool = False, span=None):
+    def __init__(self, record, settings, viewport, loop: bool = False, span=None,
+                 repeat: bool = False):  # fmt: skip
         self.settings = settings
         self.viewport = np.asarray(viewport, np.float64)
-        self.loop = loop
-        if loop and not record.closed:
+        self.loop = loop or repeat
+        if self.loop and not record.closed:
             raise ValueError("only a closed loop has a pass to play")
         if loop:
             first, last = record.loop_start, len(record.levels) - 1
@@ -246,10 +249,13 @@ class DiveTimeline:
                 pick, then = -1, -1
             steps.append(TimelineStep(p, pick, then, start))
             start += self._seconds(pick >= 0)
-        if not loop and steps and steps[-1].next >= 0:  # a closed loop's way back, at rest
+        if not self.loop and steps and steps[-1].next >= 0:  # a closed loop's way back, at rest
             steps.append(TimelineStep(steps[-1].next, -1, -1, start))
             start += self._seconds(False)
         self.steps, self.duration = steps, start
+        self.loop_at = 0.0  # when the loop's first level starts (what going round returns to)
+        if self.loop:
+            self.loop_at = next(s.start for s in steps if s.position == record.loop_start)
         self._dives: dict = {}  # step -> its DiveMotion
 
     def _phases(self) -> list[float]:
@@ -261,11 +267,15 @@ class DiveTimeline:
         phases = self._phases()
         return sum(phases) if dives else phases[0] + phases[1]
 
+    def wrapped(self, t: float) -> float:
+        """t within the timeline: looping, gone round as often as it takes."""
+        if self.loop and t >= self.duration > self.loop_at:
+            t = self.loop_at + (t - self.loop_at) % (self.duration - self.loop_at)
+        return min(max(t, 0.0), self.duration)
+
     def _step_at(self, t: float) -> tuple[int, float]:
         """(step, seconds into it) at t (looping: around; else clamped to the ends)."""
-        if self.loop and self.duration > 0:
-            t %= self.duration
-        t = min(max(t, 0.0), self.duration)
+        t = self.wrapped(t)
         starts = [step.start for step in self.steps]
         k = max(0, int(np.searchsorted(starts, t, side="right")) - 1)
         return k, t - self.steps[k].start

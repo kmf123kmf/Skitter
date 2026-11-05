@@ -10,6 +10,7 @@ from PIL import Image
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
+from skitter.core import infinite
 from skitter.core.infinite import (
     SOURCE_PX_PER_TILE,
     DiveRecord,
@@ -306,6 +307,37 @@ def test_a_loop_lures_home_back_within_its_range(library):
     assert numbered.number == session.levels
 
 
+@pytest.mark.parametrize("pile", [{}, {"spread": 0.8}])
+def test_home_is_placed_where_it_shows_not_buried_in_a_pile(library, pile):
+    plan = SlicingPlan()
+    plan.slicers["pile"].update(rotation=20.0, **pile)
+    settings = InfiniteSettings(columns=12, max_uses=0, slicer="pile")
+    session = InfiniteSession(library, settings, plan, seed=4)
+    home, tile = session.random_tile(), session.random_tile()
+    level = session.level(session.picture(tile), lure=Lure(home, 0.0, force=True), source=tile)
+    scene = level.scene
+    assert level.home >= 0 and scene.slot[level.home] == home.slot
+    best = np.sort(scene.visible_share)[-1]
+    assert scene.visible_share[level.home] >= min(0.98, best)  # as much in view as any can be
+
+
+def test_a_level_counts_home_matched_by_chance_only_on_top(library, monkeypatch):
+    plan = SlicingPlan()
+    plan.slicers["pile"].update(rotation=20.0)
+    settings = InfiniteSettings(columns=12, max_uses=0, slicer="pile")
+    session = InfiniteSession(library, settings, plan, seed=4)
+    home, tile = session.random_tile(), session.random_tile()
+    lure = Lure(home, 0.0, place=False)
+
+    def level(pick):
+        monkeypatch.setattr(infinite, "find_tile", lambda scene, _: int(pick(scene.visible_share)))
+        return session.level(session.picture(tile), lure=lure, source=tile)
+
+    assert level(np.argmin).home == -1
+    on_top = level(np.argmax)
+    assert on_top.home >= 0 and on_top.home_fit == 1.0
+
+
 def test_a_record_replays_its_dives_and_records_others_from_there():
     from skitter.core.infinite import RecordedLevel
 
@@ -434,6 +466,26 @@ def test_a_timeline_plays_a_record_seamlessly_from_level_to_level(library):
     with pytest.raises(ValueError):
         DiveTimeline(DiveRecord(), settings, viewport, loop=True)
 
+    # Repeating: the way there once, then round the loop for good.
+    record.recording = (0, 2)
+    assert record.repeats
+    again = DiveTimeline(record, settings, viewport, span=(0, 2), repeat=True)
+    assert [s.position for s in again.steps] == [0, 1, 2] and again.loop_at == pytest.approx(4.5)
+    assert again.position_at(1.0) == 0 and again.position_at(5.0) == 1
+    assert again.position_at(13.5 + 0.1) == 1  # the way back: the loop's first, not the start
+    assert again.position_at(13.5 + 5.0) == 2 and again.position_at(13.5 + 9.1) == 1
+    with pytest.raises(ValueError):
+        DiveTimeline(DiveRecord(), settings, viewport, repeat=True)
+
+    # What a dive elsewhere would lose: the way back counts, even from the last level.
+    assert record.recorded_dives() == 3
+    assert record.cut_by(2, 99) == 1 and record.cut_by(1, 99) == 2 and record.cut_by(0, 99) == 3
+    assert record.cut_by(2, record.picks[2]) == 0  # the record's own: replayed, nothing lost
+    record.recording = (1, 2)
+    assert record.repeats and record.cut_by(0, 99) == 2
+    record.recording = (2, 2)  # it holds only part of the loop: played once
+    assert not record.repeats
+
 
 def test_levels_can_search_with_fewer_threads(library):
     """While the UI animates, faiss searches with fewer threads (set for the calling thread)."""
@@ -519,6 +571,7 @@ def test_closing_the_window_drops_what_it_queued(qapp, photos, tmp_path):
     win.set_settings(win.settings)
     win.show()
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     win.textures.wait()
     run_animations(win.canvas, 1.0)
@@ -546,6 +599,7 @@ def test_window_starts_dives_and_stops(window, qapp):
     assert win.panel.currentIndex() == SETUP and win.forms["mosaic"].isVisible()
     assert win.prompt.isVisible() and "90 photos" in win.library_label.text()
     win.start_buttons["photo"].click()
+    win.start_button.click()
     assert win.running and win.panel.currentIndex() == SESSION and not win.prompt.isVisible()
     assert not win.forms["mosaic"].isVisible() and not win.forms["matching"].isVisible()
     assert win.forms["dive"].isVisible() and not win.slicer_form.isVisible()  # pacing only
@@ -623,6 +677,7 @@ def test_the_library_is_the_main_apps_and_only_shows_before_a_session(window, qa
     # A running session searches the photos it started with: the library is out of reach.
     win.panel.setCurrentIndex(SETUP)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     assert win.panel.currentIndex() == SESSION and not panel.isVisible()
     assert panel.locked
     root = panel.folders.topLevelItem(0)
@@ -679,7 +734,9 @@ def test_the_infinite_panel_fits_its_width(windows_font, window, qapp):
     win.setup_status.setText("Opening the library: this starts once it's open…")
     win.library_label.setText("No photos yet: add a folder to begin.")
     assert overflowing() == []
-    win.start_buttons["photo"].click()
+    win.start_buttons["photo"].click()  # picked: what to do next, said
+    assert win.setup_status.text() and overflowing() == []
+    win.start_button.click()
     wait_for_level(win, qapp)
     assert overflowing() == []
     win.explore_button.click()
@@ -700,6 +757,7 @@ def test_every_dive_style_moves_the_others_and_keeps_the_tile(window, qapp):
     win = window
     win.settings.update(dive_style="random")
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     scene = win.level.scene
@@ -728,6 +786,7 @@ def test_every_dive_style_moves_the_others_and_keeps_the_tile(window, qapp):
 def test_a_dive_waits_for_matching_on_the_photo(window, qapp):
     win = window
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     level = win.level
@@ -756,6 +815,7 @@ def test_a_dive_makes_the_next_levels_tile_layer_while_it_moves(window, qapp):
     stalled a frame about 50 ms). Stopping mid-dive lets go of it."""
     win = window
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.dive_into(0)
@@ -794,6 +854,7 @@ def test_a_random_mosaic_start_fills_the_view_and_dives_once_prepared(window, qa
     win = window
     win.set_settings(win.settings)
     win.start_buttons["mosaic"].click()
+    win.start_button.click()
     # The mosaic shows at once, filling the view; the index builds meanwhile.
     level = win.level
     assert level is not None and level.number == 0 and win.photo_layer is None
@@ -801,14 +862,12 @@ def test_a_random_mosaic_start_fills_the_view_and_dives_once_prepared(window, qa
     assert level.ctx.width / level.ctx.height == pytest.approx(view, rel=0.01)
     assert win._job_kind == "prepare" and not win.busy and win.progress.isVisibleTo(win)
     assert "Random mosaic" in win.level_label.text()
-    assert win.new_start_button.isVisibleTo(win) and win.new_start_button.isEnabled()
 
     # A dive while preparing plays, and its matching waits until the index is ready.
     i = len(level.scene) // 2
     sx, sy = win.canvas.camera.world_to_screen(*level.scene.center[i])
     win._on_double_click(float(sx), float(sy))
     assert win.dive is not None and win._queued is not None
-    assert not win.new_start_button.isEnabled()
     run_animations(win.canvas, 1.0)
     assert win.dive.done and win.level is level  # holding on the photo
     wait_for_level(win, qapp)  # prepared: the queued dive starts matching
@@ -817,31 +876,114 @@ def test_a_random_mosaic_start_fills_the_view_and_dives_once_prepared(window, qa
     wait_for_level(win, qapp)
     assert win.level.number == 1 and win.dive is None
     run_animations(win.canvas, 1.0)
-
-    # New Start: another random mosaic, at once; only its tiles' variety is prepared (the
-    # index is kept), even when New Start is pressed again meanwhile.
-    assert win.new_start_button.isEnabled()
-    win.ask_new_start("mosaic")
-    assert win.level.number == 0 and win._job_kind == "prepare" and win.level.variety is None
-    first = win.level.scene.slot.copy()
-    win.ask_new_start("mosaic")
-    assert not np.array_equal(win.level.scene.slot, first)
-    for _ in range(2):
-        wait_for_level(win, qapp)
-    assert win.level.variety is not None and win._job is None
     assert win.status.text() == "Ready."
 
 
-def test_new_start_shows_another_random_photo(window, qapp):
+def test_a_pick_only_shows_and_start_starts(window, qapp):
+    from skitter.ui.infinite_window import SESSION, SETUP
+
     win = window
+    assert not win.start_button.isEnabled()  # nothing to go from yet
     win.start_buttons["photo"].click()
+    assert not win.running and win.panel.currentIndex() == SETUP and win._job is None
+    assert win.level is None and win.photo_layer is not None and win.crop.isVisibleTo(win)
+    assert win.start_button.isEnabled() and not win.prompt.isVisibleTo(win)
+
+    win.start_buttons["mosaic"].click()  # another pick: in place of the last
+    first = win.level.scene.slot.copy()
+    assert not win.running and win.photo_layer is None and not win.crop.isVisibleTo(win)
+    win.start_buttons["mosaic"].click()
+    assert not np.array_equal(win.level.scene.slot, first) and win._job is None
+    sx, sy = win.canvas.camera.world_to_screen(*win.level.scene.center[0])
+    win._on_double_click(float(sx), float(sy))  # no dives yet, and no home: it isn't on
+    win.set_home()
+    assert win.dive is None and win.record.home is None
+
+    first = win.level.scene.slot.copy()
+    win.settings.columns = 8
+    win._on_setting_changed("columns")  # it follows the look
+    assert len(win.level.scene.slot) != len(first) and not win.running
+
+    win.start_button.click()
+    assert win.running and win.panel.currentIndex() == SESSION and win._job_kind == "prepare"
+    assert win.infinite.layout.columns == 8
+    wait_for_level(win, qapp)
+    win.ask_end_session()
+    assert win.panel.currentIndex() == SETUP and not win.start_button.isEnabled()
+    assert win.infinite is None and win.level is None
+
+
+def test_a_random_photo_starts_from_its_crop_with_home_set_to_it(window, qapp):
+    win = window
+    win.settings.update(tile_aspect=1.5, fade_seconds=0.05)
+    win.set_settings(win.settings)
+    win.start_buttons["photo"].click()
+    pick = win._pick
+    height, width = pick.image.shape[:2]
+    left, top, wide, high = win.crop.crop_box()
+    assert wide / high == pytest.approx(1.5, abs=0.02)  # the largest that fits, centered
+    assert wide == pytest.approx(width, abs=2) or high == pytest.approx(height, abs=2)
+
+    win.settings.tile_aspect = 1.0
+    win._on_setting_changed("tile_aspect")  # another shape: the box follows
+    left, top, wide, high = win.crop.crop_box()
+    assert win._pick is pick and wide == pytest.approx(high, abs=1)
+    win.crop.set_box((left, top, left + wide // 2, top + wide // 2))  # moved by hand
+    win._on_setting_changed("columns")  # the same shape: it stays
+    left, top, wide, high = win.crop.crop_box()
+    assert win._pick is pick and wide == high
+
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
-    first = win.level
-    win.ask_new_start("photo")
-    assert win.level is None and win.photo_layer.instances["alpha"][0] == 1
+    tile = win.level.source
+    assert win.record.home == tile and win.record.loop_start == 0 and tile.slot == pick.slot
+    assert tile.rect == pytest.approx((left / width, top / height, (left + wide) / width,
+                                       (top + high) / height))  # fmt: skip
+    assert win.level.picture.shape[0] == pytest.approx(win.level.picture.shape[1], abs=1)
+
+
+def test_ending_a_session_takes_homes_outline_with_it(window, qapp, home_fits):
+    win = window
+    win.settings.update(fade_seconds=0.05)
+    win.set_settings(win.settings)
+    win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
-    assert win.level is not first and win.level.number == 2  # the session counts on
+    run_animations(win.canvas, 1.0)
+    by_hand(win, qapp, not_home(win))
+    outline = win._highlight
+    assert outline is not None
+    win.ask_end_session()
+    assert win._highlight is None and outline not in win.canvas.layers
+
+
+def test_home_in_its_own_first_mosaic_closes_nothing(window, qapp):
+    win = window
+    win.settings.update(fade_seconds=0.05)
+    win.set_settings(win.settings)
+    win.start_buttons["photo"].click()
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    scene, home = win.level.scene, win.record.home
+    top = int(np.argmax(scene.visible_share))
+    scene.slot[top], scene.rect[top], scene.mirrored[top] = home.slot, home.rect, False
+    assert win._home_tile() == top  # its photo, matched into its own mosaic
+    win._refresh()
+    win._mark_home()
+    assert not win.can_close_loop and win._highlight is None
+    assert "Home set" in win.loop_label.text()
+    by_hand(win, qapp, top)
+    assert not win.record.closed and win._pos == 1
+
+
+def test_the_library_changing_drops_a_pick(window, qapp):
+    win = window
+    win.start_buttons["photo"].click()
+    win.app_session.library_changed.emit()
+    assert win._pick is None and win.infinite is None and win.photo_layer is None
+    assert not win.crop.isVisibleTo(win) and not win.start_button.isEnabled()
 
 
 def test_diving_on_and_on_keeps_no_level_behind(window, qapp):
@@ -871,6 +1013,7 @@ def test_diving_on_and_on_keeps_no_level_behind(window, qapp):
     win = window
     win.set_settings(win.settings)
     win.start_buttons["mosaic"].click()
+    win.start_button.click()
     counts = []
     for _ in range(6):
         wait_for_level(win, qapp)
@@ -917,8 +1060,10 @@ def test_continuous_auto_dive_zooms_on_from_mosaic_to_mosaic_seamlessly(window, 
     assert not win.forms["dive"].is_shown("dive_style")
     assert win.forms["dive"].is_shown("flow_seconds")
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
+    win.clear_home()  # a loop closing would stop it
 
     # Each switch of level: the next mosaic's tiles, shown inside the tile, stay put on
     # screen as they move into their own world; so do this mosaic's, under them, fading.
@@ -974,6 +1119,7 @@ def test_continuous_dives_keep_the_last_mosaic_until_the_new_one_covers_the_view
     win.settings.update(motion="flow", flow_seconds=2.0, flow_path="center")
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
 
@@ -985,6 +1131,7 @@ def test_continuous_dives_keep_the_last_mosaic_until_the_new_one_covers_the_view
                                             axis=1)))  # fmt: skip
 
     win.pick_tile = pick
+    win.clear_home()  # a loop closing would stop it
     win.auto_button.click()
     seen = {"uncovered": False, "faded": False}
     end = time.perf_counter() + 30
@@ -1012,6 +1159,7 @@ def test_continuous_auto_dive_makes_the_next_level_ahead_and_stages_it(window, q
     win.settings.update(motion="flow", flow_seconds=3.0)
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.auto_button.click()
@@ -1055,6 +1203,7 @@ def pile_flow(win, qapp, **pile):
     win.settings.update(motion="flow", flow_seconds=2.0, slicer="pile", flow_mosaic=35.0)
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
 
@@ -1136,6 +1285,7 @@ def test_continuous_auto_dive_holds_for_a_mosaic_not_made_yet(window, qapp):
     win.settings.update(motion="flow", flow_seconds=2.0)
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     match = win._flow_match
@@ -1170,6 +1320,7 @@ def test_continuous_by_hand_creeps_in_and_dives_where_double_clicked(window, qap
     win.settings.update(motion="flow", flow_seconds=2.0, columns=12, flow_mosaic=100.0)
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 0.25)  # the photo fades into the mosaic
     fit = win.canvas.camera.zoom
@@ -1224,6 +1375,7 @@ def test_continuous_auto_dive_picks_the_next_tile_early_and_heads_on_through_the
     win.settings.update(motion="flow", flow_seconds=2.0)
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.auto_button.click()
@@ -1253,6 +1405,7 @@ def test_turning_continuous_auto_dive_off_lets_its_leg_reach_the_mosaic(window, 
     win.settings.update(motion="flow", flow_seconds=2.0)
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.auto_button.click()
@@ -1284,6 +1437,7 @@ def test_auto_dive_dwells_zooms_in_rests_and_dives_on_and_on(window, qapp):
                         fade_seconds=0.1)  # fmt: skip
     win.set_settings(win.settings)
     win.start_buttons["mosaic"].click()
+    win.start_button.click()
     assert not win.auto
     win.textures.wait()
     level = win.level
@@ -1323,6 +1477,7 @@ def test_auto_dive_loops_back_home_and_replays_each_pass(window, qapp):
                         look_ahead=2)  # fmt: skip
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.set_home()
@@ -1342,32 +1497,26 @@ def test_auto_dive_loops_back_home_and_replays_each_pass(window, qapp):
     assert win.level.number == loop[0].number and record.passes == 1  # back at the first
     assert "Closed loop of" in win.loop_label.text()
 
-    # Every pass replays the same levels and tiles: nothing is matched again.
+    assert not win.auto and win.explore_button.isChecked()  # it made the loop, and stops
+
+    # Replay goes round it, the same levels and tiles, nothing matched, until stopped.
+    run_auto(win, qapp, 10.0, until=lambda: not win.busy)
     matched = win.infinite.levels
     visited = []
 
     def seen():
-        if not visited or visited[-1] is not win.level:
-            visited.append(win.level)
-        return record.passes >= 2 and win._pos == first
+        if not visited or visited[-1] != win.level.number:
+            visited.append(win.level.number)
+        return len(visited) > 2 * len(loop) + 1
 
-    run_auto(win, qapp, 30.0, until=seen)
-    assert record.passes == 2 and win.infinite.levels == matched
-    assert [lv.number for lv in visited] == [lv.number for lv in loop + loop[:1]]
-
-    # Replayed, the whole record plays, the loop's way back last: it rests on its first.
-    win.set_auto(False)
-    run_auto(win, qapp, 10.0, until=lambda: not win.busy)
-    labels = []
-    say = win.replay_label.setText
-    win.replay_label.setText = lambda text: (labels.append(text), say(text))  # its last is brief
-
-    assert record.recording == (0, len(record.levels) - 1)
+    assert record.recording == (0, len(record.levels) - 1) and record.repeats
     win.toggle_replay()
-    run_auto(win, qapp, 30.0, until=lambda: win._replay is None)
-    steps = len(record.levels) + 1
-    assert win._replay is None and win._pos == first and win.infinite.levels == matched
-    assert f"Replay: mosaic {steps} of {steps}" in labels  # the loop's first, again, last
+    run_auto(win, qapp, 40.0, until=seen)
+    assert win._replay is not None and win.infinite.levels == matched
+    assert set(visited) == {lv.number for lv in loop}
+    win.explore_button.click()  # stopped: exploring from the mosaic shown, nothing lost
+    assert win._replay is None and not win.auto and win.explore_button.isChecked()
+    assert record.closed and win._pos >= 0
 
     # A dive by hand elsewhere records from there on: the loop is open again.
     pick = record.picks[win._pos]
@@ -1410,9 +1559,12 @@ def test_a_loop_closes_by_hand_whenever_home_turns_up(window, qapp, home_fits):
     win.settings.update(fade_seconds=0.05, loop_dives=(9, 9))  # no count by hand
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     record = win.record
+    assert record.home == win.level.source  # its start, to begin with
+    win.clear_home()
     assert not win.close_button.isEnabled() and "No home" in win.loop_label.text()
     win.home_button.click()
     assert record.home == win.level.source and record.loop_start == 0
@@ -1448,12 +1600,41 @@ def test_a_loop_closes_by_hand_whenever_home_turns_up(window, qapp, home_fits):
     assert record.home is None and not record.closed
 
 
+def test_home_buried_by_chance_isnt_there(window, qapp):
+    """Matching may put home's photo under others in a pile: it can't be seen, or clicked."""
+    win = window
+    win.plan.slicers["pile"].update(rotation=20.0)
+    win.settings.update(slicer="pile", fade_seconds=0.05)
+    win.set_settings(win.settings)
+    win.start_buttons["photo"].click()
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    win.set_home()
+    scene, home = win.level.scene, win.record.home
+    buried, top = int(np.argmin(scene.visible_share)), int(np.argmax(scene.visible_share))
+    assert scene.visible_share[buried] < 0.98 <= scene.visible_share[top]
+    win.level.home = -1
+    scene.slot[:] = -1  # only there, under the others
+    scene.slot[buried], scene.rect[buried], scene.mirrored[buried] = home.slot, home.rect, False
+    assert win._home_tile() == -1 and not win.can_close_loop
+    win._remove_highlight()  # (it may have been in this mosaic, by chance, on top)
+    win._mark_home()
+    assert win._highlight is None
+    scene.slot[top], scene.rect[top], scene.mirrored[top] = home.slot, home.rect, False
+    assert win._home_tile() == top  # and on top too: that one
+    win.level.home = buried  # placed there for want of better: it counts
+    scene.slot[top] = -1
+    assert win._home_tile() == buried
+
+
 def test_auto_dive_keeps_to_its_range_when_home_turns_up_early(window, qapp):
     """A small library's mosaic may hold its own photo by chance: too soon to close."""
     win = window
     win.settings.update(loop_dives=(3, 4))
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.set_home()
@@ -1468,11 +1649,81 @@ def test_auto_dive_keeps_to_its_range_when_home_turns_up_early(window, qapp):
     assert win._next_tile() == 0 and len(picks - {0}) > 0  # only in its range is it headed for
 
 
+def recorded(win, qapp, dives: int = 2) -> None:
+    """A session with a recording of dives dives, at rest."""
+    win.settings.update(fade_seconds=0.05, dive_seconds=0.3, dwell_seconds=0.2,
+                        approach_seconds=0.1, pause_seconds=0.0)  # fmt: skip
+    win.set_settings(win.settings)
+    win.start_buttons["photo"].click()
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    win.start_recording()
+    for _ in range(dives):
+        by_hand(win, qapp, 0)
+    win.stop_recording()
+
+
+def stop_mid_way(win, qapp) -> None:
+    """Replay the recording and stop it, in its first mosaic."""
+    win.replay_button.click()
+    run_auto(win, qapp, 20.0, until=lambda: win._replay is None or win._replay.shown >= 0)
+    assert win._replay is not None and "Replay" in win.mode_label.text()
+
+
+def test_explore_during_a_replay_stops_it_and_goes_on_from_there(window, qapp):
+    win = window
+    recorded(win, qapp)
+    record = win.record
+    assert win.explore_button.isEnabled() and win.auto_button.isEnabled()
+    stop_mid_way(win, qapp)
+    assert win.replay_button.isChecked() and win.explore_button.isEnabled()
+    assert not win.steps_button.isEnabled()
+    win.explore_button.click()
+    assert win._replay is None and win.explore_button.isChecked() and not win.auto
+    assert record.recording == (0, 2) and len(record.levels) == 3  # the recording is kept
+    assert win._pos == 0 and win.steps_button.isEnabled()
+
+
+def test_auto_dive_during_a_replay_asks_before_cutting_the_recording(window, qapp):
+    win = window
+    recorded(win, qapp)
+    record = win.record
+    asked = []
+    win._confirm = lambda text, action: (asked.append(action), False)[1]
+    stop_mid_way(win, qapp)
+    win.auto_button.click()  # declined: it stops the replay, and explores
+    assert asked == ["Auto-Dive"] and win._replay is None and not win.auto
+    assert win.explore_button.isChecked() and record.recording == (0, 2)
+    win._confirm = lambda text, action: (asked.append(action), True)[1]
+    win.auto_button.click()
+    assert win.auto and win.auto_button.isChecked() and asked == ["Auto-Dive"] * 2
+
+
+def test_auto_dive_makes_new_dives_never_the_recorded_ones(window, qapp):
+    win = window
+    recorded(win, qapp)
+    win._pos = 0
+    win.level = win.infinite.rebuild(win.record.levels[0])
+    picks = {win._next_tile() for _ in range(30)}
+    assert len(picks) > 1  # picked, not the record's
+
+
+def test_only_a_recording_can_be_replayed(window, qapp):
+    win = window
+    win.start_buttons["photo"].click()
+    win.start_button.click()
+    wait_for_level(win, qapp)
+    run_animations(win.canvas, 1.0)
+    assert not win.replay_button.isEnabled() and "Nothing to play" in win.replay_button.toolTip()
+
+
 def test_home_isnt_placed_with_place_home_off_and_stays_when_auto_dive_is_stopped(window, qapp):
     win = window
     win.settings.update(home_place=False, fade_seconds=0.05)
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.set_home()
@@ -1489,6 +1740,7 @@ def test_a_random_mosaic_cant_be_home_until_a_dive_on(window, qapp):
     win.settings.update(fade_seconds=0.05)
     win.set_settings(win.settings)
     win.start_buttons["mosaic"].click()
+    win.start_button.click()
     run_animations(win.canvas, 0.5)
     assert not win.can_set_home and "dive into a tile first" in win.loop_label.text()
     win.set_home()
@@ -1504,6 +1756,7 @@ def test_a_continuous_loop_closes_and_replays_its_way_back(window, qapp, auto, h
     win.settings.update(motion="flow", flow_seconds=2.0, loop_dives=(2, 2))
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.set_home()
@@ -1532,11 +1785,17 @@ def test_a_continuous_loop_closes_and_replays_its_way_back(window, qapp, auto, h
             seen.append(win._pos)
         return win._replay is None
 
-    win.replay_action.trigger()
+    win.replay_button.click()
     assert not win.steps_button.isEnabled() and "Replay" in win.mode_label.text()
-    run_auto(win, qapp, 40.0, until=done)
-    assert win._replay is None and win.infinite.levels == matched
-    assert seen[-1] == 0 and len(seen) >= len(record.levels) + 1  # the way back, too
+    run_auto(win, qapp, 40.0, until=lambda: done() or len(seen) > 2 * len(record.levels) + 1)
+    assert win._replay is not None and win.infinite.levels == matched  # round until stopped
+    assert 0 in seen[1:] and len(seen) > 2 * len(record.levels)  # the way back, and on
+    assert "Replaying" in win.status.text() and not win.clear_home_button.isEnabled()
+    win.clear_home()  # it would pull the loop from under the replay
+    assert record.home is not None and record.closed
+    win.explore_button.click()
+    run_auto(win, qapp, 15.0, until=lambda: not win.busy)
+    assert win._replay is None and not win.auto
 
 
 def test_switching_motion_keeps_home(window, qapp):
@@ -1544,6 +1803,7 @@ def test_switching_motion_keeps_home(window, qapp):
     win.settings.update(fade_seconds=0.05)
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.set_home()
@@ -1559,6 +1819,7 @@ def test_every_mode_shows_what_applies_and_no_empty_group(window, qapp):
 
     win = window
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     assert not win.auto  # a session opens in Explore
     for motion_button in (win.steps_button, win.flow_button):
@@ -1586,28 +1847,17 @@ def test_nothing_of_a_session_works_before_one_starts(window, qapp):
     assert win._replay is None and not win.running
 
 
-def test_every_start_goes_at_once_and_new_start_offers_them_all(window, qapp, monkeypatch):
+def test_a_cancelled_image_leaves_the_pick_as_it_was(window, qapp, monkeypatch):
     import skitter.ui.infinite_window as module
 
     win = window
-    asked = []
-    monkeypatch.setattr(module, "choose_image", lambda parent, aspect: (
-        asked.append(aspect), picture_image())[1])  # fmt: skip
-    win.settings.update(fade_seconds=0.05)
-    win.set_settings(win.settings)
-    win.start_buttons["image"].click()  # no other step: the image is asked for at once
-    assert asked == [1.0] and win.running
-    wait_for_level(win, qapp)
-    run_animations(win.canvas, 1.0)
-    menu = win.new_start_button.menu()
-    assert [a.text() for a in menu.actions()] == [b.text() for b in win.start_buttons.values()]
-    menu.actions()[1].trigger()  # a random mosaic, from a session of another start
-    assert win.level.number == 0 and win.level.source is None and win.record.home is None
-    wait_for_level(win, qapp)
-    menu.actions()[0].trigger()
-    assert win.level is None and win.record.home is None  # a random photo, matching
-    wait_for_level(win, qapp)
-    assert win.level.number >= 1
+    monkeypatch.setattr(module, "choose_image", lambda parent: None)
+    win.start_buttons["image"].click()  # nothing picked: nothing to go from
+    assert win._pick is None and not win.start_button.isEnabled()
+    win.start_buttons["photo"].click()
+    pick = win._pick
+    win.start_buttons["image"].click()
+    assert win._pick is pick and win.start_button.isEnabled()
 
 
 def test_an_empty_library_says_so_and_can_be_filled_from_setup(window, qapp, tmp_path):
@@ -1626,6 +1876,7 @@ def test_an_empty_library_says_so_and_can_be_filled_from_setup(window, qapp, tmp
 def test_full_screen_says_what_is_being_done(window, qapp):
     win = window
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     win.toggle_full_screen()
     assert win.toast.isVisibleTo(win) and "Explore" in win.toast.text()
@@ -1684,12 +1935,10 @@ def test_a_chosen_image_starts_a_session_with_home_set_and_closes_back_to_it(
     win = window
     win.settings.update(fade_seconds=0.05, tile_aspect=16 / 9)
     win.set_settings(win.settings)
-    chosen = []
-    monkeypatch.setattr(module, "choose_image", lambda parent, aspect: (
-        chosen.append(aspect), None if len(chosen) == 1 else picture_image())[1])  # fmt: skip
-    win.start_buttons["image"].click()  # cancelled: nothing starts
-    assert chosen == [16 / 9] and not win.running
+    monkeypatch.setattr(module, "choose_image", lambda parent: picture_image())
     win.start_buttons["image"].click()
+    assert not win.running and win.crop.crop_box() == (0, 0, 160, 90)  # all of it, 16:9
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     record = win.record
@@ -1704,38 +1953,27 @@ def test_a_chosen_image_starts_a_session_with_home_set_and_closes_back_to_it(
     run_animations(win.canvas, 2.0)
     assert record.closed and win._pos == 0 and win.level.source == record.home
     first = record.home
-    win.ask_new_start("image")  # another image, another session photo
+    win.ask_end_session()
+    win.start_buttons["image"].click()  # another image, another session photo
+    win.start_button.click()
     wait_for_level(win, qapp)
     assert win.record is not record and win.record.home.slot != first.slot
 
 
-def test_the_crop_dialog_keeps_the_shape_and_stays_inside_the_image(window, qapp, monkeypatch):
-    from PySide6.QtWidgets import QDialog, QFileDialog
+def test_choosing_an_image_asks_for_a_file(window, qapp, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog
 
-    from skitter.ui import image_crop
-    from skitter.ui.image_crop import CropDialog, choose_image
+    from skitter.ui import image_choice
+    from skitter.ui.image_choice import choose_image
 
     image = picture_image()
-    dialog = CropDialog(image, 1.0, window)
-    dialog.show()
-    qapp.processEvents()
-    assert dialog.crop().shape[:2] == (90, 90)  # the largest that fits, centered
-    np.testing.assert_array_equal(dialog.crop(), image[:, 35:125])
-    dialog.overlay.set_box((100, 0, 160, 60))  # elsewhere: still all image
-    assert dialog.crop().shape == (60, 60, 4)
-    dialog.close()
-    dialog.deleteLater()
-
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a: ("", ""))
-    assert choose_image(window, 1.0) is None  # no file chosen
+    assert choose_image(window) is None  # no file chosen
     monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *a: ("nothing.png", ""))
-    monkeypatch.setattr(image_crop.QMessageBox, "warning", lambda *a: None)
-    assert choose_image(window, 1.0) is None  # can't be read
-    monkeypatch.setattr(image_crop, "load_image", lambda path: image)
-    monkeypatch.setattr(CropDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
-    assert choose_image(window, 1.0) is None  # cancelled
-    monkeypatch.setattr(CropDialog, "exec", lambda self: QDialog.DialogCode.Accepted)
-    assert choose_image(window, 1.0).shape == (90, 90, 4)
+    monkeypatch.setattr(image_choice.QMessageBox, "warning", lambda *a: None)
+    assert choose_image(window) is None  # can't be read
+    monkeypatch.setattr(image_choice, "load_image", lambda path: image)
+    assert choose_image(window) is image
 
 
 def test_the_timeline_dives_where_auto_dive_does_live(window, qapp):
@@ -1749,6 +1987,7 @@ def test_the_timeline_dives_where_auto_dive_does_live(window, qapp):
                         approach_tiles=2.0)  # fmt: skip
     win.set_settings(win.settings)
     win.start_buttons["mosaic"].click()
+    win.start_button.click()
     starts, landings = [], []  # (record position, view center, zoom)
     dive_into, arrive = win.dive_into, win._arrive
 
@@ -1807,9 +2046,10 @@ def test_replay_plays_the_sessions_dives_again_and_goes_on_from_its_end(window, 
                         pause_seconds=0.0, dive_seconds=0.3)  # fmt: skip
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
-    assert win.recording_group.isVisible() and not win.replay_action.isEnabled()
+    assert win.recording_group.isVisible() and not win.replay_button.isEnabled()
     assert win.record_action.isEnabled() and not win.stop_recording_action.isEnabled()
     assert win.recording_label.text() == "Not recording."
     win.record_action.trigger()  # from the mosaic shown
@@ -1819,10 +2059,10 @@ def test_replay_plays_the_sessions_dives_again_and_goes_on_from_its_end(window, 
     record, matched, last = win.record, win.infinite.levels, win._pos
     assert last == 2 and record.recording == (0, 2) and "Recording: 2 dives" in (
         win.recording_label.text())  # fmt: skip
-    assert win.replay_action.isEnabled()
+    assert win.replay_button.isEnabled()
 
-    win.replay_action.trigger()  # recording stops; the replay plays it
-    assert win._replay is not None and win.replay_action.text() == "Stop Replay" and win.busy
+    win.replay_button.click()  # recording stops; the replay plays it
+    assert win._replay is not None and win.replay_button.isChecked() and win.busy
     assert not record.recording_on and win.replay_progress.isVisible()
     shown = []
 
@@ -1835,7 +2075,7 @@ def test_replay_plays_the_sessions_dives_again_and_goes_on_from_its_end(window, 
     assert win._replay is None and [p for p in shown if p >= 0] == [0, 1, 2]
     assert win.infinite.levels == matched  # made again from the record: nothing matched
     assert win._pos == last and win.level.number == record.levels[last].number
-    assert "done" in win.status.text() and win.replay_action.text() == "Replay"
+    assert "done" in win.status.text() and win.explore_button.isChecked()
     assert win.recording_label.text() == "Recorded: 2 dives"
     level, cam = win.level, win.canvas.camera
     _, fit = cam.fit_params(0, 0, level.ctx.width, level.ctx.height, margin=1.0)
@@ -1864,6 +2104,7 @@ def test_input_on_the_mosaic_or_esc_stops_auto_dive(window, qapp):
     win.settings.update(dwell_seconds=0.0, approach_seconds=5.0)
     win.set_settings(win.settings)
     win.start_buttons["mosaic"].click()
+    win.start_button.click()
     win.set_auto(True)
     qapp.processEvents()
     run_animations(win.canvas, 0.2)
@@ -1889,6 +2130,7 @@ def test_auto_dive_picks_tiles_in_view(window, qapp):
     win.settings.update(columns=12)
     win.set_settings(win.settings)
     win.start_buttons["mosaic"].click()
+    win.start_button.click()
     scene, cam = win.level.scene, win.canvas.camera
     picks = {win.pick_tile() for _ in range(200)}
     assert len(picks) > 20  # anywhere in view
@@ -1907,6 +2149,7 @@ def test_pacing_settings_apply_during_a_session_and_are_kept(window, qapp):
 
     win = window
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     win.forms["auto"].editor("dwell_seconds").widget.setValue(7.5)
     assert win.settings.dwell_seconds == 7.5
@@ -1920,6 +2163,7 @@ def test_settings_persist_between_windows(window, qapp):
     win.settings.update(columns=7, slicer="pile")
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     win.stop()
     other = InfiniteWindow(win.app_session)
@@ -1953,6 +2197,7 @@ def test_the_panel_fits_its_width(window, qapp):
         for state in ("idle", "running"):
             if state == "running":
                 win.start_buttons["photo"].click()
+                win.start_button.click()
                 wait_for_level(win, qapp)
             qapp.processEvents()
             for scroll in win.findChildren(QScrollArea):
@@ -1978,6 +2223,7 @@ def test_what_would_lose_the_recording_asks_first(window, qapp):
     win.settings.update(fade_seconds=0.05)
     win.set_settings(win.settings)
     win.start_buttons["photo"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.start_recording()  # nothing to lose yet: no question
@@ -1987,13 +2233,12 @@ def test_what_would_lose_the_recording_asks_first(window, qapp):
 
     win.start_recording()  # over a recording of 1 dive: asked, declined
     win.ask_end_session()  # End Session…
-    win.ask_new_start("photo")
     win.close()
-    assert asked == ["Record", "End Session", "New Start", "Close"]
+    assert asked == ["Record", "End Session", "Close"]
     assert win.running and win.record.recording == (0, 1) and not win.record.recording_on
 
     # Diving elsewhere from inside the recording would cut it: asked, declined.
-    win.replay_action.trigger()
+    win.replay_button.click()
     run_auto(win, qapp, 30.0, until=lambda: win._replay is None or win._replay.shown >= 0)
     win._on_escape()  # stopped at its first mosaic (it dwells there seconds)
     assert win._pos == 0
@@ -2003,7 +2248,7 @@ def test_what_would_lose_the_recording_asks_first(window, qapp):
     assert asked[-1] == "Dive" and win.dive is None and win.record.recording == (0, 1)
     sx, sy = win.canvas.camera.world_to_screen(*win.level.scene.center[win.record.picks[0]])
     win._on_double_click(float(sx), float(sy))  # the recorded way: replayed, not asked
-    assert asked[-1] == "Dive" and len(asked) == 5 and win.dive is not None
+    assert asked[-1] == "Dive" and len(asked) == 4 and win.dive is not None
     answer["go"] = True
 
 
@@ -2014,6 +2259,7 @@ def test_a_continuous_replay_plays_the_recording_along_its_way(window, qapp):
     win.settings.update(motion="flow", flow_seconds=2.0)
     win.set_settings(win.settings)
     win.start_buttons["mosaic"].click()
+    win.start_button.click()
     wait_for_level(win, qapp)
     run_animations(win.canvas, 1.0)
     win.start_recording()
@@ -2034,7 +2280,7 @@ def test_a_continuous_replay_plays_the_recording_along_its_way(window, qapp):
             seen.append(win._pos)
         return win._replay is None
 
-    win.replay_action.trigger()
+    win.replay_button.click()
     assert win._replay is not None and win._replay.timeline is None and win.busy
     run_auto(win, qapp, 40.0, until=done)
     assert win._replay is None and win._pos == last and "done" in win.status.text()

@@ -1,7 +1,7 @@
 """Infinite Mosaic: dive into any tile, and its photo becomes the next mosaic.
 
 A session keeps its settings (`InfiniteSettings`: tile shape, columns,
-slicer, a few matching rules) from start to end. It starts from a random
+slicer, a few matching rules) from start to end. It starts from a crop of a
 library photo (matched as the first level), or from a random mosaic: random
 photos in the layout, over a canvas of the view's shape (`random_mosaic`,
 level 0, matching nothing; `prepare` builds the search index meanwhile).
@@ -41,14 +41,14 @@ Loops: a dive returns to the picture it started from. Home is a mosaic's
 own tile (Set Home: the mosaic shown, whose picture it is; a chosen image's
 session starts with it set). While home is set, each new level is matched
 with a lure (`Lure`): after the search, home's exact crop is costed against
-every region that shows whole, inside the canvas; where it fits at most Fit
-worse than the region's own best, it is pinned there (so it looks as if it
+the regions inside the canvas that show most (`ON_TOP`); where it fits at most
+Fit worse than the region's own best, it is pinned there (so it looks as if it
 had been matched), unless Place home is off. By hand that goes for every
 level, so a loop closes whenever home turns up and the viewer takes it.
 Auto-dive has a range of dives: it lures from the bottom of Close within on,
 and at the top places home at its best region regardless (`level`,
 `Level.home`). Matching may also put home's exact crop somewhere by itself:
-that counts too. Diving into it closes the loop (`DiveRecord.close_loop`):
+that counts too, if it lies on top. Diving into it closes the loop (`DiveRecord.close_loop`):
 the next level is the loop's first, which every pass then replays as recorded
 (its levels and the tiles dived into), so one pass can be rendered as a
 seamless video.
@@ -87,6 +87,7 @@ from skitter.core.matching.index import rerank
 from skitter.core.matching.matcher import Matcher
 from skitter.core.matching.method import Reporter
 from skitter.core.matching.mosaic import MosaicMethod
+from skitter.core.matching.raster import visible_share
 from skitter.core.matching.result import MatchResult, Progress
 from skitter.core.matching.run import MatchRun
 from skitter.core.matching.targets import FULL_DETAIL, level_weights
@@ -121,6 +122,7 @@ AUTO = ("next_tile", "variety", "dwell_seconds", "approach_seconds", "approach_t
 LOOP = ("home_place", "loop_fit", "loop_tint")
 AUTO_LOOP = ("loop_dives", "look_ahead")  # shown in auto-dive only: by hand, the viewer decides
 LIVE = MOTION + DIVE + AUTO + LOOP + AUTO_LOOP  # settings a running session follows as they change
+ON_TOP = (0.98, 0.9, 0.7, 0.5, 0.0)  # how much of a spot must show for home, tried in turn
 SOURCE_PX_PER_TILE = 16  # least picture pixels across a base tile (4 per cell: full detail)
 MAX_SOURCE_PX = 4096  # longest side a level's picture is read at
 DIVE_THREADS = max(2, (os.cpu_count() or 4) // 4)  # search threads while the UI animates
@@ -362,11 +364,12 @@ def tint_home(scene: MosaicScene, result: MatchResult, home: int, tint: float | 
 
 
 def find_tile(scene: MosaicScene, tile: TileView) -> int:
-    """The first scene index showing exactly this crop (photo, window, mirroring), or -1."""
+    """The scene index showing exactly this crop (photo, window, mirroring), or -1: the
+    one most in view, should it be there twice."""
     same = (scene.slot == tile.slot) & (scene.mirrored == tile.mirrored)
     same &= np.all(np.abs(scene.rect - np.asarray(tile.rect)) < 1e-5, axis=1)
     hits = np.flatnonzero(same)
-    return int(hits[0]) if len(hits) else -1
+    return int(hits[np.argmax(scene.visible_share[hits])]) if len(hits) else -1
 
 
 @dataclass(frozen=True)
@@ -680,6 +683,8 @@ class InfiniteSession:
             tint_home(scene, result, home, tint)
         elif lure is not None:  # matching put home's exact crop somewhere by itself
             home = find_tile(scene, lure.tile)
+            if home >= 0 and scene.visible_share[home] < ON_TOP[0]:
+                home = -1  # under others in a pile: it can't be seen
             fit = 1.0 if home >= 0 else fit  # the best there is, there
         variety = self.variety(scene)  # auto-dive's weights: here, not on the UI thread
         return Level(number, picture, ctx, result, scene, timings, source, home, fit, variety,
@@ -732,17 +737,36 @@ class InfiniteSession:
 
     def _place(self, run: MatchRun, lure: "Lure") -> tuple[int, float]:
         """(region, fit): where the lure's tile goes (pinned on the run; -1: nowhere) and
-        how it fits there (its cost over the region's best). Only regions that show whole,
-        inside the canvas, and of the tile's shape are considered."""
+        how it fits there (its cost over the region's best). Only regions inside the canvas
+        are considered, and of those the ones most in view: home is to be seen, not buried
+        in a pile (ON_TOP). (Not by targets.visible: sampled coarsely, hardly any tile of a
+        pile comes out whole by it, on top or not.)"""
         tile = lure.tile
         regions, ctx = run.regions, run.ctx
         lo, hi = _extent(regions)
         inside = (lo[:, 0] >= 0) & (lo[:, 1] >= 0) & (hi[:, 0] <= ctx.width) & (
             hi[:, 1] <= ctx.height)  # fmt: skip
-        whole = run.targets.visible >= 0.999
+        order = regions.stacking_order()
+        shown = np.empty(len(regions))
+        shown[order] = visible_share(regions.center[order], regions.size[order],
+                                     regions.rotation[order])  # fmt: skip
+        best_region, best_fit = -1, np.inf
+        for least in ON_TOP:
+            best_region, best_fit = self._best_spot(run, lure, inside & (shown >= least))
+            if best_region >= 0:
+                break
+        if best_region < 0 or (best_fit > 1 + lure.tolerance and not lure.force):
+            return -1, best_fit
+        run.pins = Pins(np.array([best_region]), np.array([tile.slot], np.int64),
+                        np.array([tile.rect], np.float32), np.array([tile.mirrored]))  # fmt: skip
+        return best_region, best_fit
+
+    def _best_spot(self, run: MatchRun, lure: "Lure", spots: np.ndarray) -> tuple[int, float]:
+        """(region, fit) of the lure's tile at the best of these regions (-1: none)."""
+        tile = lure.tile
         best_region, best_fit = -1, np.inf
         for cands, regs in run.shapes.values():
-            regs = regs[inside[regs] & whole[regs]]
+            regs = regs[spots[regs]]
             if not len(regs):
                 continue
             cands, ref = cands.with_crops(self.library, [tile.slot], [tile.rect],
@@ -758,10 +782,6 @@ class InfiniteSession:
             k = int(np.argmin(fit))
             if fit[k] < best_fit:
                 best_region, best_fit = int(regs[k]), float(fit[k])
-        if best_region < 0 or (best_fit > 1 + lure.tolerance and not lure.force):
-            return -1, best_fit
-        run.pins = Pins(np.array([best_region]), np.array([tile.slot], np.int64),
-                        np.array([tile.rect], np.float32), np.array([tile.mirrored]))  # fmt: skip
         return best_region, best_fit
 
 
@@ -859,14 +879,22 @@ class DiveRecord:
         return last - first + (1 if first <= back <= last else 0)
 
     def cut_by(self, pos: int, index: int, replays: bool = True) -> int:
-        """Dives of the recording a dive from levels[pos] into tile index would cut away
-        (replays: one the record has is replayed, not cut; continuous legs aren't)."""
-        if self.recording is None or pos >= self.recording[1]:
+        """Dives of the recording a dive from levels[pos] into tile index would cut away,
+        a closed loop's way back too (replays: one the record has is replayed, not cut;
+        continuous legs aren't)."""
+        if self.recording is None or pos > self.recording[1]:
             return 0
         if replays and self.leads_to(pos, index) >= 0:
             return 0
-        first, last = self.recording
-        return self.recorded_dives() if pos < first else last - pos  # before it: all of it
+        first = self.recording[0]
+        return self.recorded_dives() - max(pos - first, 0)  # before it: all of it
+
+    @property
+    def repeats(self) -> bool:
+        """The recording holds a closed loop: Replay goes round it until stopped."""
+        return (self.closed and self.recording is not None
+                and self.recording[0] <= self.loop_start
+                and self.recording[1] == len(self.levels) - 1)  # fmt: skip
 
     def start_loop(self, home: TileView, start: int) -> None:
         """A loop from home, levels[start] (shown, or the next to arrive) being its mosaic."""
